@@ -132,6 +132,15 @@ export const notificationSchema = z.object({
   metadata: z.record(z.string(), z.unknown()),
 });
 
+export const personSchema = z.object({
+  id: z.uuid(),
+  name: z.string(),
+  isSelf: z.boolean(),
+  voiceprints: z.number(),
+  utterances: z.number(),
+  lastHeardAt: z.date().nullable(),
+});
+
 export const contract = {
   me: {
     get: oc.output(
@@ -190,6 +199,33 @@ export const contract = {
   timeline: {
     range: oc.input(range).output(timelineSchema),
   },
+  people: {
+    list: oc.output(z.array(personSchema)),
+    save: oc
+      .input(
+        z.object({
+          id: z.uuid().optional(),
+          name: z.string().trim().min(1).max(120),
+          isSelf: z.boolean().optional(),
+        }),
+      )
+      .output(personSchema),
+    remove: oc.input(z.object({ id: z.uuid() })).output(ok),
+    /**
+     * "This is me" / "This is <name>": learn a voiceprint from an utterance's audio and attribute
+     * the utterance. Give exactly one of personId, newPersonName or asSelf.
+     */
+    enroll: oc
+      .input(
+        z.object({
+          utteranceId: z.uuid(),
+          personId: z.uuid().optional(),
+          newPersonName: z.string().trim().min(1).max(120).optional(),
+          asSelf: z.boolean().optional(),
+        }),
+      )
+      .output(z.object({ personId: z.uuid(), sampleSeconds: z.number() })),
+  },
   bookmarks: {
     create: oc
       .input(z.object({ at: z.date().optional(), note: z.string().max(500).optional() }))
@@ -232,8 +268,12 @@ export type LiveStatus = z.infer<typeof liveStatusSchema>;
 export type Timeline = z.infer<typeof timelineSchema>;
 export type NotificationItem = z.infer<typeof notificationSchema>;
 export type AudioChunk = z.infer<typeof audioChunkSchema>;
+export type Person = z.infer<typeof personSchema>;
 
 /** Realtime events pushed to console/app sockets (`/realtime`). Clients refetch on these. */
 export type RealtimeEvent =
-  | { t: "invalidate"; keys: Array<"status" | "timeline" | "notifications" | "phones"> }
+  | {
+      t: "invalidate";
+      keys: Array<"status" | "timeline" | "notifications" | "phones" | "settings" | "people">;
+    }
   | { t: "hello"; serverTime: number };

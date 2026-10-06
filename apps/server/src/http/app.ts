@@ -32,7 +32,11 @@ app.get("*", async (c) => {
   const path = c.req.path === "/" ? "/index.html" : c.req.path;
   if (path.includes("..")) return c.notFound();
   const file = Bun.file(join(env.WEB_DIST, path));
-  if (await file.exists()) return new Response(file);
+  if (await file.exists()) {
+    // Vite emits content-hashed files under /assets: cache them forever.
+    const cache = path.startsWith("/assets/") ? "public, max-age=31536000, immutable" : "no-cache";
+    return new Response(file, { headers: { "cache-control": cache } });
+  }
   const index = Bun.file(join(env.WEB_DIST, "index.html"));
   if (await index.exists())
     return new Response(index, { headers: { "content-type": "text/html" } });

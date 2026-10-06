@@ -15,6 +15,7 @@
     "sherpa-onnx-node": "1.13.8"
   },
   "devDependencies": {
-    "@types/bun": "1.4.2"
+    "@types/bun": "1.4.2",
+    "@hearloom/audio": "workspace:*"
   }
 }

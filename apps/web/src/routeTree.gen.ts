@@ -14,6 +14,7 @@ import { Route as LoginRouteImport } from './routes/login'
 import { Route as AppIndexRouteImport } from './routes/_app/index'
 import { Route as AppDevicesRouteImport } from './routes/_app/devices'
 import { Route as AppNotificationsRouteImport } from './routes/_app/notifications'
+import { Route as AppPeopleRouteImport } from './routes/_app/people'
 import { Route as AppSettingsRouteImport } from './routes/_app/settings'
 import { Route as AppTimelineRouteImport } from './routes/_app/timeline'
 import { Route as AppUsersRouteImport } from './routes/_app/users'
@@ -42,6 +43,11 @@ const AppNotificationsRoute = AppNotificationsRouteImport.update({
   path: '/notifications',
   getParentRoute: () => AppRoute,
 } as any)
+const AppPeopleRoute = AppPeopleRouteImport.update({
+  id: '/people',
+  path: '/people',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppSettingsRoute = AppSettingsRouteImport.update({
   id: '/settings',
   path: '/settings',
@@ -63,6 +69,7 @@ export interface FileRoutesByFullPath {
   '/login': typeof LoginRoute
   '/devices': typeof AppDevicesRoute
   '/notifications': typeof AppNotificationsRoute
+  '/people': typeof AppPeopleRoute
   '/settings': typeof AppSettingsRoute
   '/timeline': typeof AppTimelineRoute
   '/users': typeof AppUsersRoute
@@ -71,6 +78,7 @@ export interface FileRoutesByTo {
   '/login': typeof LoginRoute
   '/devices': typeof AppDevicesRoute
   '/notifications': typeof AppNotificationsRoute
+  '/people': typeof AppPeopleRoute
   '/settings': typeof AppSettingsRoute
   '/timeline': typeof AppTimelineRoute
   '/users': typeof AppUsersRoute
@@ -82,6 +90,7 @@ export interface FileRoutesById {
   '/login': typeof LoginRoute
   '/_app/devices': typeof AppDevicesRoute
   '/_app/notifications': typeof AppNotificationsRoute
+  '/_app/people': typeof AppPeopleRoute
   '/_app/settings': typeof AppSettingsRoute
   '/_app/timeline': typeof AppTimelineRoute
   '/_app/users': typeof AppUsersRoute
@@ -94,6 +103,7 @@ export interface FileRouteTypes {
     | '/login'
     | '/devices'
     | '/notifications'
+    | '/people'
     | '/settings'
     | '/timeline'
     | '/users'
@@ -102,6 +112,7 @@ export interface FileRouteTypes {
     | '/login'
     | '/devices'
     | '/notifications'
+    | '/people'
     | '/settings'
     | '/timeline'
     | '/users'
@@ -112,6 +123,7 @@ export interface FileRouteTypes {
     | '/login'
     | '/_app/devices'
     | '/_app/notifications'
+    | '/_app/people'
     | '/_app/settings'
     | '/_app/timeline'
     | '/_app/users'
@@ -160,6 +172,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppNotificationsRouteImport
       parentRoute: typeof AppRoute
     }
+    '/_app/people': {
+      id: '/_app/people'
+      path: '/people'
+      fullPath: '/people'
+      preLoaderRoute: typeof AppPeopleRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/_app/settings': {
       id: '/_app/settings'
       path: '/settings'
@@ -187,6 +206,7 @@ declare module '@tanstack/react-router' {
 interface AppRouteChildren {
   AppDevicesRoute: typeof AppDevicesRoute
   AppNotificationsRoute: typeof AppNotificationsRoute
+  AppPeopleRoute: typeof AppPeopleRoute
   AppSettingsRoute: typeof AppSettingsRoute
   AppTimelineRoute: typeof AppTimelineRoute
   AppUsersRoute: typeof AppUsersRoute
@@ -196,6 +216,7 @@ interface AppRouteChildren {
 const AppRouteChildren: AppRouteChildren = {
   AppDevicesRoute: AppDevicesRoute,
   AppNotificationsRoute: AppNotificationsRoute,
+  AppPeopleRoute: AppPeopleRoute,
   AppSettingsRoute: AppSettingsRoute,
   AppTimelineRoute: AppTimelineRoute,
   AppUsersRoute: AppUsersRoute,

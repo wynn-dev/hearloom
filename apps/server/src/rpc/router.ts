@@ -1,11 +1,12 @@
 import { contract } from "@hearloom/api";
 import { schema } from "@hearloom/db";
 import { implement, ORPCError } from "@orpc/server";
-import { and, asc, desc, eq, gte, isNull, lt, lte, or, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, isNull, lt, lte, max, or, sql } from "drizzle-orm";
 import { type AuthSession, getSession } from "../auth";
 import { db } from "../db";
 import { chunkUrl } from "../http/media";
 import { isPhoneOnline } from "../ingest/phones";
+import { livePipeline } from "../live/host";
 import { notify, recordFeedback } from "../notify/gateway";
 import { invalidate } from "../realtime";
 import { getSettings, updateSettings } from "../settings";
@@ -22,6 +23,7 @@ const {
   utterances,
   soundEvents,
   people,
+  voiceprints,
 } = schema;
 
 export interface RpcContext {
@@ -74,6 +76,37 @@ async function listWearables(userId: string) {
     .from(wearables)
     .where(eq(wearables.userId, userId))
     .orderBy(desc(wearables.lastSeenAt));
+}
+
+async function listPeople(userId: string) {
+  const rows = await db
+    .select({
+      id: people.id,
+      name: people.name,
+      isSelf: people.isSelf,
+    })
+    .from(people)
+    .where(eq(people.userId, userId))
+    .orderBy(desc(people.isSelf), asc(people.name));
+  const prints = await db
+    .select({ personId: voiceprints.personId, n: count() })
+    .from(voiceprints)
+    .where(eq(voiceprints.userId, userId))
+    .groupBy(voiceprints.personId);
+  const heard = await db
+    .select({ personId: utterances.personId, n: count(), last: max(utterances.endAt) })
+    .from(utterances)
+    .where(and(eq(utterances.userId, userId), isNull(utterances.supersededAt)))
+    .groupBy(utterances.personId);
+  return rows.map((r) => {
+    const h = heard.find((x) => x.personId === r.id);
+    return {
+      ...r,
+      voiceprints: prints.find((x) => x.personId === r.id)?.n ?? 0,
+      utterances: h?.n ?? 0,
+      lastHeardAt: h?.last ?? null,
+    };
+  });
 }
 
 export const router = authed.router({
@@ -360,6 +393,95 @@ export const router = authed.router({
           confidence: s.confidence,
         })),
       };
+    }),
+  },
+
+  people: {
+    list: authed.people.list.handler(({ context }) => listPeople((context as Ctx).userId)),
+    save: authed.people.save.handler(async ({ context, input }) => {
+      const { userId } = context as Ctx;
+      if (input.isSelf) {
+        // Only one "me": unset the flag elsewhere first.
+        await db.update(people).set({ isSelf: false }).where(eq(people.userId, userId));
+      }
+      let id = input.id;
+      if (id) {
+        const [row] = await db
+          .update(people)
+          .set({
+            name: input.name,
+            ...(input.isSelf !== undefined ? { isSelf: input.isSelf } : {}),
+          })
+          .where(and(eq(people.id, id), eq(people.userId, userId)))
+          .returning({ id: people.id });
+        if (!row) throw new ORPCError("NOT_FOUND");
+      } else {
+        const [row] = await db
+          .insert(people)
+          .values({ userId, name: input.name, isSelf: input.isSelf ?? false })
+          .returning({ id: people.id });
+        id = row!.id;
+      }
+      invalidate(userId, ["people"]);
+      const person = (await listPeople(userId)).find((p) => p.id === id);
+      if (!person) throw new ORPCError("NOT_FOUND");
+      return person;
+    }),
+    remove: authed.people.remove.handler(async ({ context, input }) => {
+      const { userId } = context as Ctx;
+      await db.delete(people).where(and(eq(people.id, input.id), eq(people.userId, userId)));
+      livePipeline.voiceprintsChanged(userId);
+      invalidate(userId, ["people"]);
+      return { ok: true as const };
+    }),
+    enroll: authed.people.enroll.handler(async ({ context, input }) => {
+      const { userId, session } = context as Ctx;
+      const choices = [input.personId, input.newPersonName, input.asSelf].filter(
+        (v) => v !== undefined,
+      );
+      if (choices.length !== 1) {
+        throw new ORPCError("BAD_REQUEST", {
+          message: "give one of personId, newPersonName, asSelf",
+        });
+      }
+      let personId = input.personId;
+      if (personId) {
+        const [p] = await db
+          .select({ id: people.id })
+          .from(people)
+          .where(and(eq(people.id, personId), eq(people.userId, userId)));
+        if (!p) throw new ORPCError("NOT_FOUND", { message: "person not found" });
+      } else if (input.asSelf) {
+        const [me] = await db
+          .select({ id: people.id })
+          .from(people)
+          .where(and(eq(people.userId, userId), eq(people.isSelf, true)));
+        personId =
+          me?.id ??
+          (
+            await db
+              .insert(people)
+              .values({ userId, name: session.user.name || "Me", isSelf: true })
+              .returning({ id: people.id })
+          )[0]!.id;
+      } else {
+        personId = (
+          await db
+            .insert(people)
+            .values({ userId, name: input.newPersonName!, isSelf: false })
+            .returning({ id: people.id })
+        )[0]!.id;
+      }
+      let sampleSeconds: number;
+      try {
+        sampleSeconds = await livePipeline.enroll(userId, personId, input.utteranceId);
+      } catch (err) {
+        throw new ORPCError("BAD_REQUEST", {
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+      invalidate(userId, ["people", "timeline"]);
+      return { personId, sampleSeconds };
     }),
   },
 

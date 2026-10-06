@@ -30,6 +30,20 @@ const schema = z.object({
   CHUNK_GAP_MS: z.coerce.number().int().default(2000),
   /** Finalize the open chunk after no frames for this long, so recent audio is playable. */
   CHUNK_IDLE_MS: z.coerce.number().int().default(8000),
+
+  // --- Live pipeline (transcription, sound events, speakers) ---
+  LIVE_PIPELINE: z.enum(["on", "off"]).default("on"),
+  /** auto = Soniox for fresh audio when SONIOX_API_KEY is set, else local Parakeet. */
+  LIVE_ASR: z.enum(["auto", "soniox", "local", "off"]).default("auto"),
+  SONIOX_API_KEY: z.string().optional(),
+  SONIOX_MODEL: z.string().default("stt-rt-v5"),
+  LANGUAGE_HINTS: z.string().default("en,nl"),
+  /** Local model files (pnpm --filter @hearloom/server download-models). Defaults to DATA_DIR/models. */
+  MODELS_DIR: z.string().optional(),
+  /** Cosine similarity needed to attribute speech to an enrolled voice. */
+  SPEAKER_MATCH_THRESHOLD: z.coerce.number().default(0.6),
+  /** Cosine similarity for grouping unknown voices within a conversation. */
+  SPEAKER_CLUSTER_THRESHOLD: z.coerce.number().default(0.6),
 });
 
 export type Env = z.infer<typeof schema>;
@@ -44,3 +58,4 @@ export function loadEnv(source: Record<string, string | undefined> = process.env
 }
 
 export const env = loadEnv();
+export const modelsDir = env.MODELS_DIR ?? `${env.DATA_DIR}/models`;

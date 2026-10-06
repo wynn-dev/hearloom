@@ -24,7 +24,8 @@
     "jose": "6.2.12",
     "mediabunny": "1.61.3",
     "zod": "4.6.5",
-    "@hearloom/audio": "workspace:*"
+    "@hearloom/audio": "workspace:*",
+    "@hearloom/inference": "workspace:*"
   },
   "devDependencies": {
     "@types/bun": "1.4.2",
