@@ -1,9 +1,10 @@
 import { createFileRoute, Outlet, useNavigate, useRouter } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useState } from "react";
 import { AppShell } from "../components/app-shell";
 import { Brand } from "../components/brand";
 import { ErrorNotice, Spinner } from "../components/ui/misc";
 import { authClient, safeRedirect } from "../lib/auth";
+import { queryClient } from "../lib/query";
 import { useRealtime } from "../lib/realtime";
 
 /** Pathless layout for every signed-in page: session gate, realtime socket, app shell. */
@@ -40,8 +41,11 @@ function AppLayout() {
     return <RedirectToLogin />;
   }
 
-  return <SignedIn />;
+  return <SignedIn key={session.data.user.id} userId={session.data.user.id} />;
 }
+
+/** Whose data the query cache holds. */
+let cacheOwner: string | null = null;
 
 /**
  * Navigate to /login exactly once, remembering where we were. (While a navigation is pending the
@@ -62,7 +66,20 @@ function RedirectToLogin() {
   return <FullPageSpinner />;
 }
 
-function SignedIn() {
+function SignedIn({ userId }: { userId: string }) {
+  // A different user is signed in now (e.g. switched accounts in another tab): drop the previous
+  // user's cached data before any page reads it.
+  const [ready, setReady] = useState(cacheOwner === null || cacheOwner === userId);
+  useLayoutEffect(() => {
+    if (cacheOwner !== null && cacheOwner !== userId) queryClient.clear();
+    cacheOwner = userId;
+    setReady(true);
+  }, [userId]);
+  if (!ready) return <FullPageSpinner />;
+  return <SignedInShell />;
+}
+
+function SignedInShell() {
   useRealtime();
   return (
     <AppShell>

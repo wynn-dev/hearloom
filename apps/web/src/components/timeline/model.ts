@@ -215,6 +215,7 @@ export function buildEntries(data: Timeline, filters: Filters): Entry[] {
     if (!shown.has(c.id)) {
       pushGap(c.startedAt.getTime());
       pushConversation(c);
+      lastEnd = Math.max(lastEnd ?? 0, c.endedAt?.getTime() ?? c.startedAt.getTime());
     }
   }
   return entries;

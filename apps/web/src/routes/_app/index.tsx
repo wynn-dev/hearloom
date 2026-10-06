@@ -248,7 +248,7 @@ function StreamsCard({ status, now, tz }: { status: LiveStatus; now: number; tz:
                   <td className="px-4 py-2">
                     <p className="font-medium">{s.wearableName ?? "Unknown pendant"}</p>
                     <p className="text-xs text-ink-3">
-                      via {phoneName.get(s.phoneId) ?? "unknown phone"}
+                      via {(s.phoneId && phoneName.get(s.phoneId)) ?? "unknown phone"}
                     </p>
                   </td>
                   <td className="px-3 py-2">

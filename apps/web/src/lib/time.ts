@@ -88,12 +88,25 @@ function parseDay(day: Day): [number, number, number] {
   return [y, m, d];
 }
 
-/** The instant of local midnight at the start of `day` in `tz` (DST-aware). */
+/** The instant `day` starts in `tz`: local midnight, DST-aware. */
 export function zonedMidnight(day: Day, tz: string): Date {
   const [y, m, d] = parseDay(day);
   const guess = Date.UTC(y, m - 1, d);
   const first = guess - zoneOffset(guess, tz);
-  return new Date(guess - zoneOffset(first, tz));
+  let start = guess - zoneOffset(first, tz);
+  // Where DST starts at midnight (e.g. America/Santiago) 00:00 doesn't exist and `start` lands on the
+  // previous evening; the day then begins at the transition. Find it to the minute.
+  if (dayInZone(start, tz) < day) {
+    let lo = start;
+    let hi = start + 3 * 3_600_000;
+    while (hi - lo > 60_000) {
+      const mid = lo + Math.max(60_000, Math.floor((hi - lo) / 120_000) * 60_000);
+      if (dayInZone(mid, tz) < day) lo = mid;
+      else hi = mid;
+    }
+    start = hi;
+  }
+  return new Date(start);
 }
 
 export function dayInZone(date: Date | number, tz: string): Day {

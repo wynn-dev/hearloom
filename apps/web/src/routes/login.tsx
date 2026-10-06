@@ -38,15 +38,19 @@ function LoginPage() {
     event.preventDefault();
     setBusy(true);
     setError(null);
-    const result = await authClient.signIn.email({ email: email.trim(), password });
-    if (result.error) {
-      setError(result.error.message || result.error.statusText || "Sign-in failed");
+    try {
+      const result = await authClient.signIn.email({ email: email.trim(), password });
+      if (result.error) {
+        setError(result.error.message || result.error.statusText || "Sign-in failed");
+        return;
+      }
+      queryClient.clear();
+      await session.refetch();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Can't reach the server");
+    } finally {
       setBusy(false);
-      return;
     }
-    queryClient.clear();
-    await session.refetch();
-    setBusy(false);
   };
 
   return (

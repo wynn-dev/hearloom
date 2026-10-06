@@ -99,6 +99,8 @@ function UserMenu() {
   const signOut = async () => {
     setOpen(false);
     await authClient.signOut();
+    // Wait until the session store is empty, or /login sees the old session and bounces back.
+    await session.refetch();
     await navigate({ to: "/login" });
     // Clear only once the signed-in pages are unmounted, or their observers refetch (and 401).
     queryClient.clear();

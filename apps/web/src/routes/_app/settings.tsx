@@ -156,7 +156,7 @@ function SettingsForm({ server }: { server: Settings }) {
         // Optimistic: the form's values are what the server will store.
         queryClient.setQueryData(settingsKey, draft);
         setBase(draft);
-        return { previous };
+        return { previous, sent: draft };
       },
       onError: (error, _patch, context) => {
         if (context?.previous) {
@@ -165,13 +165,14 @@ function SettingsForm({ server }: { server: Settings }) {
         }
         toast({ tone: "bad", title: "Settings not saved", description: errorMessage(error) });
       },
-      onSuccess: (saved) => {
+      onSuccess: (saved, _patch, context) => {
         queryClient.setQueryData(settingsKey, saved);
         queryClient.setQueryData(orpc.me.get.queryKey(), (me) =>
           me ? { ...me, settings: saved } : me,
         );
         setBase(saved);
-        setDraft(saved);
+        // Keep edits made while the save was in flight (they stay unsaved against the new base).
+        setDraft((d) => (d === context?.sent ? saved : d));
         setSavedAt(Date.now());
         toast({ tone: "good", title: "Settings saved" });
       },

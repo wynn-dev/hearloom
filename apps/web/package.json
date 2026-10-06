@@ -8,6 +8,7 @@
     "dev": "vite",
     "build": "vite build",
     "typecheck": "tsc -p tsconfig.json",
+    "test": "bun test",
     "preview": "vite preview"
   },
   "dependencies": {
