@@ -20,7 +20,7 @@ packages/shared  Ingest protocol, Omi BLE constants, settings schema
 packages/audio   libopus bindings (bun:ffi), Ogg Opus decoding
 packages/inference  sherpa-onnx models: VAD, sound tagging, voiceprints, local ASR
 sidecars/diarizer   Swift: offline speaker diarization (FluidAudio, Core ML)
-docs/            Protocols (protocol.md), models (models.md), iOS (ios.md), agents (agent.md)
+docs/            design.md (start here), protocol.md, models.md, ios.md, agent.md
 ```
 
 ## Requirements
