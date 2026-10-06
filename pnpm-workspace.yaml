@@ -12,6 +12,7 @@ allowBuilds:
 # Packages newer than pnpm's minimum release age that we deliberately pin.
 minimumReleaseAgeExclude:
   - mediabunny@1.61.3
+  - '@vitejs/plugin-react@6.1.2'
 
 # Keep React Native tooling on the version the Expo SDK ships with.
 overrides:
