@@ -41,14 +41,18 @@ Web console (Vite/TanStack) ── same-origin to server        Hermes agent ─
    re-anchored after mic sleep) and appends every frame to an on-disk journal before sending.
 2. **Phone → server.** `/ingest` WebSocket (protocol v1, `docs/protocol.md`): binary audio batches with
    per-stream sequence numbers. The server fsyncs to a spool, then acks; the phone deletes only acked
-   frames and resends from the last ack after any reconnect. Native code does all of this, so it works
-   when iOS relaunches the app in the background without JS.
+   frames and resends from the last ack after any reconnect. A batch that skips frames is refused
+   (`seq_gap`), so an ack never covers a hole. Native code does all of this, so it works when iOS
+   relaunches the app in the background without JS.
 3. **Chunks.** Spooled frames become Ogg Opus files (no re-encoding; lost packets become TOC-only frames
    so timing holds) at ≤ 60 s or at silence gaps. Crash recovery replays the spool.
-4. **Live pipeline** turns frames into rows within seconds (see models below).
-5. **Refine** runs when a conversation ends (2 min of silence) and replaces live rows (kept, superseded).
+4. **Live pipeline** turns frames into rows within seconds (see models below). Late audio (backlog)
+   joins the closed conversation it falls in; a crashed pipeline restarts and closes what it left open.
+5. **Refine** runs when a conversation ends (2 min of silence) and replaces the live rows it re-derives
+   (kept, superseded); rows without stored audio stay.
 6. **Offline.** Away from the phone, the pendant records to its own flash; the app downloads it on
-   reconnect (raw records persisted first — stock firmware deletes data as it sends).
+   reconnect (raw records persisted first — stock firmware deletes data as it sends — then ADVANCE so
+   the pendant frees them). Recordings from muted periods are dropped.
 
 ## Data model (Postgres)
 
@@ -67,7 +71,7 @@ Pipecat, BDM diarization benchmark) and our own measurements on Omi-style Opus a
 |---|---|---|---|---|
 | VAD | Silero v6 | local (sherpa-onnx) | best noise robustness in independent tests; ~2 ms/s audio | TEN VAD, FireRedVAD |
 | Live ASR | Soniox `stt-rt-v5` (if key) | cloud, ~$0.12/h of speech | per-word EN↔NL language ID, streaming speakers, EU residency, no training; we only stream during speech | MAI-Transcribe-2-Streaming (best English WER, but no diarization/lang tags, preview), AssemblyAI U-3.6, Meta Muse |
-| Local / backlog ASR | Parakeet TDT 0.6B v3 int8 | local | 25 EU languages incl. Dutch (FLEURS-nl 6.4 %), ~0.06× real time | Whisper large-v3 (better Dutch, much slower, hallucinates on noise) |
+| Local / backlog / fallback ASR | Parakeet TDT 0.6B v3 int8 | local | 25 EU languages incl. Dutch (FLEURS-nl 6.4 %), ~0.06× real time | Whisper large-v3 (better Dutch, much slower, hallucinates on noise) |
 | Refine ASR | ElevenLabs Scribe v2 (if key) | cloud, $0.22/h | best Dutch FLEURS (2.5 %), word timestamps, audio-event tags | MAI-Transcribe-2 batch, Soniox async, Gemini 3.5 Transcribe |
 | Diarization | FluidAudio offline (segmentation + embeddings + VBx) | local, Core ML | consistent speakers per conversation; offline beats streaming (~2.5× lower DER) | pyannoteAI (paid), sherpa pyannote-3.0 (outdated) |
 | Speaker ID | 3D-Speaker CAM++ (zh/en) | local | raw cosine separates speakers on Opus audio (same 0.75–0.91, different ≤ 0.51); 28 MB | WeSpeaker ResNet293 (better VoxCeleb EER, but scores overlapped 0.72–0.94 on our audio) |
@@ -75,7 +79,8 @@ Pipecat, BDM diarization benchmark) and our own measurements on Omi-style Opus a
 | Scene captions | Gemini Flash-Lite batch (planned) | cloud, ~$0.02/h | cheapest decent captions | Qwen3-Omni-Captioner on MLX |
 
 Thresholds: speaker match/cluster cosine 0.6; sound events open ≥ 0.45, close after two windows < 0.25.
-Live transcription uses the cloud only if a key is set; everything else runs on the Mac.
+Live transcription uses the cloud only if a key is set (speech a failed Soniox session missed is
+transcribed locally); everything else runs on the Mac.
 
 **Cost** at ~14 h/day (≈170 h of speech/month): Soniox ~$20, Scribe refine ~$37 (optional), local ~$0.
 
