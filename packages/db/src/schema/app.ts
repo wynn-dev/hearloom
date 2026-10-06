@@ -158,6 +158,8 @@ export const voiceprints = pgTable(
     personId: uuid()
       .notNull()
       .references(() => people.id, { onDelete: "cascade" }),
+    /** The utterance it was learned from (re-attributing that utterance replaces it). */
+    utteranceId: uuid().references(() => utterances.id, { onDelete: "set null" }),
     model: text().notNull(),
     embedding: real().array().notNull(),
     sampleSeconds: real().notNull(),

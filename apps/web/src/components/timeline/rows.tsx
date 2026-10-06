@@ -18,6 +18,7 @@ import {
 import { memo, type ReactNode, useEffect, useRef, useState } from "react";
 import { cn } from "../../lib/cn";
 import { formatBytes, formatDuration, formatTime } from "../../lib/time";
+import { IdentifySpeaker } from "../speakers";
 import { Badge } from "../ui/badge";
 import {
   type Bookmark,
@@ -177,12 +178,17 @@ const UtteranceRow = memo(function UtteranceRow({ item, tz }: { item: Utterance;
       tz={tz}
       icon={<span className="size-1.5 rounded-full bg-line-strong" />}
     >
-      <div className="flex flex-wrap items-center gap-1.5">
+      <div className="group flex flex-wrap items-center gap-1.5">
         <span
           className={cn("text-xs font-semibold", item.isWearer ? "text-accent-ink" : "text-ink-2")}
         >
           {speakerOf(item)}
         </span>
+        <IdentifySpeaker
+          utteranceId={item.id}
+          known={item.personId !== null}
+          shortClip={item.endAt.getTime() - item.startAt.getTime() < 1000}
+        />
         {item.lang ? <Badge className="uppercase">{item.lang}</Badge> : null}
         <Badge tone={item.source === "refine" ? "good" : "neutral"}>
           {item.source === "refine" ? "refined" : "live"}

@@ -8,6 +8,13 @@
       "when": 1791277019115,
       "tag": "0000_init",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1791278461975,
+      "tag": "0001_voiceprint_source",
+      "breakpoints": true
     }
   ]
 }

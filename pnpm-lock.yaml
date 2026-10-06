@@ -295,6 +295,9 @@ importers:
       '@hearloom/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@hearloom/inference':
+        specifier: workspace:*
+        version: link:../../packages/inference
       '@hearloom/shared':
         specifier: workspace:*
         version: link:../../packages/shared
@@ -407,6 +410,10 @@ importers:
         version: 4.6.5
 
   packages/audio:
+    dependencies:
+      mediabunny:
+        specifier: 1.61.3
+        version: 1.61.3
     devDependencies:
       '@types/bun':
         specifier: 1.4.2
@@ -434,6 +441,9 @@ importers:
         specifier: 1.13.8
         version: 1.13.8
     devDependencies:
+      '@hearloom/audio':
+        specifier: workspace:*
+        version: link:../audio
       '@types/bun':
         specifier: 1.4.2
         version: 1.4.2

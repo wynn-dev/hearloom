@@ -6,8 +6,9 @@ import { env } from "./env";
 import { app } from "./http/app";
 import type { IngestSocketData } from "./ingest/phones";
 import { dbChunkSink } from "./ingest/sink";
-import { flushAllWriters, ingestHandlers, SPOOL_DIR } from "./ingest/socket";
+import { flushAllWriters, ingestHandlers, SPOOL_DIR, setFrameListener } from "./ingest/socket";
 import { recoverSpool } from "./ingest/stream-writer";
+import { livePipeline } from "./live/host";
 import { startNotificationScheduler, stopNotifications } from "./notify/gateway";
 import { attachRealtimeServer, topicFor } from "./realtime";
 
@@ -71,6 +72,8 @@ const server = Bun.serve<SocketData>({
 
 attachRealtimeServer(server as never);
 startNotificationScheduler();
+livePipeline.start();
+setFrameListener((meta, frames) => livePipeline.push(meta, frames));
 console.log(`[hearloom] listening on http://${env.HOST}:${env.PORT} (public: ${env.PUBLIC_URL})`);
 
 let stopping = false;
@@ -80,6 +83,7 @@ async function shutdown(signal: string) {
   console.log(`[hearloom] ${signal}: flushing audio and shutting down`);
   await server.stop();
   await flushAllWriters();
+  await livePipeline.stop();
   stopNotifications();
   await sql.end({ timeout: 5 });
   process.exit(0);

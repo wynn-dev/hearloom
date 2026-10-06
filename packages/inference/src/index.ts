@@ -15,11 +15,13 @@ export const MODEL_FILES = {
   vad: "silero_vad_v6.onnx",
   tagger: "sherpa-onnx-ced-base-audio-tagging-2024-04-19/model.int8.onnx",
   taggerLabels: "sherpa-onnx-ced-base-audio-tagging-2024-04-19/class_labels_indices.csv",
-  speaker: "wespeaker_en_voxceleb_resnet293_LM.onnx",
+  // 3D-Speaker CAM++ (zh+en, 200k speakers): raw cosine separates speakers well on Opus audio,
+  // unlike WeSpeaker ResNet293 whose raw scores overlapped badly in our tests (docs/models.md).
+  speaker: "3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx",
   parakeetDir: "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8",
 } as const;
 
-export const SPEAKER_MODEL_ID = "wespeaker-resnet293-lm";
+export const SPEAKER_MODEL_ID = "3dspeaker-campplus-zh-en-advanced";
 
 export function modelPath(modelsDir: string, file: string): string {
   const p = join(modelsDir, file);

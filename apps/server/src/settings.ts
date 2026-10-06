@@ -9,6 +9,7 @@ import {
 import { eq } from "drizzle-orm";
 import { db } from "./db";
 import { sendConfigToUser } from "./ingest/phones";
+import { invalidate } from "./realtime";
 
 const cache = new Map<string, Settings>();
 
@@ -32,6 +33,7 @@ export async function updateSettings(userId: string, patch: SettingsPatch): Prom
     .onConflictDoUpdate({ target: schema.userSettings.userId, set: { settings: next } });
   cache.set(userId, next);
   sendConfigToUser(userId, phoneConfig(next));
+  invalidate(userId, ["settings"]);
   return next;
 }
 

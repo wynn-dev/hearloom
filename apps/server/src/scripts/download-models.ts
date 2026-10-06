@@ -35,9 +35,9 @@ const MODELS: Model[] = [
     archive: true,
   },
   {
-    name: "WeSpeaker ResNet293-LM speaker embeddings",
-    url: `${SHERPA}/speaker-recongition-models/wespeaker_en_voxceleb_resnet293_LM.onnx`,
-    check: "wespeaker_en_voxceleb_resnet293_LM.onnx",
+    name: "3D-Speaker CAM++ speaker embeddings (zh+en)",
+    url: `${SHERPA}/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx`,
+    check: "3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx",
   },
   {
     name: "Parakeet TDT 0.6B v3 (local ASR, 25 EU languages)",

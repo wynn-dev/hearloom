@@ -287,14 +287,28 @@ async function onControl(ws: Ws, msg: ClientMessage): Promise<void> {
     }
     case "event": {
       const wearableId = await wearableIdFor(userId, msg.peripheralId);
-      await deviceEvent(ws, msg.kind, msg.at, { value: msg.value ?? null }, wearableId);
       if (msg.kind === "battery" && typeof msg.value === "number" && wearableId) {
+        // The pendant reports battery every ~5 s; only record changes.
+        const [prev] = await db
+          .select({ level: wearables.batteryLevel })
+          .from(wearables)
+          .where(eq(wearables.id, wearableId));
         await db
           .update(wearables)
           .set({ batteryLevel: msg.value, lastSeenAt: new Date() })
           .where(eq(wearables.id, wearableId));
+        if (prev?.level !== msg.value) {
+          await deviceEvent(ws, "battery", msg.at, { value: msg.value }, wearableId);
+        }
         if (msg.peripheralId) void onBattery(userId, msg.peripheralId, msg.value, false);
-      } else if (msg.kind === "charging" && msg.value === true && msg.peripheralId) {
+        invalidate(userId, ["status"]);
+        return;
+      }
+      // Bookmarks get their own table; everything else is a device event.
+      if (msg.kind !== "bookmark") {
+        await deviceEvent(ws, msg.kind, msg.at, { value: msg.value ?? null }, wearableId);
+      }
+      if (msg.kind === "charging" && msg.value === true && msg.peripheralId) {
         void onBattery(userId, msg.peripheralId, 100, true);
       } else if (msg.kind === "bookmark") {
         await db.insert(bookmarks).values({ userId, at: new Date(msg.at), source: "button" });

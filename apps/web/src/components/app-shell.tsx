@@ -5,6 +5,7 @@ import {
   Bell,
   CalendarDays,
   ChevronsUpDown,
+  Contact,
   LogOut,
   Menu,
   SlidersHorizontal,
@@ -25,6 +26,7 @@ const NAV = [
   { to: "/", label: "Now", icon: Activity, exact: true },
   { to: "/timeline", label: "Timeline", icon: CalendarDays, exact: false },
   { to: "/notifications", label: "Notifications", icon: Bell, exact: false },
+  { to: "/people", label: "People", icon: Contact, exact: false },
   { to: "/devices", label: "Devices", icon: Smartphone, exact: false },
   { to: "/settings", label: "Settings", icon: SlidersHorizontal, exact: false },
 ] as const;
