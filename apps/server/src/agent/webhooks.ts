@@ -52,12 +52,15 @@ export async function sendAgentEvent(
       method: "POST",
       headers,
       body,
+      // Don't follow redirects (could point anywhere) or relay response bodies to the caller.
+      redirect: "manual",
       signal: AbortSignal.timeout(10_000),
     });
+    await res.body?.cancel();
     return {
       ok: res.ok,
       status: res.status,
-      error: res.ok ? null : (await res.text()).slice(0, 200),
+      error: res.ok ? null : `HTTP ${res.status}${res.statusText ? ` ${res.statusText}` : ""}`,
     };
   } catch (err) {
     return { ok: false, status: 0, error: err instanceof Error ? err.message : String(err) };

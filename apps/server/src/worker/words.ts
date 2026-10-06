@@ -63,7 +63,9 @@ export function wordsToUtterances(
     }
     const speaker = speakerOf(toAbs(w.start), toAbs(w.end), w.speaker_id);
     const prevWord = cur?.words.filter((x) => x.type === "word").at(-1);
-    if (cur && (speaker !== cur.speaker || (prevWord && w.start - prevWord.end > 1.0))) flush();
+    // Absolute times: silent gaps were cut out of the audio Scribe heard.
+    const pause = prevWord ? toAbs(w.start) - toAbs(prevWord.end) : 0;
+    if (cur && (speaker !== cur.speaker || pause > 1000)) flush();
     cur ??= { words: [], speaker };
     cur.words.push(w);
   }

@@ -31,14 +31,22 @@ export async function scribeTranscribe(
   form.set("diarize", "true");
   form.set("tag_audio_events", "true");
   form.set("timestamps_granularity", "word");
-  form.set("enable_logging", String(opts.enableLogging));
   if (opts.numSpeakers) form.set("num_speakers", String(opts.numSpeakers));
   for (const term of (opts.keyterms ?? []).slice(0, 100)) form.append("keyterms", term);
-  const res = await fetch("https://api.elevenlabs.io/v1/speech-to-text", {
+  // A query parameter (a form field is ignored). `false` = zero retention, enterprise plans only.
+  const url = `https://api.elevenlabs.io/v1/speech-to-text?enable_logging=${opts.enableLogging}`;
+  const res = await fetch(url, {
     method: "POST",
     headers: { "xi-api-key": opts.apiKey },
     body: form,
   });
-  if (!res.ok) throw new Error(`scribe ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  if (!res.ok) {
+    const detail = (await res.text()).slice(0, 300);
+    const hint =
+      !opts.enableLogging && /retention|enterprise|logging/i.test(detail)
+        ? " (zero retention needs an ElevenLabs enterprise plan; set ELEVENLABS_ENABLE_LOGGING=true to allow logging)"
+        : "";
+    throw new Error(`scribe ${res.status}: ${detail}${hint}`);
+  }
   return (await res.json()) as ScribeResult;
 }

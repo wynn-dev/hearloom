@@ -17,9 +17,15 @@ interface Reply {
   error?: string;
 }
 
+/** Generous: FluidAudio runs far faster than real time; a stuck sidecar must not block refine. */
+function timeoutMs(samples: number): number {
+  return 120_000 + (samples / 16_000) * 500;
+}
+
 /**
  * Client for the FluidAudio sidecar (sidecars/diarizer): offline diarization on the Neural Engine.
- * One long-lived process; requests are serialized.
+ * One long-lived process; requests are serialized. A request that times out kills the sidecar (it
+ * restarts on the next request).
  */
 export class Diarizer {
   private proc: Subprocess<"pipe", "pipe", "inherit"> | null = null;
@@ -48,7 +54,13 @@ export class Diarizer {
             buffered = buffered.slice(nl + 1);
             nl = buffered.indexOf("\n");
             if (!line.startsWith("{")) continue;
-            const reply = JSON.parse(line) as Reply;
+            let reply: Reply;
+            try {
+              reply = JSON.parse(line) as Reply;
+            } catch {
+              console.warn(`[diarizer] unparseable reply: ${line.slice(0, 200)}`);
+              continue;
+            }
             if (reply.ready === true) resolve();
             else if (reply.ready === false)
               reject(new Error(reply.error ?? "diarizer failed to start"));
@@ -75,11 +87,17 @@ export class Diarizer {
       const path = join(tmpdir(), `hearloom-diar-${id}.f32`);
       await Bun.write(path, new Uint8Array(samples.buffer, samples.byteOffset, samples.byteLength));
       try {
+        const proc = this.proc!;
+        let timer: ReturnType<typeof setTimeout> | undefined;
         const reply = await new Promise<Reply>((resolve) => {
           this.waiters.set(id, resolve);
-          this.proc!.stdin.write(`${JSON.stringify({ id, audio: path })}\n`);
-          this.proc!.stdin.flush();
-        });
+          timer = setTimeout(() => {
+            resolve({ error: "diarizer timed out" });
+            proc.kill();
+          }, timeoutMs(samples.length));
+          proc.stdin.write(`${JSON.stringify({ id, audio: path })}\n`);
+          proc.stdin.flush();
+        }).finally(() => clearTimeout(timer));
         if (reply.error) throw new Error(reply.error);
         return reply.segments ?? [];
       } finally {

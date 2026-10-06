@@ -178,7 +178,7 @@ function buildServer(userId: string, scopes: Scope[]): McpServer {
     "get_timeline",
     {
       description:
-        "Everything heard in a time range (max 7 days): speech with speakers, sound events [x] and ongoing states {x}, grouped by conversation. Compact one-line-per-event format.",
+        "Everything heard in a time range (max 7 days): speech with speakers, sound events [x], ongoing states {x} and bookmarks, in time order under a header per day. Compact one-line-per-event format.",
       inputSchema: { from: iso, to: iso.optional() },
       annotations: readOnly,
     },
@@ -201,10 +201,8 @@ function buildServer(userId: string, scopes: Scope[]): McpServer {
         utts.map((u) => ({ ...u, speaker: speakerName(u) })),
         sounds,
         tz,
+        { bookmarks: marks, dayHeaders: true },
       );
-      for (const b of marks)
-        lines.push(`${clock(b.at, tz)} ⚑ bookmark${b.note ? `: ${b.note}` : ""}`);
-      lines.sort();
       return text(
         lines.length
           ? `${day(r.from, tz)} → ${day(r.to, tz)} (${tz})\n${lines.join("\n")}`

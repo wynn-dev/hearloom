@@ -55,7 +55,7 @@ match wins. Enroll yourself from a few different situations (quiet room, outside
 When a conversation ends (2 minutes without speech) the server queues a job (pg-boss, in Postgres).
 `pnpm --filter @hearloom/server worker` then:
 
-1. Loads the conversation's audio from the stored Ogg chunks.
+1. Loads the conversation's audio from the stored Ogg chunks (in passes of up to 3 hours).
 2. **Diarizes the whole conversation offline** with FluidAudio (pyannote-style segmentation + embeddings
    + VBx clustering, Core ML on the Neural Engine) — `sidecars/diarizer`, built with
    `pnpm --filter @hearloom/server build:diarizer`. Offline diarization gives consistent speakers
@@ -64,6 +64,8 @@ When a conversation ends (2 minutes without speech) the server queues a job (pg-
    voiceprint wins over the cluster (diarizers can merge similar voices).
 4. With `ELEVENLABS_API_KEY`: re-transcribes with Scribe v2 (word timestamps, audio-event tags such as
    "(laughter)"), aligning words to the diarized speakers. Otherwise keeps the live text.
-5. Replaces the live rows (kept with `superseded_at` for history) and marks the conversation `refined`.
+5. Replaces the live rows it re-derived (kept with `superseded_at` for history; rows without stored audio
+   stay live) and marks the conversation `refined`. If a row was edited meanwhile (e.g. a speaker was
+   identified), the job retries.
 
 20 s of audio diarizes in ~0.3–1.3 s on an M5 Pro.

@@ -1,7 +1,7 @@
 import type { Db } from "@hearloom/db";
 import { schema } from "@hearloom/db";
 import { cosine, SPEAKER_MODEL_ID, type SpeakerEmbedder } from "@hearloom/inference";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, inArray, isNull } from "drizzle-orm";
 import { concatPieces, loadStreamPieces } from "../audio/load";
 import { scribeTranscribe } from "../providers/elevenlabs";
 import type { Diarizer, DiarSegment } from "./diarizer";
@@ -23,7 +23,8 @@ interface Turn {
   endAt: number;
 }
 
-const MAX_CONVERSATION_MS = 3 * 3600_000;
+/** Longest stretch refined in one pass (diarizer memory, upload size); longer ones are split. */
+const MAX_WINDOW_MS = 3 * 3600_000;
 const LANG3: Record<string, string> = {
   eng: "en",
   nld: "nl",
@@ -54,15 +55,46 @@ function speakerFor(turns: Turn[], a: number, b: number): string | null {
   return best ?? (nearestDist < 1500 ? nearest : null);
 }
 
+/** Consecutive utterances grouped into windows of at most `maxMs`. */
+export function windows<T extends { startAt: Date; endAt: Date }>(rows: T[], maxMs: number): T[][] {
+  const sorted = [...rows].sort((a, b) => a.startAt.getTime() - b.startAt.getTime());
+  const out: T[][] = [];
+  for (const r of sorted) {
+    const cur = out[out.length - 1];
+    if (cur && r.endAt.getTime() - cur[0]!.startAt.getTime() <= maxMs) cur.push(r);
+    else out.push([r]);
+  }
+  return out;
+}
+
 /**
  * Refine a finished conversation: re-diarize the whole conversation offline (consistent speakers),
  * identify voices against enrolled people, optionally re-transcribe with a stronger batch model,
- * and replace the live rows.
+ * and replace the live rows that were re-derived (rows without audio are kept).
  */
 export async function refineConversation(
   deps: RefineDeps,
   conversationId: string,
 ): Promise<string> {
+  try {
+    return await refineNow(deps, conversationId);
+  } catch (err) {
+    // Don't leave it "refining" forever if this was the last attempt; a retry sets it again.
+    await deps.db
+      .update(schema.conversations)
+      .set({ status: "closed" })
+      .where(
+        and(
+          eq(schema.conversations.id, conversationId),
+          eq(schema.conversations.status, "refining"),
+        ),
+      )
+      .catch(() => {});
+    throw err;
+  }
+}
+
+async function refineNow(deps: RefineDeps, conversationId: string): Promise<string> {
   const { db } = deps;
   const [conv] = await db
     .select()
@@ -126,24 +158,30 @@ export async function refineConversation(
     { personId: string | null; isSelf: boolean | null; key: string }
   >();
   let anonymous = 0;
+  /** Live rows re-derived by this pass (only these are superseded). */
+  const replaced: typeof live = [];
 
-  // Usually one stream per conversation; reconnects can split it.
+  // Usually one stream per conversation; reconnects can split it. Rows without a stream (no audio)
+  // stay as they are.
   const byStream = new Map<string, typeof live>();
   for (const u of live) {
     if (!u.streamId) continue;
     byStream.set(u.streamId, [...(byStream.get(u.streamId) ?? []), u]);
   }
+  const passes = [...byStream].flatMap(([streamId, rows]) =>
+    windows(rows, MAX_WINDOW_MS).map((utts) => ({ streamId, utts })),
+  );
 
-  for (const [streamId, utts] of byStream) {
+  for (const [pass, { streamId, utts }] of passes.entries()) {
     const from = Math.min(...utts.map((u) => u.startAt.getTime())) - 300;
-    const to = Math.min(
-      Math.max(...utts.map((u) => u.endAt.getTime())) + 300,
-      from + MAX_CONVERSATION_MS,
-    );
+    const to = Math.max(...utts.map((u) => u.endAt.getTime())) + 300;
     const pieces = await loadStreamPieces(db, streamId, from, to);
-    if (pieces.length === 0) continue;
+    if (pieces.length === 0) continue; // audio gone: keep the live rows
     const { samples, toAbs, toOffset } = concatPieces(pieces);
     const firstNew = created.length;
+    /** Cluster keys are per pass: diarizer labels restart in every pass. */
+    const tag = `${pass}:`;
+    replaced.push(...utts);
 
     // 1) Offline diarization over the whole conversation.
     let turns: Turn[] = [];
@@ -156,7 +194,7 @@ export async function refineConversation(
       }));
       // 2) Name each cluster by matching its voice against enrolled people.
       for (const speaker of new Set(segs.map((s) => s.speaker))) {
-        const key = `${streamId}:${speaker}`;
+        const key = `${tag}${speaker}`;
         let audio = new Float32Array(0);
         for (const s of segs.filter((x) => x.speaker === speaker)) {
           const part = samples.subarray(Math.floor(s.start * 16000), Math.floor(s.end * 16000));
@@ -178,10 +216,11 @@ export async function refineConversation(
             }
           }
         }
+        // Fresh key either way: shown when an utterance's own voice check drops the name.
         speakerPerson.set(key, {
           personId: match?.personId ?? null,
           isSelf: match ? match.isSelf : null,
-          key: match ? speaker : `S${++anonymous}`,
+          key: `S${++anonymous}`,
         });
       }
     }
@@ -201,7 +240,7 @@ export async function refineConversation(
             : scribeSpeaker
               ? `scribe_${scribeSpeaker}`
               : null;
-          return s ? `${streamId}:${s}` : null;
+          return s ? `${tag}${s}` : null;
         },
       );
       const fallbackLang = LANG3[result.language_code] ?? result.language_code?.slice(0, 2) ?? null;
@@ -215,7 +254,7 @@ export async function refineConversation(
           endAt: u.endAt.getTime(),
           text: u.text,
           lang: u.lang,
-          speaker: s ? `${streamId}:${s}` : null,
+          speaker: s ? `${tag}${s}` : null,
           confidence: u.confidence,
           provider: u.provider,
           model: u.model,
@@ -258,17 +297,37 @@ export async function refineConversation(
     }
   }
 
+  if (replaced.length === 0) {
+    await db
+      .update(schema.conversations)
+      .set({ status: "closed" })
+      .where(eq(schema.conversations.id, conversationId));
+    return "no stored audio to refine";
+  }
+
   const now = new Date();
+  const replacedIds = replaced.map((u) => u.id);
   await db.transaction(async (tx) => {
+    // Rows edited since we read them (e.g. a speaker identified from the timeline): start over, so
+    // the edit and the new voiceprint are taken into account.
+    const current = await tx
+      .select({
+        id: schema.utterances.id,
+        personId: schema.utterances.personId,
+        supersededAt: schema.utterances.supersededAt,
+      })
+      .from(schema.utterances)
+      .where(inArray(schema.utterances.id, replacedIds))
+      .for("update");
+    const before = new Map(replaced.map((u) => [u.id, u.personId]));
+    if (current.some((c) => c.supersededAt !== null || c.personId !== before.get(c.id))) {
+      throw new Error("conversation changed while refining; retrying");
+    }
+    // Only the rows re-derived above: rows added meanwhile (backlog) or without audio stay live.
     await tx
       .update(schema.utterances)
       .set({ supersededAt: now })
-      .where(
-        and(
-          eq(schema.utterances.conversationId, conversationId),
-          isNull(schema.utterances.supersededAt),
-        ),
-      );
+      .where(inArray(schema.utterances.id, replacedIds));
     if (created.length > 0) {
       await tx.insert(schema.utterances).values(
         created.map((u) => {
@@ -339,5 +398,6 @@ export async function refineConversation(
       })
       .where(eq(schema.conversations.id, conversationId));
   });
-  return `refined: ${live.length} live → ${created.length} utterances, ${speakerPerson.size} speakers`;
+  const kept = live.length - replaced.length;
+  return `refined: ${replaced.length} live → ${created.length} utterances, ${speakerPerson.size} speakers${kept ? ` (${kept} kept: no audio)` : ""}`;
 }

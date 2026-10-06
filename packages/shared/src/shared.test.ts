@@ -43,3 +43,19 @@ test("a partial settings patch only changes the fields it sends", () => {
   expect(next.notifications.maxPerHour).toBe(12);
   expect(next.notifications.pendantHaptic).toBe(false);
 });
+
+test("toggling an agent event keeps the webhook URL and secret", () => {
+  const current = settingsSchema.parse({
+    agent: { webhookUrl: "https://hermes.example/hook", webhookSecret: "s3cret" },
+  });
+  const patch = settingsPatchSchema.parse({ agent: { events: { bookmark: false } } });
+  expect(patch).toEqual({ agent: { events: { bookmark: false } } });
+  const next = mergeSettings(current, patch);
+  expect(next.agent.webhookUrl).toBe("https://hermes.example/hook");
+  expect(next.agent.webhookSecret).toBe("s3cret");
+  expect(next.agent.events).toEqual({
+    conversationEnded: true,
+    conversationRefined: true,
+    bookmark: false,
+  });
+});

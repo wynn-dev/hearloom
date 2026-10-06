@@ -28,11 +28,18 @@ struct Reply: Encodable {
     var error: String? = nil
 }
 
-func emit<T: Encodable>(_ value: T) {
+@discardableResult
+func emit<T: Encodable>(_ value: T) -> Bool {
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.withoutEscapingSlashes]
-    guard let data = try? encoder.encode(value), let line = String(data: data, encoding: .utf8) else { return }
+    guard let data = try? encoder.encode(value), let line = String(data: data, encoding: .utf8) else { return false }
     FileHandle.standardOutput.write(Data((line + "\n").utf8))
+    return true
+}
+
+/// Every request gets exactly one reply: if the result can't be encoded (e.g. NaN), send an error.
+func reply(_ value: Reply) {
+    if !emit(value) { emit(Reply(id: value.id, error: "could not encode the diarization result")) }
 }
 
 func readSamples(_ path: String) throws -> [Float] {
@@ -72,12 +79,13 @@ struct Main {
                     try await runner.prepareModels()
                 }
                 let result = try await runner.process(audio: samples)
-                let segments = result.segments.map {
-                    Segment(speaker: $0.speakerId, start: Double($0.startTimeSeconds), end: Double($0.endTimeSeconds))
-                }
-                emit(Reply(id: req.id, segments: segments, speakers: result.speakerDatabase))
+                let segments = result.segments
+                    .map { Segment(speaker: $0.speakerId, start: Double($0.startTimeSeconds), end: Double($0.endTimeSeconds)) }
+                    .filter { $0.start.isFinite && $0.end.isFinite }
+                let speakers = result.speakerDatabase?.filter { $0.value.allSatisfy(\.isFinite) }
+                reply(Reply(id: req.id, segments: segments, speakers: speakers))
             } catch {
-                emit(Reply(id: req.id, error: "\(error)"))
+                reply(Reply(id: req.id, error: "\(error)"))
             }
         }
     }

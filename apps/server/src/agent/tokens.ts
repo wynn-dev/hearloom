@@ -34,10 +34,11 @@ export async function verifyToken(
   if (!row) return null;
   // Touch at most once a minute.
   if (!row.lastUsedAt || Date.now() - row.lastUsedAt.getTime() > 60_000) {
-    void db
-      .update(schema.apiTokens)
+    // Drizzle only runs a query once it's awaited/then'd.
+    db.update(schema.apiTokens)
       .set({ lastUsedAt: new Date() })
-      .where(eq(schema.apiTokens.id, row.id));
+      .where(eq(schema.apiTokens.id, row.id))
+      .then(undefined, (err) => console.warn("[agent] token touch failed", err));
   }
   return { userId: row.userId, scopes: row.scopes, id: row.id };
 }

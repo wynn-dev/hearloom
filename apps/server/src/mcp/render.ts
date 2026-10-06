@@ -21,6 +21,11 @@ export interface RenderSound {
   kind: "point" | "state";
 }
 
+export interface RenderMark {
+  at: Date;
+  note: string | null;
+}
+
 export interface RenderConversation {
   id: string;
   startedAt: Date;
@@ -56,11 +61,15 @@ export function conversationHeader(c: RenderConversation, tz: string): string {
   return `## ${day(c.startedAt, tz)} · Conversation ${c.id} · ${clock(c.startedAt, tz, false)}–${end}${who}`;
 }
 
-/** Interleave utterances and sound events chronologically. */
+/**
+ * Interleave utterances, sound events and bookmarks chronologically. With `dayHeaders`, a
+ * `## <day>` line starts every day (lines only carry the time of day).
+ */
 export function renderLines(
   utterances: RenderUtterance[],
   sounds: RenderSound[],
   tz: string,
+  opts: { bookmarks?: RenderMark[]; dayHeaders?: boolean } = {},
 ): string[] {
   type Row = { at: number; line: string };
   const rows: Row[] = [
@@ -75,8 +84,22 @@ export function renderLines(
           ? `${clock(s.startAt, tz, false)}–${clock(s.endAt, tz, false)} {${s.label}}`
           : `${clock(s.startAt, tz)} [${s.label}]`,
     })),
+    ...(opts.bookmarks ?? []).map((b) => ({
+      at: b.at.getTime(),
+      line: `${clock(b.at, tz)} ⚑ bookmark${b.note ? `: ${b.note}` : ""}`,
+    })),
   ];
-  return rows.sort((a, b) => a.at - b.at).map((r) => r.line);
+  rows.sort((a, b) => a.at - b.at);
+  if (!opts.dayHeaders) return rows.map((r) => r.line);
+  const out: string[] = [];
+  let lastDay = "";
+  for (const r of rows) {
+    const d = day(new Date(r.at), tz);
+    if (d !== lastDay) out.push(`## ${d}`);
+    lastDay = d;
+    out.push(r.line);
+  }
+  return out;
 }
 
 export function speakerName(u: {
