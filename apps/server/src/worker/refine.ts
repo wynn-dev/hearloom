@@ -3,18 +3,25 @@ import { schema } from "@hearloom/db";
 import { cosine, SPEAKER_MODEL_ID, type SpeakerEmbedder } from "@hearloom/inference";
 import { and, eq, inArray, isNull } from "drizzle-orm";
 import { concatPieces, loadStreamPieces } from "../audio/load";
-import { scribeTranscribe } from "../providers/elevenlabs";
 import type { Diarizer, DiarSegment } from "./diarizer";
-import { type NewUtterance, wordsToUtterances } from "./words";
 
 export interface RefineDeps {
   db: Db;
   embedder: SpeakerEmbedder | null;
   diarizer: Diarizer | null;
-  provider: "elevenlabs" | "keep";
-  elevenlabs: { apiKey: string; enableLogging: boolean } | null;
   matchThreshold: number;
   log(message: string): void;
+}
+
+interface NewUtterance {
+  startAt: number;
+  endAt: number;
+  text: string;
+  lang: string | null;
+  speaker: string | null;
+  confidence: number | null;
+  provider: string;
+  model: string | null;
 }
 
 interface Turn {
@@ -23,16 +30,8 @@ interface Turn {
   endAt: number;
 }
 
-/** Longest stretch refined in one pass (diarizer memory, upload size); longer ones are split. */
+/** Longest stretch refined in one pass (diarizer memory); longer ones are split. */
 const MAX_WINDOW_MS = 3 * 3600_000;
-const LANG3: Record<string, string> = {
-  eng: "en",
-  nld: "nl",
-  deu: "de",
-  fra: "fr",
-  spa: "es",
-  ita: "it",
-};
 
 /** Speaker whose turns overlap [a, b] the most (or the nearest turn). */
 function speakerFor(turns: Turn[], a: number, b: number): string | null {
@@ -69,8 +68,8 @@ export function windows<T extends { startAt: Date; endAt: Date }>(rows: T[], max
 
 /**
  * Refine a finished conversation: re-diarize the whole conversation offline (consistent speakers),
- * identify voices against enrolled people, optionally re-transcribe with a stronger batch model,
- * and replace the live rows that were re-derived (rows without audio are kept).
+ * identify voices against enrolled people, and replace the live rows with re-attributed copies
+ * (the text is kept; rows without audio stay as they are).
  */
 export async function refineConversation(
   deps: RefineDeps,
@@ -103,8 +102,8 @@ async function refineNow(deps: RefineDeps, conversationId: string): Promise<stri
   if (!conv) return "missing";
   if (!conv.endedAt) throw new Error("conversation still open");
   if (conv.status === "refined") return "already refined";
-  if (!deps.diarizer && deps.provider === "keep")
-    return "nothing to do (no diarizer, no batch provider)";
+  const { diarizer } = deps;
+  if (!diarizer) return "nothing to do (diarizer not built)";
 
   const live = await db
     .select()
@@ -131,7 +130,6 @@ async function refineNow(deps: RefineDeps, conversationId: string): Promise<stri
     .select({
       id: schema.people.id,
       isSelf: schema.people.isSelf,
-      name: schema.people.name,
       embedding: schema.voiceprints.embedding,
     })
     .from(schema.voiceprints)
@@ -142,7 +140,6 @@ async function refineNow(deps: RefineDeps, conversationId: string): Promise<stri
         eq(schema.voiceprints.model, SPEAKER_MODEL_ID),
       ),
     );
-  const names = [...new Set(people.map((p) => p.name))];
 
   const created: (NewUtterance & {
     streamId: string;
@@ -152,7 +149,6 @@ async function refineNow(deps: RefineDeps, conversationId: string): Promise<stri
      */
     own?: { personId: string; isSelf: boolean } | null;
   })[] = [];
-  const soundRows: { streamId: string; label: string; startAt: number; endAt: number }[] = [];
   const speakerPerson = new Map<
     string,
     { personId: string | null; isSelf: boolean | null; key: string }
@@ -184,83 +180,58 @@ async function refineNow(deps: RefineDeps, conversationId: string): Promise<stri
     replaced.push(...utts);
 
     // 1) Offline diarization over the whole conversation.
-    let turns: Turn[] = [];
-    if (deps.diarizer) {
-      const segs: DiarSegment[] = await deps.diarizer.diarize(samples);
-      turns = segs.map((s) => ({
-        speaker: s.speaker,
-        startAt: toAbs(s.start),
-        endAt: toAbs(s.end),
-      }));
-      // 2) Name each cluster by matching its voice against enrolled people.
-      for (const speaker of new Set(segs.map((s) => s.speaker))) {
-        const key = `${tag}${speaker}`;
-        let audio = new Float32Array(0);
-        for (const s of segs.filter((x) => x.speaker === speaker)) {
-          const part = samples.subarray(Math.floor(s.start * 16000), Math.floor(s.end * 16000));
-          const next = new Float32Array(audio.length + part.length);
-          next.set(audio);
-          next.set(part, audio.length);
-          audio = next;
-          if (audio.length > 30 * 16000) break;
-        }
-        let match: { personId: string; isSelf: boolean } | null = null;
-        if (deps.embedder && audio.length >= 16000) {
-          const emb = deps.embedder.embed(audio);
-          let best = deps.matchThreshold;
-          for (const p of people) {
-            const score = cosine(emb, p.embedding);
-            if (score >= best) {
-              best = score;
-              match = { personId: p.id, isSelf: p.isSelf };
-            }
+    const segs: DiarSegment[] = await diarizer.diarize(samples);
+    const turns: Turn[] = segs.map((s) => ({
+      speaker: s.speaker,
+      startAt: toAbs(s.start),
+      endAt: toAbs(s.end),
+    }));
+    // 2) Name each cluster by matching its voice against enrolled people.
+    for (const speaker of new Set(segs.map((s) => s.speaker))) {
+      const key = `${tag}${speaker}`;
+      let audio = new Float32Array(0);
+      for (const s of segs.filter((x) => x.speaker === speaker)) {
+        const part = samples.subarray(Math.floor(s.start * 16000), Math.floor(s.end * 16000));
+        const next = new Float32Array(audio.length + part.length);
+        next.set(audio);
+        next.set(part, audio.length);
+        audio = next;
+        if (audio.length > 30 * 16000) break;
+      }
+      let match: { personId: string; isSelf: boolean } | null = null;
+      if (deps.embedder && audio.length >= 16000) {
+        const emb = deps.embedder.embed(audio);
+        let best = deps.matchThreshold;
+        for (const p of people) {
+          const score = cosine(emb, p.embedding);
+          if (score >= best) {
+            best = score;
+            match = { personId: p.id, isSelf: p.isSelf };
           }
         }
-        // Fresh key either way: shown when an utterance's own voice check drops the name.
-        speakerPerson.set(key, {
-          personId: match?.personId ?? null,
-          isSelf: match ? match.isSelf : null,
-          key: `S${++anonymous}`,
-        });
       }
+      // Fresh key either way: shown when an utterance's own voice check drops the name.
+      speakerPerson.set(key, {
+        personId: match?.personId ?? null,
+        isSelf: match ? match.isSelf : null,
+        key: `S${++anonymous}`,
+      });
     }
 
-    // 3) Text: a stronger batch model, or keep the live text and only fix speakers.
-    if (deps.provider === "elevenlabs" && deps.elevenlabs) {
-      const pcm = new Int16Array(samples.length);
-      for (let i = 0; i < samples.length; i++)
-        pcm[i] = Math.max(-32768, Math.min(32767, Math.round(samples[i]! * 32768)));
-      const result = await scribeTranscribe(pcm, { ...deps.elevenlabs, keyterms: names });
-      const { utterances, events } = wordsToUtterances(
-        result.words,
-        toAbs,
-        (a, b, scribeSpeaker) => {
-          const s = turns.length
-            ? speakerFor(turns, a, b)
-            : scribeSpeaker
-              ? `scribe_${scribeSpeaker}`
-              : null;
-          return s ? `${tag}${s}` : null;
-        },
-      );
-      const fallbackLang = LANG3[result.language_code] ?? result.language_code?.slice(0, 2) ?? null;
-      for (const u of utterances) created.push({ ...u, lang: u.lang ?? fallbackLang, streamId });
-      for (const e of events) soundRows.push({ streamId, ...e });
-    } else {
-      for (const u of utts) {
-        const s = speakerFor(turns, u.startAt.getTime(), u.endAt.getTime());
-        created.push({
-          startAt: u.startAt.getTime(),
-          endAt: u.endAt.getTime(),
-          text: u.text,
-          lang: u.lang,
-          speaker: s ? `${tag}${s}` : null,
-          confidence: u.confidence,
-          provider: u.provider,
-          model: u.model,
-          streamId,
-        });
-      }
+    // 3) Keep the live text; each utterance takes the speaker it overlaps most.
+    for (const u of utts) {
+      const s = speakerFor(turns, u.startAt.getTime(), u.endAt.getTime());
+      created.push({
+        startAt: u.startAt.getTime(),
+        endAt: u.endAt.getTime(),
+        text: u.text,
+        lang: u.lang,
+        speaker: s ? `${tag}${s}` : null,
+        confidence: u.confidence,
+        provider: u.provider,
+        model: u.model,
+        streamId,
+      });
     }
 
     // Per-utterance voice match: diarizers can merge similar voices into one cluster, so a
@@ -287,13 +258,6 @@ async function refineNow(deps: RefineDeps, conversationId: string): Promise<stri
           if (theirs.length && Math.max(...theirs) < deps.matchThreshold - 0.15) u.own = null;
         }
       }
-    }
-  }
-
-  // Speakers that only came from Scribe (no diarizer): anonymous labels.
-  for (const u of created) {
-    if (u.speaker && !speakerPerson.has(u.speaker)) {
-      speakerPerson.set(u.speaker, { personId: null, isSelf: null, key: `S${++anonymous}` });
     }
   }
 
@@ -358,22 +322,6 @@ async function refineNow(deps: RefineDeps, conversationId: string): Promise<stri
             revision: 1,
           };
         }),
-      );
-    }
-    if (soundRows.length > 0) {
-      await tx.insert(schema.soundEvents).values(
-        soundRows.map((e) => ({
-          userId: conv.userId,
-          streamId: e.streamId,
-          startAt: new Date(e.startAt),
-          endAt: new Date(Math.max(e.endAt, e.startAt)),
-          label: e.label,
-          kind: "point" as const,
-          confidence: 1,
-          audiosetLabels: [],
-          source: "refine",
-          model: "scribe_v2",
-        })),
       );
     }
     const speakers = new Set(

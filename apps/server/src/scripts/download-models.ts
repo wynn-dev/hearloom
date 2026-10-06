@@ -1,8 +1,8 @@
 /**
  * Download the local models used by the live pipeline into DATA_DIR/models.
  *   pnpm --filter @hearloom/server download-models [--all]
- * Default set: VAD, sound tagging, speaker embeddings. `--all` adds Parakeet v3 (local ASR) and
- * pyannote segmentation (offline diarization fallback).
+ * Default set: VAD, sound tagging, speaker embeddings. `--all` adds pyannote segmentation
+ * (offline diarization fallback).
  */
 import { existsSync } from "node:fs";
 import { mkdir, rename, rm } from "node:fs/promises";
@@ -38,13 +38,6 @@ const MODELS: Model[] = [
     name: "3D-Speaker CAM++ speaker embeddings (zh+en)",
     url: `${SHERPA}/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx`,
     check: "3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx",
-  },
-  {
-    name: "Parakeet TDT 0.6B v3 (local ASR, 25 EU languages)",
-    url: `${SHERPA}/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2`,
-    check: "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/encoder.int8.onnx",
-    archive: true,
-    optional: true,
   },
   {
     name: "pyannote segmentation 3.0",

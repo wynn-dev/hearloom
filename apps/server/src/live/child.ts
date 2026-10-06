@@ -6,7 +6,6 @@
 import { createDb, schema } from "@hearloom/db";
 import {
   hasModel,
-  LocalAsr,
   MODEL_FILES,
   SoundTagger,
   SPEAKER_MODEL_ID,
@@ -24,16 +23,18 @@ import { SpeakerDirectory } from "./speakers";
 const send = (msg: ChildMessage) => process.send?.(msg);
 const log = (message: string) => send({ t: "log", message });
 
-if (!hasModel(modelsDir, MODEL_FILES.vad)) {
-  log(`models missing in ${modelsDir}; run: pnpm --filter @hearloom/server download-models`);
+/** Can't run with this configuration: exit code 2 tells the host not to restart us. */
+function fatal(message: string): never {
+  console.error(`[live] ${message}`);
   process.exit(2);
 }
 
-const { db, client } = createDb(env.DATABASE_URL, { max: 4 });
+if (!hasModel(modelsDir, MODEL_FILES.vad))
+  fatal(`models missing in ${modelsDir}; run: pnpm --filter @hearloom/server download-models`);
+if (env.LIVE_ASR === "soniox" && !env.SONIOX_API_KEY)
+  fatal("SONIOX_API_KEY is not set (set it, or LIVE_ASR=off to run without transcription)");
 
-const asrMode = env.LIVE_ASR === "auto" ? (env.SONIOX_API_KEY ? "soniox" : "local") : env.LIVE_ASR;
-const wantLocalAsr =
-  asrMode !== "off" && hasModel(modelsDir, `${MODEL_FILES.parakeetDir}/encoder.int8.onnx`);
+const { db, client } = createDb(env.DATABASE_URL, { max: 4 });
 
 const embedder = hasModel(modelsDir, MODEL_FILES.speaker) ? new SpeakerEmbedder(modelsDir) : null;
 const deps: LiveDeps = {
@@ -41,8 +42,6 @@ const deps: LiveDeps = {
   modelsDir,
   tagger: hasModel(modelsDir, MODEL_FILES.tagger) ? new SoundTagger(modelsDir) : null,
   embedder,
-  // Local ASR transcribes backlog audio, and everything when there's no Soniox key.
-  localAsr: wantLocalAsr ? new LocalAsr(modelsDir) : null,
   speakers: embedder
     ? new SpeakerDirectory(db, SPEAKER_MODEL_ID, env.SPEAKER_MATCH_THRESHOLD)
     : null,
@@ -60,10 +59,11 @@ const deps: LiveDeps = {
     env.SPEAKER_CLUSTER_THRESHOLD,
   ),
   soniox:
-    asrMode === "soniox" && env.SONIOX_API_KEY
+    env.LIVE_ASR === "soniox" && env.SONIOX_API_KEY
       ? {
           apiKey: env.SONIOX_API_KEY,
           model: env.SONIOX_MODEL,
+          asyncModel: env.SONIOX_ASYNC_MODEL,
           languageHints: env.LANGUAGE_HINTS.split(",")
             .map((s) => s.trim())
             .filter(Boolean),
@@ -78,7 +78,7 @@ const orphans = await deps.conversations.closeOrphans();
 if (orphans > 0) log(`closed ${orphans} conversation(s) left open by a previous run`);
 
 log(
-  `ready: asr=${asrMode}${deps.localAsr ? " (+local parakeet)" : ""}, tagger=${deps.tagger ? "ced-base" : "off"}, speakers=${embedder ? SPEAKER_MODEL_ID : "off"}`,
+  `ready: asr=${env.LIVE_ASR}, tagger=${deps.tagger ? "ced-base" : "off"}, speakers=${embedder ? SPEAKER_MODEL_ID : "off"}`,
 );
 
 const processors = new Map<string, StreamProcessor>();

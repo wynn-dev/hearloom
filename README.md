@@ -18,7 +18,7 @@ packages/db      Postgres schema + migrations (Drizzle)
 packages/api     API contract shared by server, web and app
 packages/shared  Ingest protocol, Omi BLE constants, settings schema
 packages/audio   libopus bindings (bun:ffi), Ogg Opus decoding
-packages/inference  sherpa-onnx models: VAD, sound tagging, voiceprints, local ASR
+packages/inference  sherpa-onnx models: VAD, sound tagging, voiceprints
 sidecars/diarizer   Swift: offline speaker diarization (FluidAudio, Core ML)
 docs/            design.md (start here), protocol.md, models.md, ios.md, agent.md
 ```
@@ -34,10 +34,10 @@ docs/            design.md (start here), protocol.md, models.md, ios.md, agent.m
 
 ```sh
 pnpm install
-cp .env.example .env            # then set BETTER_AUTH_SECRET (openssl rand -base64 48)
+cp .env.example .env            # then set BETTER_AUTH_SECRET (openssl rand -base64 48) and SONIOX_API_KEY
 pnpm db:up && pnpm db:migrate
 pnpm --filter @hearloom/server create-user -- --email you@example.com --name You --admin
-pnpm --filter @hearloom/server download-models -- --all   # local speech/sound/speaker models
+pnpm --filter @hearloom/server download-models            # local VAD/sound/speaker models
 pnpm --filter @hearloom/server build:diarizer              # macOS: speaker diarization sidecar
 pnpm dev                        # server :3000 + worker + console :5173
 ```

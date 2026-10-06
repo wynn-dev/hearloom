@@ -75,3 +75,30 @@ test("a restarted pipeline closes conversations left open", async () => {
   expect(row.status).toBe("closed");
   expect(row.endedAt).not.toBeNull();
 });
+
+test("backlog conversations stay open while held, and new backlog re-opens a refined one", async () => {
+  const t = tracker();
+  const base = Date.now() - 5 * 3600_000;
+  t.hold(userId);
+  const c = await t.place(userId, base, base + 5_000, false);
+  // Long after the last placement, but a batch is still being transcribed: not ended yet.
+  await t.tick(Date.now() + 10 * CONVERSATION_GAP_MS);
+  expect(events).not.toContain(`ended:${c.id}:backlog`);
+  // Released: the quiet period starts at the release.
+  const releasedAt = Date.now() + 10 * CONVERSATION_GAP_MS;
+  t.release(userId, releasedAt);
+  await t.tick(releasedAt + CONVERSATION_GAP_MS - 1);
+  expect(events).not.toContain(`ended:${c.id}:backlog`);
+  await t.tick(releasedAt + CONVERSATION_GAP_MS + 1);
+  expect(events).toContain(`ended:${c.id}:backlog`);
+
+  await db
+    .update(schema.conversations)
+    .set({ status: "refined" })
+    .where(eq(schema.conversations.id, c.id));
+  const again = await t.place(userId, base + 30_000, base + 35_000, false);
+  expect(again.id).toBe(c.id);
+  const row = (await rows()).find((r) => r.id === c.id)!;
+  expect(row.status).toBe("closed");
+  expect(row.endedAt!.getTime()).toBe(base + 35_000);
+});

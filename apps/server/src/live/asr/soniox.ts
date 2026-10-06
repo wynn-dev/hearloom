@@ -26,7 +26,7 @@ export class SonioxSession {
   private resolveFinished: (() => void) | null = null;
   readonly openedAt = Date.now();
   closed = false;
-  /** The session broke (connection, auth, quota…); what it didn't transcribe needs another engine. */
+  /** The session broke (connection, auth, quota…); what it didn't transcribe is lost. */
   failed = false;
   /** Soniox confirmed it processed all audio we sent. */
   finished = false;
@@ -85,11 +85,6 @@ export class SonioxSession {
 
   get sentMs(): number {
     return this.clock.totalSentMs;
-  }
-
-  /** Whether audio for this wall-clock span was streamed to the session. */
-  covers(fromAbs: number, toAbs: number): boolean {
-    return this.clock.covers(fromAbs, toAbs);
   }
 
   /** Stream PCM captured at wall-clock `absMs`. */
