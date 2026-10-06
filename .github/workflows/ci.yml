@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: Deploy the iOS app with a new binary even if native code is unchanged
+        type: boolean
+        default: false
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Lint, typecheck, test, build
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: pgvector/pgvector:pg18
+        env:
+          POSTGRES_USER: hearloom
+          POSTGRES_PASSWORD: hearloom
+          POSTGRES_DB: hearloom
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U hearloom"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - name: Install libopus
+        run: sudo apt-get update && sudo apt-get install -y libopus0
+      - run: pnpm install --frozen-lockfile
+      # Package scripts load ../../.env (as in local dev); point it at the CI database.
+      - name: Write .env
+        run: |
+          sed "s/^BETTER_AUTH_SECRET=.*/BETTER_AUTH_SECRET=$(openssl rand -hex 32)/" .env.example > .env
+      - run: pnpm check
+      - run: pnpm typecheck
+      - run: pnpm db:migrate
+      - run: pnpm test
+      - run: pnpm --filter @hearloom/web build
+
+  mobile:
+    name: Mobile JS bundle
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # Catches Metro / bundling breakage that typecheck doesn't, without a native build.
+      - run: npx expo export --platform ios --output-dir "$RUNNER_TEMP/export"
+        working-directory: apps/mobile
+
+  changes:
+    name: Detect mobile changes
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    outputs:
+      mobile: ${{ steps.filter.outputs.mobile }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            mobile:
+              - apps/mobile/**
+              - packages/api/**
+              - packages/shared/**
+              - package.json
+              - pnpm-lock.yaml
+              - pnpm-workspace.yaml
+
+  deploy-mobile:
+    name: Deploy iOS (EAS)
+    needs: [checks, mobile, changes]
+    # Pushes to main that touch the app, or a manual run on main.
+    if: >-
+      always() && needs.checks.result == 'success' && needs.mobile.result == 'success' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'workflow_dispatch' || needs.changes.outputs.mobile == 'true')
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: deploy-mobile
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: expo/expo-github-action@9.0.0
+        with:
+          eas-version: 24.11.0
+          packager: npm
+          token: ${{ secrets.EXPO_TOKEN }}
+      # Uploads this checkout and runs apps/mobile/.eas/workflows/deploy-production.yml on EAS:
+      # OTA update if the native fingerprint already has a build, else build + TestFlight.
+      - name: Run EAS deploy workflow
+        working-directory: apps/mobile
+        env:
+          FORCE_BUILD: ${{ inputs.force_build || false }}
+          MESSAGE: ${{ github.event.head_commit.message || format('Manual deploy of {0}', github.sha) }}
+        run: >-
+          eas workflow:run .eas/workflows/deploy-production.yml --non-interactive --wait
+          -F force_build="$FORCE_BUILD" -F message="$(printf '%s' "$MESSAGE" | head -n1)"

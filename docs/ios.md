@@ -35,6 +35,44 @@ Release builds for daily use: `HEARLOOM_APS_ENV=production` and build the Releas
 
 The simulator can run everything except Bluetooth (CoreBluetooth is unavailable there).
 
+## Cloud builds and releases (EAS)
+
+The app is the EAS project `@unlaboredlabs/hearloom` (`apps/mobile/eas.json`). Build profiles:
+
+| Profile       | What                             | Install via      | Update channel |
+| ------------- | -------------------------------- | ---------------- | -------------- |
+| `development` | dev client (pairs with `pnpm start`) | EAS link / QR | `development`  |
+| `preview`     | release build, ad hoc            | EAS link / QR    | `preview`      |
+| `production`  | App Store build                  | TestFlight       | `production`   |
+
+`HEARLOOM_APS_ENV` (push environment) comes from EAS environment variables, not `eas.json`, so builds,
+fingerprints and OTA updates all see the same value (it is part of the native fingerprint).
+
+**Continuous delivery.** On every push to `main` that touches the app (`apps/mobile`, `packages/api`,
+`packages/shared` or the lockfile), GitHub Actions runs CI and, once it's green, starts
+`apps/mobile/.eas/workflows/deploy-production.yml` on EAS. That workflow fingerprints the native code:
+
+- a production build with the same fingerprint exists → the JS ships as an **OTA update** on the
+  `production` channel (installed apps pick it up on the next launch);
+- otherwise → a new **build** is made and **submitted to TestFlight**.
+
+To force a new binary, run the CI workflow manually on `main` with `force_build` (Actions → CI → Run
+workflow). The server and worker are not deployed by CI; you run them yourself.
+
+**One-time setup** (needs your Apple login, so it can't run in CI):
+
+```sh
+cd apps/mobile
+eas build -p ios --profile production   # creates the signing certificate + provisioning profile
+eas submit -p ios --latest              # creates the App Store Connect app + API key for submissions
+```
+
+Then create a robot access token for the `unlaboredlabs` org on expo.dev and store it as the
+`EXPO_TOKEN` repository secret (`gh secret set EXPO_TOKEN`).
+
+Self-hosters with their own bundle id: create your own EAS project and set `HEARLOOM_EAS_OWNER` and
+`HEARLOOM_EAS_PROJECT_ID`; without them the app builds with no EAS project and no OTA updates.
+
 ## Server address
 
 Sign in with the URL your phone can reach, e.g. your Mac over Tailscale:
@@ -42,6 +80,10 @@ Sign in with the URL your phone can reach, e.g. your Mac over Tailscale:
 Tailscale already encrypts the traffic), or `https://…` via `tailscale serve`.
 
 ## Tests
+
+CI (`.github/workflows/ci.yml`) runs lint, typecheck, all tests against Postgres, the web build and an
+iOS JS bundle export on every PR. `.github/workflows/swift.yml` runs the Swift tests below and builds the
+diarizer sidecar on macOS when that code changes.
 
 `apps/mobile/modules/omi-capture/tests/run-tests.sh` compiles the platform-independent Swift (journal,
 batch codec) for macOS, runs the checks, and verifies the Swift-encoded audio batches decode identically
