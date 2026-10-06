@@ -14,7 +14,8 @@ let boss: PgBoss | null = null;
 /** Shared pg-boss instance (job queue in Postgres). The server only sends; the worker consumes. */
 export async function jobs(): Promise<PgBoss> {
   if (!boss) {
-    const b = new PgBoss({ connectionString: env.DATABASE_URL, schema: "pgboss" });
+    // Small pool: one job at a time, and the connection budget is shared (see createDb).
+    const b = new PgBoss({ connectionString: env.DATABASE_URL, schema: "pgboss", max: 2 });
     b.on("error", (err) => console.error("[jobs]", err));
     await b.start();
     for (const name of Object.values(QUEUES)) await b.createQueue(name);
