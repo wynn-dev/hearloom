@@ -5,7 +5,8 @@
   "tasks": {
     "dev": {
       "cache": false,
-      "persistent": true
+      "persistent": true,
+      "passThroughEnv": ["HEARLOOM_WEB_HOST", "HEARLOOM_SERVER_URL"]
     },
     "build": {
       "dependsOn": ["^build"],

@@ -40,6 +40,7 @@ pnpm --filter @hearloom/server create-user -- --email you@example.com --name You
 pnpm --filter @hearloom/server download-models            # local VAD/sound/speaker models
 pnpm --filter @hearloom/server build:diarizer              # macOS: speaker diarization sidecar
 pnpm dev                        # server :3000 + worker + console :5173
+pnpm dev:host                   # same, console also reachable from other devices (see TRUSTED_ORIGINS)
 ```
 
 Simulate a phone streaming audio (no hardware needed):
