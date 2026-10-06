@@ -31,7 +31,11 @@ final class CaptureEngine: NSObject {
   private var codec: Int?
   private var charging = false
   private var activeStreamId: String?
+  /// Capture time of the last frame, for stamping the next one; cleared when the timeline breaks
+  /// (mute, disconnect) so the next frame re-anchors to the wall clock.
   private var lastFrameAt: Int64?
+  /// Last frame stored in the active stream (its end time if it stops now).
+  private var streamLastFrameAt: Int64?
   private var framesThisStream: Int64 = 0
   // Uplink protocol state, reset on every (re)connect.
   private struct Slot {
@@ -48,8 +52,16 @@ final class CaptureEngine: NSObject {
   /// The server accepted this phone on the current socket (`ready`).
   private var serverReady = false
   private var lastServerError: String?
-  /// Events that must reach the server even if we're offline now (bookmarks, mutes, ...).
-  private var outbox: [[String: Any]] = []
+  private var lastServerErrorCode: String?
+  /// Streams the server refused (unsupported codec, another account's stream). Kept on disk, not retried
+  /// until the server or account changes.
+  private var rejectedStreams: Set<String> = []
+  /// Events that must reach the server even if we're offline now (bookmarks, mutes, ...). An event
+  /// leaves the outbox only once the socket has sent it.
+  private var outbox: [(id: String, msg: [String: Any])] = []
+  private var outboxInflight: Set<String> = []
+  /// Counts socket connections, so a late send callback can't touch the next connection's state.
+  private var connection = 0
   private static let outboxKey = "hearloom.capture.outbox"
   private static let maxInflightFrames: Int64 = 3000
   private static let batchFrames = 100
@@ -91,13 +103,18 @@ final class CaptureEngine: NSObject {
       CaptureStore.save(self.settings)
       TokenStore.set(token)
       self.token = token
-      if changed || self.uplink.state == .idle { self.startUplinkIfPossible() }
+      if changed { self.rejectedStreams = [] }
+      // Also retries now if the server refused us earlier (e.g. the phone was just re-registered).
+      if changed || self.uplink.state == .idle || self.uplink.state == .waiting { self.startUplinkIfPossible() }
       self.emitStatus()
     }
   }
 
   func signOut() {
     queue.async {
+      // Close the stream locally; the app also tells the server (phones.signOut). Unsent frames stay in
+      // the journal and upload if this account signs in again.
+      self.endActiveStream()
       self.uplink.stop()
       self.stopPump()
       self.settings.captureEnabled = false
@@ -129,7 +146,7 @@ final class CaptureEngine: NSObject {
       self.settings.pairedPeripheralId = nil
       self.settings.captureEnabled = false
       CaptureStore.save(self.settings)
-      self.endActiveStream(at: nowMs())
+      self.endActiveStream()
       self.applyTarget()
       self.emitStatus()
     }
@@ -139,7 +156,7 @@ final class CaptureEngine: NSObject {
     queue.async {
       self.settings.captureEnabled = on
       CaptureStore.save(self.settings)
-      if !on { self.endActiveStream(at: nowMs()) }
+      if !on { self.endActiveStream() }
       self.applyTarget()
       self.emitStatus()
     }
@@ -165,7 +182,7 @@ final class CaptureEngine: NSObject {
   }
 
   private func startStream(codec: Int, wearable: WearableInfo) {
-    endActiveStream(at: lastFrameAt ?? nowMs())
+    endActiveStream()
     let frameMs = codec == 20 ? 10 : 20
     let meta = StreamMeta(
       id: UUID().uuidString.lowercased(), codec: codec, sampleRate: 16000, frameMs: frameMs, startedAt: nowMs(),
@@ -173,31 +190,43 @@ final class CaptureEngine: NSObject {
     journal.create(meta)
     activeStreamId = meta.id
     lastFrameAt = nil
+    streamLastFrameAt = nil
     framesThisStream = 0
     Log.info("engine: stream \(meta.id) started (codec \(codec))")
     if uplink.state == .open { bind(meta.id) }
   }
 
-  /// Mark the current stream finished; it is uploaded, then closed on the server with `bye`.
-  private func endActiveStream(at: Int64) {
+  /// Mark the current stream finished at its last frame (like a stream recovered at launch); it is
+  /// uploaded, then closed on the server with `bye`.
+  private func endActiveStream() {
     guard let id = activeStreamId else { return }
     activeStreamId = nil
-    journal.updateMeta(id) { $0.endedAt = at }
+    let endedAt = streamLastFrameAt ?? journal.meta(id)?.startedAt ?? nowMs()
+    journal.updateMeta(id) { $0.endedAt = endedAt }
     journal.seal(id)
     pump()
   }
 
   /// Capture time for the next frame. Contiguous frames advance exactly one frame duration (plus any
   /// lost notifications); if we've fallen far behind the wall clock the mic was asleep (silence), so
-  /// re-anchor to now. Bursts after a BLE stall keep their earlier, correct times.
+  /// re-anchor to now. Bursts after a BLE stall keep their earlier, correct times. Times never go
+  /// backwards within a stream (the server's chunk timing relies on it).
   private func stamp(frameMs: Int, lost: Int) -> Int64 {
     let now = nowMs()
+    let floor = streamLastFrameAt.map { $0 + Int64(frameMs) } ?? 0
     guard let last = lastFrameAt else {
-      lastFrameAt = now
-      return now
+      let at = max(now, floor)
+      lastFrameAt = at
+      return at
     }
     var at = last + Int64(frameMs * (1 + lost))
-    if at < now - 1500 || at > now + 2000 { at = now }
+    if at < now - 1500 {
+      at = now
+    } else if at > now + 2000 {
+      // An implausible lost count (or the wall clock stepped back): don't run ahead of real time.
+      at = max(now, last + Int64(frameMs))
+    }
+    at = max(at, floor)
     lastFrameAt = at
     return at
   }
@@ -252,7 +281,8 @@ final class CaptureEngine: NSObject {
   }
 
   private func bind(_ streamId: String) {
-    guard let meta = journal.meta(streamId), let phoneId = settings.phoneId else { return }
+    guard let meta = journal.meta(streamId), let phoneId = settings.phoneId,
+          !rejectedStreams.contains(streamId) else { return }
     if slots.values.contains(where: { $0.streamId == streamId }) { return }
     let slot = nextSlot
     nextSlot = (nextSlot + 1) % 256
@@ -309,28 +339,39 @@ final class CaptureEngine: NSObject {
   }
 
   private func enqueueEvent(_ msg: [String: Any]) {
-    outbox.append(msg)
+    outbox.append((UUID().uuidString, msg))
     if outbox.count > 500 { outbox.removeFirst(outbox.count - 500) }
     saveOutbox()
     flushOutbox()
   }
 
   private func flushOutbox() {
-    guard uplink.state == .open, serverReady, !outbox.isEmpty else { return }
-    for msg in outbox { uplink.send(json: msg) }
-    outbox.removeAll()
-    saveOutbox()
+    guard uplink.state == .open, serverReady else { return }
+    let conn = connection
+    for (id, msg) in outbox where !outboxInflight.contains(id) {
+      let queued = uplink.send(json: msg) { [weak self] ok in
+        guard let self else { return }
+        if conn == self.connection { self.outboxInflight.remove(id) }
+        guard ok else { return } // stays queued; resent after the next `ready`
+        self.outbox.removeAll { $0.id == id }
+        self.saveOutbox()
+      }
+      if queued { outboxInflight.insert(id) }
+    }
   }
 
   private func loadOutbox() {
-    if let data = UserDefaults.standard.data(forKey: CaptureEngine.outboxKey),
-       let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
-      outbox = arr
+    guard let data = UserDefaults.standard.data(forKey: CaptureEngine.outboxKey),
+          let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return }
+    outbox = arr.compactMap { e in
+      guard let id = e["id"] as? String, let msg = e["msg"] as? [String: Any] else { return nil }
+      return (id, msg)
     }
   }
 
   private func saveOutbox() {
-    if let data = try? JSONSerialization.data(withJSONObject: outbox) {
+    let arr = outbox.map { ["id": $0.id, "msg": $0.msg] as [String: Any] }
+    if let data = try? JSONSerialization.data(withJSONObject: arr) {
       UserDefaults.standard.set(data, forKey: CaptureEngine.outboxKey)
     }
   }
@@ -349,11 +390,7 @@ final class CaptureEngine: NSObject {
   // MARK: status
 
   private func statusDict() -> [String: Any] {
-    var backlog: Int64 = 0
-    for id in journal.streamIds {
-      let acked = slots.values.first(where: { $0.streamId == id })?.acked ?? -1
-      backlog += max(0, journal.nextSeq(id) - acked - 1)
-    }
+    let backlog = journal.streamIds.reduce(Int64(0)) { $0 + journal.unacked($1) }
     var d: [String: Any] = [
       "configured": settings.serverURL != nil && token != nil && settings.phoneId != nil,
       "captureEnabled": settings.captureEnabled,
@@ -374,6 +411,8 @@ final class CaptureEngine: NSObject {
     if let a = lastAckAt { d["lastAckAt"] = a }
     if let e = uplink.lastError { d["uplinkError"] = e }
     if let e = lastServerError { d["serverError"] = e }
+    if let c = lastServerErrorCode { d["serverErrorCode"] = c }
+    if !rejectedStreams.isEmpty { d["rejectedStreams"] = rejectedStreams.count }
     if let s = activeStreamId { d["streamId"] = s }
     return d
   }
@@ -441,6 +480,7 @@ extension CaptureEngine: OmiBLEDelegate {
     for (i, frame) in frames.enumerated() {
       let at = stamp(frameMs: meta.frameMs, lost: i == 0 ? lost : 0)
       journal.append(id, at: at, data: frame)
+      streamLastFrameAt = at
       framesThisStream += 1
     }
     if framesThisStream % 50 == 0 { emitStatus() }
@@ -472,9 +512,12 @@ extension CaptureEngine: OmiBLEDelegate {
 extension CaptureEngine: IngestClientDelegate {
   func ingestOpened(_ client: IngestClient) {
     Log.info("ingest: connected")
+    connection += 1
     slots = [:]
     serverReady = false
+    outboxInflight = []
     lastServerError = nil
+    lastServerErrorCode = nil
     guard let phoneId = settings.phoneId else { return }
     // Register for notifications/config first, then upload backlog streams and the live one.
     uplink.send(json: ["t": "presence", "v": 1, "phoneId": phoneId])
@@ -489,6 +532,7 @@ extension CaptureEngine: IngestClientDelegate {
     Log.warn("ingest: closed (\(reason))")
     slots = [:]
     serverReady = false
+    outboxInflight = []
     stopPump()
     emitStatus()
   }
@@ -497,6 +541,7 @@ extension CaptureEngine: IngestClientDelegate {
     switch msg["t"] as? String {
     case "ready":
       serverReady = true
+      uplink.markHealthy()
       if let config = msg["config"] as? [String: Any] { applyConfig(config) }
       flushOutbox()
       emitStatus()
@@ -544,11 +589,39 @@ extension CaptureEngine: IngestClientDelegate {
     case "error":
       let code = msg["code"] as? String ?? "error"
       let message = msg["message"] as? String ?? ""
-      lastServerError = "\(code): \(message)"
       Log.error("ingest: server error \(code): \(message)")
+      serverError(code: code, message: message, fatal: msg["fatal"] as? Bool ?? false, slot: msg["slot"] as? Int)
       emitStatus()
     default:
       break
+    }
+  }
+
+  private func serverError(code: String, message: String, fatal: Bool, slot slotId: Int?) {
+    if fatal {
+      // unknown_phone (the app re-registers it), protocol_version (needs an app update): a quick
+      // retry can't succeed, so wait long instead of reconnecting every second.
+      lastServerError = "\(code): \(message)"
+      lastServerErrorCode = code
+      uplink.pause(code)
+      return
+    }
+    guard let slotId, let slot = slots[slotId] else { return }
+    switch code {
+    case "seq_gap":
+      // An earlier batch never arrived: resend from the server's ack.
+      var s = slot
+      s.sent = s.acked
+      slots[slotId] = s
+      pump()
+    case "codec", "stream":
+      lastServerError = "\(code): \(message)"
+      lastServerErrorCode = code
+      rejectedStreams.insert(slot.streamId)
+      slots[slotId] = nil
+    default:
+      // The server lost track of this slot (e.g. a failed hello): start over.
+      uplink.reset("server error \(code)")
     }
   }
 }

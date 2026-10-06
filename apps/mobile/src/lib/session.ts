@@ -5,6 +5,12 @@ import type { ContractRouterClient } from "@orpc/contract";
 import { createTanstackQueryUtils } from "@orpc/tanstack-query";
 import * as SecureStore from "expo-secure-store";
 
+// Readable after the first unlock, so a background relaunch (Bluetooth state restoration) can load the
+// session while the phone is locked.
+const STORE_OPTS: SecureStore.SecureStoreOptions = {
+  keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY,
+};
+
 const KEYS = {
   server: "hearloom.server",
   token: "hearloom.token",
@@ -27,10 +33,10 @@ export function normalizeServerURL(input: string): string {
 
 export async function loadSession(): Promise<Session | null> {
   const [serverURL, token, email, phoneId] = await Promise.all([
-    SecureStore.getItemAsync(KEYS.server),
-    SecureStore.getItemAsync(KEYS.token),
-    SecureStore.getItemAsync(KEYS.email),
-    SecureStore.getItemAsync(KEYS.phone),
+    SecureStore.getItemAsync(KEYS.server, STORE_OPTS),
+    SecureStore.getItemAsync(KEYS.token, STORE_OPTS),
+    SecureStore.getItemAsync(KEYS.email, STORE_OPTS),
+    SecureStore.getItemAsync(KEYS.phone, STORE_OPTS),
   ]);
   if (!serverURL || !token) return null;
   return { serverURL, token, email: email ?? "", phoneId };
@@ -38,24 +44,24 @@ export async function loadSession(): Promise<Session | null> {
 
 export async function saveSession(s: Session): Promise<void> {
   await Promise.all([
-    SecureStore.setItemAsync(KEYS.server, s.serverURL),
-    SecureStore.setItemAsync(KEYS.token, s.token),
-    SecureStore.setItemAsync(KEYS.email, s.email),
-    s.phoneId ? SecureStore.setItemAsync(KEYS.phone, s.phoneId) : Promise.resolve(),
+    SecureStore.setItemAsync(KEYS.server, s.serverURL, STORE_OPTS),
+    SecureStore.setItemAsync(KEYS.token, s.token, STORE_OPTS),
+    SecureStore.setItemAsync(KEYS.email, s.email, STORE_OPTS),
+    s.phoneId ? SecureStore.setItemAsync(KEYS.phone, s.phoneId, STORE_OPTS) : Promise.resolve(),
   ]);
 }
 
 /** Forget the session but keep the phone id, so signing in again reuses this phone's record. */
 export async function clearSession(): Promise<void> {
-  await Promise.all([SecureStore.deleteItemAsync(KEYS.token)]);
+  await SecureStore.deleteItemAsync(KEYS.token, STORE_OPTS);
 }
 
 export async function storedPhoneId(): Promise<string | null> {
-  return SecureStore.getItemAsync(KEYS.phone);
+  return SecureStore.getItemAsync(KEYS.phone, STORE_OPTS);
 }
 
 export async function storedServerURL(): Promise<string | null> {
-  return SecureStore.getItemAsync(KEYS.server);
+  return SecureStore.getItemAsync(KEYS.server, STORE_OPTS);
 }
 
 /** Email/password sign-in; returns the bearer session token. */

@@ -178,6 +178,8 @@ export const contract = {
       .output(ok),
     list: oc.output(z.array(phoneSchema)),
     remove: oc.input(z.object({ id: z.uuid() })).output(ok),
+    /** The app is signing out: end its open capture streams and stop pushing to it. */
+    signOut: oc.input(z.object({ id: z.uuid() })).output(ok),
   },
   wearables: {
     list: oc.output(z.array(wearableSchema)),

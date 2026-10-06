@@ -135,6 +135,13 @@ export async function buildChunk(meta: StreamMeta, frames: AudioFrame[]): Promis
  * Durable writer for one capture stream. Frames are appended to a spool file and fsynced
  * before they are acknowledged; chunks are muxed to Ogg when they close.
  */
+/** A batch started after the next expected seq (an earlier batch never arrived). */
+export class SeqGapError extends Error {
+  constructor(readonly ackedSeq: number) {
+    super(`expected seq ${ackedSeq + 1}`);
+  }
+}
+
 export class StreamWriter {
   private chunk: OpenChunk | null = null;
   private queue: Promise<unknown> = Promise.resolve();
@@ -173,6 +180,8 @@ export class StreamWriter {
   private async appendNow(frames: AudioFrame[]): Promise<number> {
     const fresh = frames.filter((f) => f.seq > this.ackedSeq);
     if (fresh.length === 0) return this.ackedSeq;
+    // Acks are cumulative: storing frames past a hole would let the phone delete the missing ones.
+    if (fresh[0]!.seq !== this.ackedSeq + 1) throw new SeqGapError(this.ackedSeq);
 
     // Split the batch wherever a chunk boundary falls, then spool each part.
     let part: AudioFrame[] = [];

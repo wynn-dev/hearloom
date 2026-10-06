@@ -32,12 +32,26 @@ do {
     .filter { $0.hasSuffix(".seg") }.sorted()
   check(segs.count == 2 && segs.first == String(format: "%020lld.seg", 1500), "trim removes fully acked segments: \(segs)")
   check(j.frames("s1", from: 1601, max: 5).first?.seq == 1601, "read after trim")
+  check(j.unacked("s1") == 3100 - 1601, "unacked after trim (\(j.unacked("s1")))")
+
+  // A stream whose meta can't be read keeps its audio on disk; an empty leftover dir is cleaned up.
+  let fm = FileManager.default
+  let bad = root.appendingPathComponent("bad")
+  try fm.createDirectory(at: bad, withIntermediateDirectories: true)
+  try Data("{".utf8).write(to: bad.appendingPathComponent("meta.json"))
+  try FrameJournal.encode([Frame(seq: 0, at: 1, data: Data([1]))]).write(to: bad.appendingPathComponent(String(format: "%020lld.seg", 0)))
+  let empty = root.appendingPathComponent("empty")
+  try fm.createDirectory(at: empty, withIntermediateDirectories: true)
 
   // Simulate a crash/relaunch: a new journal instance must find the stream and close it.
   let j2 = FrameJournal(root: root)
   check(j2.nextSeq("s1") == 3100, "reload nextSeq (\(j2.nextSeq("s1")))")
   check(j2.meta("s1")?.endedAt == 1_000 + 3099 * 20, "reloaded stream is ended at its last frame")
   check(j2.frames("s1", from: 3000, max: 200).count == 100, "reload reads frames from disk")
+  // At launch the ack inside the oldest segment is unknown: count from its start (1500).
+  check(j2.unacked("s1") == 3100 - 1500, "unacked after reload (\(j2.unacked("s1")))")
+  check(!j2.streamIds.contains("bad") && fm.fileExists(atPath: bad.path), "unreadable meta is kept, not loaded")
+  check(!fm.fileExists(atPath: empty.path), "empty stream dir removed")
   j2.remove("s1")
   check(j2.streamIds.isEmpty, "remove")
 } catch {

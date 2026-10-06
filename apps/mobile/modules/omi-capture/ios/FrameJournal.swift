@@ -50,6 +50,9 @@ final class FrameJournal {
   private struct Open {
     var meta: StreamMeta
     var nextSeq: Int64
+    /// Highest seq the server has acknowledged (as far as we know; at launch, before the segment that
+    /// still holds frames).
+    var acked: Int64 = -1
     var segmentFirstSeq: Int64
     var handle: FileHandle?
     /// Recent frames kept in memory so live sends don't hit the disk.
@@ -75,6 +78,12 @@ final class FrameJournal {
   func meta(_ id: String) -> StreamMeta? { streams[id]?.meta }
 
   func nextSeq(_ id: String) -> Int64 { streams[id]?.nextSeq ?? 0 }
+
+  /// Frames not yet acknowledged by the server.
+  func unacked(_ id: String) -> Int64 {
+    guard let s = streams[id] else { return 0 }
+    return max(0, s.nextSeq - s.acked - 1)
+  }
 
   /// Frames with seq >= `from`, oldest first, at most `max`.
   func frames(_ id: String, from: Int64, max: Int) -> [Frame] {
@@ -158,6 +167,7 @@ final class FrameJournal {
       let isOpenSegment = firstSeq == s.segmentFirstSeq && s.handle != nil
       if lastSeq <= through && !isOpenSegment { try? fm.removeItem(at: url) }
     }
+    s.acked = max(s.acked, through)
     s.tail.removeAll { $0.seq <= through }
     streams[id] = s
   }
@@ -201,13 +211,19 @@ final class FrameJournal {
   private func loadExisting() {
     let ids = (try? fm.contentsOfDirectory(atPath: root.path)) ?? []
     for id in ids {
-      let metaURL = root.appendingPathComponent(id, isDirectory: true).appendingPathComponent("meta.json")
-      guard let data = try? Data(contentsOf: metaURL),
+      let dir = root.appendingPathComponent(id, isDirectory: true)
+      let segs = segments(id)
+      guard let data = try? Data(contentsOf: dir.appendingPathComponent("meta.json")),
             var meta = try? JSONDecoder().decode(StreamMeta.self, from: data) else {
-        try? fm.removeItem(at: root.appendingPathComponent(id, isDirectory: true))
+        // Without its meta a stream can't be uploaded, but its audio may still be recoverable by hand:
+        // only delete directories that hold nothing.
+        if segs.isEmpty && !fm.fileExists(atPath: dir.appendingPathComponent("raw.bin").path) {
+          try? fm.removeItem(at: dir)
+        } else {
+          Log.error("journal: \(id) has unreadable meta.json; leaving it on disk")
+        }
         continue
       }
-      let segs = segments(id)
       var next: Int64 = 0
       var lastAt: Int64 = meta.startedAt
       if let (first, url) = segs.last, let data = try? Data(contentsOf: url) {
@@ -220,7 +236,9 @@ final class FrameJournal {
         meta.endedAt = lastAt
         writeMeta(meta)
       }
-      streams[id] = Open(meta: meta, nextSeq: next, segmentFirstSeq: segs.last?.0 ?? 0, handle: nil)
+      streams[id] = Open(
+        meta: meta, nextSeq: next, acked: (segs.first?.0 ?? next) - 1, segmentFirstSeq: segs.last?.0 ?? 0,
+        handle: nil)
     }
     if !streams.isEmpty { Log.info("journal: \(streams.count) stream(s) awaiting upload") }
   }

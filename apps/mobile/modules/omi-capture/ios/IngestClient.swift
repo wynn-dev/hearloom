@@ -8,6 +8,8 @@ protocol IngestClientDelegate: AnyObject {
 }
 
 /// The phone -> server WebSocket (`/ingest`). Reconnects with backoff; resend logic lives in the engine.
+/// Backoff only resets once the server accepted the phone (`markHealthy`), so a server that accepts the
+/// socket and then rejects us doesn't cause a reconnect loop.
 final class IngestClient: NSObject, URLSessionWebSocketDelegate {
   enum State: String { case idle, connecting, open, waiting }
 
@@ -56,30 +58,72 @@ final class IngestClient: NSObject, URLSessionWebSocketDelegate {
     state = .idle
   }
 
-  func send(text: String) {
-    guard state == .open, let task else { return }
-    pendingSends += 1
-    task.send(.string(text)) { [weak self] error in self?.sent(error) }
+  /// The server accepted this phone on the current socket.
+  func markHealthy() { backoff = 1 }
+
+  /// Drop the socket and reconnect after the usual backoff (the engine resyncs from `welcome`).
+  func reset(_ reason: String) {
+    guard state == .open || state == .connecting else { return }
+    failed(reason)
   }
 
-  func send(data: Data) {
-    guard state == .open, let task else { return }
-    pendingSends += 1
-    task.send(.data(data)) { [weak self] error in self?.sent(error) }
+  /// The server refused us for a reason a quick retry won't fix (unknown phone, bad token, old
+  /// protocol). Try again much later; `start` (new sign-in/config) retries immediately.
+  func pause(_ reason: String, seconds: TimeInterval = 300) {
+    guard endpoint != nil else { return }
+    let wasOpen = state == .open
+    lastError = reason
+    retry?.cancel()
+    teardown(code: .normalClosure)
+    if wasOpen { delegate?.ingestClosed(self, reason: reason) }
+    state = .waiting
+    let work = DispatchWorkItem { [weak self] in self?.connectNow() }
+    retry = work
+    queue.asyncAfter(deadline: .now() + seconds, execute: work)
   }
 
-  func send(json: [String: Any]) {
+  /// Queue a message. `done` runs on `queue` with whether URLSession handed it to the socket; it is not
+  /// called if the socket isn't open. A failed send drops the connection: later frames must not arrive
+  /// without the ones before them.
+  @discardableResult
+  func send(text: String, done: ((Bool) -> Void)? = nil) -> Bool {
+    guard state == .open, let task else { return false }
+    pendingSends += 1
+    let gen = generation
+    task.send(.string(text)) { [weak self] error in self?.sent(error, gen, done) }
+    return true
+  }
+
+  @discardableResult
+  func send(data: Data) -> Bool {
+    guard state == .open, let task else { return false }
+    pendingSends += 1
+    let gen = generation
+    task.send(.data(data)) { [weak self] error in self?.sent(error, gen, nil) }
+    return true
+  }
+
+  @discardableResult
+  func send(json: [String: Any], done: ((Bool) -> Void)? = nil) -> Bool {
     guard let data = try? JSONSerialization.data(withJSONObject: json), let text = String(data: data, encoding: .utf8)
-    else { return }
-    send(text: text)
+    else { return false }
+    return send(text: text, done: done)
   }
 
   // MARK: private
 
-  private func sent(_ error: Error?) {
+  private func sent(_ error: Error?, _ gen: Int, _ done: ((Bool) -> Void)?) {
     queue.async {
+      guard gen == self.generation else {
+        done?(false)
+        return
+      }
       self.pendingSends = max(0, self.pendingSends - 1)
-      if let error { Log.warn("ingest: send failed: \(error.localizedDescription)") }
+      done?(error == nil)
+      if let error {
+        Log.warn("ingest: send failed: \(error.localizedDescription)")
+        self.failed("send: \(error.localizedDescription)")
+      }
     }
   }
 
@@ -122,7 +166,8 @@ final class IngestClient: NSObject, URLSessionWebSocketDelegate {
   }
 
   private func failed(_ reason: String) {
-    guard state != .idle else { return }
+    // Only the first failure of a connection counts (cancelled sends/receives report errors too).
+    guard state == .open || state == .connecting else { return }
     lastError = reason
     let wasOpen = state == .open
     teardown(code: .abnormalClosure)
@@ -133,6 +178,7 @@ final class IngestClient: NSObject, URLSessionWebSocketDelegate {
   private func scheduleRetry() {
     guard endpoint != nil else { return }
     state = .waiting
+    retry?.cancel()
     let delay = backoff
     backoff = min(backoff * 2, 30)
     let work = DispatchWorkItem { [weak self] in self?.connectNow() }
@@ -166,7 +212,6 @@ final class IngestClient: NSObject, URLSessionWebSocketDelegate {
   func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol protocol: String?) {
     guard webSocketTask === task else { return }
     state = .open
-    backoff = 1
     lastError = nil
     startPings(generation)
     delegate?.ingestOpened(self)
@@ -184,8 +229,8 @@ final class IngestClient: NSObject, URLSessionWebSocketDelegate {
   func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
     guard task === self.task else { return }
     if let http = task.response as? HTTPURLResponse, http.statusCode == 401 {
-      lastError = "unauthorized"
       Log.error("ingest: server rejected the session token (401)")
+      return pause("unauthorized")
     }
     failed(error?.localizedDescription ?? "completed")
   }

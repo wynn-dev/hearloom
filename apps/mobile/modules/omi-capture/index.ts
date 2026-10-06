@@ -42,6 +42,10 @@ export interface CaptureStatus {
   lastAckAt?: number;
   uplinkError?: string;
   serverError?: string;
+  /** e.g. `unknown_phone` (the app re-registers), `protocol_version`, `codec`, `stream`. */
+  serverErrorCode?: string;
+  /** Streams the server refused; kept on the phone, not retried until the account changes. */
+  rejectedStreams?: number;
   streamId?: string;
 }
 

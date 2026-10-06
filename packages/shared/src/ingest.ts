@@ -176,7 +176,8 @@ export type ServerMessage =
       haptic?: HapticPattern;
     }
   | { t: "haptic"; pattern: HapticPattern }
-  | { t: "error"; code: string; message: string; fatal?: boolean }
+  /** `slot` is set when the error concerns one stream; the rest of the socket keeps working. */
+  | { t: "error"; code: string; message: string; fatal?: boolean; slot?: number }
   | { t: "pong"; at: number; serverTime: number };
 
 export function parseClientMessage(text: string): ClientMessage {

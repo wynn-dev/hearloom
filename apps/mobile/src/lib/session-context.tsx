@@ -1,3 +1,4 @@
+import { ORPCError } from "@orpc/client";
 import { QueryClient } from "@tanstack/react-query";
 import * as Application from "expo-application";
 import * as Device from "expo-device";
@@ -9,6 +10,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import { type PushState, registerCategories, registerForPush } from "./push";
@@ -50,16 +52,35 @@ const Ctx = createContext<SessionApi | null>(null);
 
 async function registerPhone(rpc: Rpc): Promise<string> {
   const existing = await storedPhoneId();
-  const { phoneId } = await rpc.phones.register({
-    ...(existing ? { id: existing } : {}),
+  const info = {
     name: Device.deviceName ?? "iPhone",
     model: Device.modelName ?? undefined,
     osVersion: Device.osVersion ?? undefined,
     appVersion: Application.nativeApplicationVersion ?? undefined,
     bundleId: Application.applicationId ?? undefined,
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-  });
-  return phoneId;
+  };
+  try {
+    const { phoneId } = await rpc.phones.register({
+      ...(existing ? { id: existing } : {}),
+      ...info,
+    });
+    return phoneId;
+  } catch (err) {
+    // The stored id belongs to another account (signed in with someone else before): get a new one.
+    if (!existing || !(err instanceof ORPCError && err.code === "CONFLICT")) throw err;
+    const { phoneId } = await rpc.phones.register(info);
+    return phoneId;
+  }
+}
+
+async function loadSessionSafe(): Promise<Session | null> {
+  try {
+    return await loadSession();
+  } catch (err) {
+    console.warn("couldn't read the stored session", err);
+    return null;
+  }
 }
 
 export function SessionProvider({ children }: { children: ReactNode }) {
@@ -92,7 +113,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     void (async () => {
-      const session = await loadSession();
+      const session = await loadSessionSafe();
       if (!session) return setState({ status: "signedOut" });
       try {
         await activate(session);
@@ -118,6 +139,23 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     })();
   }, [activate, signOutLocal]);
 
+  // The server doesn't know this phone (removed in the web console, or its id now belongs to another
+  // account): register it again, which hands the (new) id to the native engine.
+  const lastReRegister = useRef(0);
+  const signedInSession = state.status === "signedIn" ? state.session : null;
+  useEffect(() => {
+    if (!signedInSession) return;
+    const sub = OmiCapture.addListener("onStatus", (s) => {
+      if (s.serverErrorCode !== "unknown_phone" || Date.now() - lastReRegister.current < 60_000)
+        return;
+      lastReRegister.current = Date.now();
+      void activate(signedInSession).catch((err) =>
+        console.warn("re-registering the phone failed", err),
+      );
+    });
+    return () => sub.remove();
+  }, [signedInSession, activate]);
+
   const api = useMemo<SessionApi>(
     () => ({
       state,
@@ -126,8 +164,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         await activate({ serverURL, token, email, phoneId: await storedPhoneId() });
       },
       async signOut() {
-        if (state.status === "signedIn")
+        if (state.status === "signedIn") {
+          // End this phone's open streams and stop pushes before the token is revoked.
+          await state.rpc.phones
+            .signOut({ id: state.session.phoneId })
+            .catch((err) => console.warn("phones.signOut failed", err));
           await signOutRemote(state.session.serverURL, state.session.token);
+        }
         await signOutLocal();
       },
       async refreshPush() {

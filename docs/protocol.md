@@ -33,7 +33,9 @@ The phone numbers every Opus frame of a capture stream from 0 (`seq`) and journa
 sending. The server appends frames to a spool file and `fsync`s before acknowledging. An `ack` with
 `seq = N` means every frame `≤ N` of that stream is durably stored, so the phone may delete them. After
 any reconnect the phone sends `hello` again; `welcome.ackedSeq` says where to resume. Resent frames
-(`seq ≤ ackedSeq`) are ignored, so retries are idempotent.
+(`seq ≤ ackedSeq`) are ignored, so retries are idempotent. A batch that starts after `ackedSeq + 1` (an
+earlier batch was lost) is not stored; the server replies `error seq_gap` for that slot and the phone
+resends from the ack, so an ack never covers a hole.
 
 ### Messages
 
@@ -75,7 +77,7 @@ Server → client:
 | `config` | `config` | settings changed (button mapping, pendant haptics) |
 | `notify` | `id, title, body, category, deepLink?, threadId?, interruptionLevel, haptic?` | show now; reply with `notify_ack` |
 | `haptic` | `pattern` | buzz the pendant |
-| `error` | `code, message, fatal?` | fatal errors close the socket |
+| `error` | `code, message, fatal?, slot?` | `fatal` (`unknown_phone`, `protocol_version`) closes the socket and the phone retries only after a long pause; with `slot` it concerns one stream (`seq_gap`: resend from the ack; `codec`, `stream`: stream refused) and the socket stays open |
 | `pong` | `at, serverTime` | |
 
 Button actions run **on the phone** using `config.button` (mute must work offline); the phone reports the
