@@ -45,6 +45,9 @@ The app is the EAS project `@unlaboredlabs/hearloom` (`apps/mobile/eas.json`). B
 | `preview`     | release build, ad hoc            | EAS link / QR    | `preview`      |
 | `production`  | App Store build                  | TestFlight       | `production`   |
 
+Dev client on your iPhone without Xcode: `eas device:create` once to register the phone (internal
+distribution is ad hoc), then `pnpm build:dev` and install from the link/QR. Run `pnpm start` and open it.
+
 `HEARLOOM_APS_ENV` (push environment) comes from EAS environment variables, not `eas.json`, so builds,
 fingerprints and OTA updates all see the same value (it is part of the native fingerprint).
 
