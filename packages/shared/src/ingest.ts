@@ -109,6 +109,8 @@ export type WearableInfo = z.infer<typeof wearableInfoSchema>;
 const unixMs = z.number().int().nonnegative();
 
 export const clientMessageSchema = z.discriminatedUnion("t", [
+  /** Register the phone on this socket (notifications, config) without opening a stream. */
+  z.object({ t: z.literal("presence"), v: z.number().int(), phoneId: z.uuid() }),
   z.object({
     t: z.literal("hello"),
     v: z.number().int(),
@@ -159,6 +161,7 @@ export type ServerMessage =
       serverTime: number;
       config: PhoneConfig;
     }
+  | { t: "ready"; serverTime: number; config: PhoneConfig }
   | { t: "config"; config: PhoneConfig }
   | { t: "ack"; slot: number; seq: number }
   | {

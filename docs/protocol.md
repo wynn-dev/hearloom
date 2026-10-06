@@ -57,6 +57,7 @@ JSON control messages, client → server:
 
 | `t` | Fields | Meaning |
 |---|---|---|
+| `presence` | `v, phoneId` | register the phone on this socket (notifications/config) — sent first on every connect |
 | `hello` | `v, slot, phoneId, stream{id, codec, sampleRate, frameMs, startedAt}, wearable?` | bind a stream to a slot |
 | `bye` | `slot, endedAt` | user stopped capture on purpose (no "disconnected" alerts) |
 | `wearable` | `wearable, connected, at` | pendant connected/disconnected, device info |
@@ -68,6 +69,7 @@ Server → client:
 
 | `t` | Fields | Meaning |
 |---|---|---|
+| `ready` | `serverTime, config` | reply to `presence` |
 | `welcome` | `slot, streamId, ackedSeq, serverTime, config` | resume point + phone config |
 | `ack` | `slot, seq` | durable through `seq` |
 | `config` | `config` | settings changed (button mapping, pendant haptics) |

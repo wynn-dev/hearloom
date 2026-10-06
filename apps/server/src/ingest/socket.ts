@@ -127,27 +127,44 @@ async function deviceEvent(
   });
 }
 
-async function onHello(ws: Ws, msg: Extract<ClientMessage, { t: "hello" }>): Promise<void> {
+/** Bind this socket to a phone (validated against the user). Returns false after failing the socket. */
+async function attachPhone(ws: Ws, v: number, phoneId: string): Promise<boolean> {
   const { userId } = ws.data;
-  if (msg.v !== INGEST_PROTOCOL_VERSION) {
-    return fail(ws, "protocol_version", `server speaks v${INGEST_PROTOCOL_VERSION}`, true);
-  }
-  if (!SUPPORTED_CODECS.has(msg.stream.codec)) {
-    return fail(ws, "codec", `codec ${msg.stream.codec} not supported`, true);
+  if (v !== INGEST_PROTOCOL_VERSION) {
+    fail(ws, "protocol_version", `server speaks v${INGEST_PROTOCOL_VERSION}`, true);
+    return false;
   }
   const [phone] = await db
     .select({ id: phones.id })
     .from(phones)
-    .where(and(eq(phones.id, msg.phoneId), eq(phones.userId, userId)));
-  if (!phone) return fail(ws, "unknown_phone", "register this phone first", true);
-
-  if (ws.data.phoneId !== msg.phoneId) {
-    unregisterPhoneSocket(ws);
-    ws.data.phoneId = msg.phoneId;
-    registerPhoneSocket(msg.phoneId, ws);
-    void onPhoneSocket(userId, msg.phoneId, true);
+    .where(and(eq(phones.id, phoneId), eq(phones.userId, userId)));
+  if (!phone) {
+    fail(ws, "unknown_phone", "register this phone first", true);
+    return false;
   }
-  await db.update(phones).set({ lastSeenAt: new Date() }).where(eq(phones.id, msg.phoneId));
+  if (ws.data.phoneId !== phoneId) {
+    unregisterPhoneSocket(ws);
+    ws.data.phoneId = phoneId;
+    registerPhoneSocket(phoneId, ws);
+    void onPhoneSocket(userId, phoneId, true);
+    invalidate(userId, ["status", "phones"]);
+  }
+  await db.update(phones).set({ lastSeenAt: new Date() }).where(eq(phones.id, phoneId));
+  return true;
+}
+
+async function onPresence(ws: Ws, msg: Extract<ClientMessage, { t: "presence" }>): Promise<void> {
+  if (!(await attachPhone(ws, msg.v, msg.phoneId))) return;
+  const settings = await getSettings(ws.data.userId);
+  send(ws, { t: "ready", serverTime: Date.now(), config: phoneConfig(settings) });
+}
+
+async function onHello(ws: Ws, msg: Extract<ClientMessage, { t: "hello" }>): Promise<void> {
+  const { userId } = ws.data;
+  if (!SUPPORTED_CODECS.has(msg.stream.codec)) {
+    return fail(ws, "codec", `codec ${msg.stream.codec} not supported`, true);
+  }
+  if (!(await attachPhone(ws, msg.v, msg.phoneId))) return;
 
   const wearableId = msg.wearable ? await upsertWearable(userId, msg.wearable) : null;
   await db
@@ -223,6 +240,8 @@ async function onBye(ws: Ws, slot: number, endedAt: number): Promise<void> {
 async function onControl(ws: Ws, msg: ClientMessage): Promise<void> {
   const { userId } = ws.data;
   switch (msg.t) {
+    case "presence":
+      return onPresence(ws, msg);
     case "hello":
       return onHello(ws, msg);
     case "bye":

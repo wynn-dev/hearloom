@@ -11,7 +11,8 @@
       "!**/routeTree.gen.ts",
       "!**/drizzle",
       "!apps/mobile/ios",
-      "!apps/mobile/android"
+      "!apps/mobile/android",
+      "!apps/mobile/assets"
     ]
   },
   "formatter": {

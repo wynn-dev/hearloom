@@ -1,4 +1,3 @@
-import { expo } from "@better-auth/expo";
 import { schema } from "@hearloom/db";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
@@ -31,7 +30,7 @@ export const auth = betterAuth({
     updateAge: 60 * 60 * 24,
   },
   trustedOrigins: [env.PUBLIC_URL, `${env.APP_SCHEME}://`, ...extraOrigins],
-  plugins: [admin(), bearer(), expo()],
+  plugins: [admin(), bearer()],
 });
 
 export type AuthSession = NonNullable<Awaited<ReturnType<typeof auth.api.getSession>>>;

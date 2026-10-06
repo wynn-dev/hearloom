@@ -22,3 +22,6 @@ apps/mobile/.expo/
 # swift sidecars
 sidecars/*/.build/
 sidecars/*/.swiftpm/
+
+# agent worktrees
+.claude/worktrees/
