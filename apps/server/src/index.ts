@@ -1,13 +1,16 @@
 import type { RealtimeEvent } from "@hearloom/api";
 import type { ServerWebSocket } from "bun";
+import { emitAgentEvent } from "./agent/webhooks";
 import { getSession } from "./auth";
 import { sql } from "./db";
 import { env } from "./env";
+import { relayChanges } from "./events";
 import { app } from "./http/app";
 import type { IngestSocketData } from "./ingest/phones";
 import { dbChunkSink } from "./ingest/sink";
 import { flushAllWriters, ingestHandlers, SPOOL_DIR, setFrameListener } from "./ingest/socket";
 import { recoverSpool } from "./ingest/stream-writer";
+import { enqueueRefine, stopJobs } from "./jobs";
 import { livePipeline } from "./live/host";
 import { startNotificationScheduler, stopNotifications } from "./notify/gateway";
 import { attachRealtimeServer, topicFor } from "./realtime";
@@ -74,6 +77,22 @@ attachRealtimeServer(server as never);
 startNotificationScheduler();
 livePipeline.start();
 setFrameListener((meta, frames) => livePipeline.push(meta, frames));
+// Finished conversations get an offline refine pass (worker process).
+livePipeline.onConversationEnded((userId, conversationId) => {
+  void enqueueRefine(conversationId).catch((err) => console.error("[jobs] enqueue failed", err));
+  void sql`select started_at, ended_at from conversations where id = ${conversationId}`.then(
+    ([c]) => {
+      if (!c) return;
+      emitAgentEvent(userId, {
+        type: "conversation.ended",
+        conversationId,
+        startedAt: new Date(c.started_at).toISOString(),
+        endedAt: c.ended_at ? new Date(c.ended_at).toISOString() : null,
+      });
+    },
+  );
+});
+await relayChanges(sql);
 console.log(`[hearloom] listening on http://${env.HOST}:${env.PORT} (public: ${env.PUBLIC_URL})`);
 
 let stopping = false;
@@ -84,6 +103,7 @@ async function shutdown(signal: string) {
   await server.stop();
   await flushAllWriters();
   await livePipeline.stop();
+  await stopJobs();
   stopNotifications();
   await sql.end({ timeout: 5 });
   process.exit(0);

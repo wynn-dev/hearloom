@@ -12,6 +12,7 @@ import {
 } from "@hearloom/shared";
 import type { ServerWebSocket } from "bun";
 import { and, desc, eq } from "drizzle-orm";
+import { emitAgentEvent } from "../agent/webhooks";
 import { db } from "../db";
 import { env } from "../env";
 import { updateLiveState } from "../live/state";
@@ -312,6 +313,12 @@ async function onControl(ws: Ws, msg: ClientMessage): Promise<void> {
         void onBattery(userId, msg.peripheralId, 100, true);
       } else if (msg.kind === "bookmark") {
         await db.insert(bookmarks).values({ userId, at: new Date(msg.at), source: "button" });
+        emitAgentEvent(userId, {
+          type: "bookmark",
+          at: new Date(msg.at).toISOString(),
+          source: "button",
+          note: null,
+        });
       } else if (msg.kind === "muted" || msg.kind === "unmuted") {
         updateLiveState(userId, { muted: msg.kind === "muted" });
       } else if (msg.kind === "ack_nudge") {

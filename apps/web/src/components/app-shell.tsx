@@ -3,6 +3,7 @@ import { Link, useLocation, useNavigate } from "@tanstack/react-router";
 import {
   Activity,
   Bell,
+  Bot,
   CalendarDays,
   ChevronsUpDown,
   Contact,
@@ -28,6 +29,7 @@ const NAV = [
   { to: "/notifications", label: "Notifications", icon: Bell, exact: false },
   { to: "/people", label: "People", icon: Contact, exact: false },
   { to: "/devices", label: "Devices", icon: Smartphone, exact: false },
+  { to: "/agent", label: "Agent", icon: Bot, exact: false },
   { to: "/settings", label: "Settings", icon: SlidersHorizontal, exact: false },
 ] as const;
 

@@ -42,6 +42,16 @@ const schema = z.object({
   MODELS_DIR: z.string().optional(),
   /** Cosine similarity needed to attribute speech to an enrolled voice. */
   SPEAKER_MATCH_THRESHOLD: z.coerce.number().default(0.6),
+  // --- Refine pass (worker) ---
+  /** auto = ElevenLabs Scribe v2 when ELEVENLABS_API_KEY is set, else keep the live text. */
+  REFINE_PROVIDER: z.enum(["auto", "elevenlabs", "keep", "off"]).default("auto"),
+  ELEVENLABS_API_KEY: z.string().optional(),
+  /** Opt out of ElevenLabs storing/training on audio (zero retention needs an enterprise plan). */
+  ELEVENLABS_ENABLE_LOGGING: z.enum(["true", "false"]).default("false"),
+  /** FluidAudio diarization sidecar (sidecars/diarizer). Empty = skip re-diarization. */
+  DIARIZER_BIN: z
+    .string()
+    .default(resolve(repoRoot, "sidecars/diarizer/.build/release/hearloom-diarizer")),
   /** Cosine similarity for grouping unknown voices within a conversation. */
   SPEAKER_CLUSTER_THRESHOLD: z.coerce.number().default(0.6),
 });

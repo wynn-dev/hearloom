@@ -48,6 +48,17 @@ const alertsFields = {
   lowBatteryPercent: z.number().int().min(0).max(100),
 };
 
+/** Outbound events to an agent (e.g. Hermes) — HMAC-signed webhooks. */
+const agentFields = {
+  webhookUrl: z.union([z.url(), z.literal("")]),
+  webhookSecret: z.string().max(256),
+};
+const agentEventsFields = {
+  conversationEnded: z.boolean(),
+  conversationRefined: z.boolean(),
+  bookmark: z.boolean(),
+};
+
 export const settingsSchema = z.object({
   /** IANA zone used for quiet hours and day boundaries. Set from the phone on first login. */
   timezone: timeZoneSchema.default("UTC"),
@@ -84,6 +95,19 @@ export const settingsSchema = z.object({
       lowBatteryPercent: alertsFields.lowBatteryPercent.default(15),
     })
     .prefault({}),
+  agent: z
+    .object({
+      webhookUrl: agentFields.webhookUrl.default(""),
+      webhookSecret: agentFields.webhookSecret.default(""),
+      events: z
+        .object({
+          conversationEnded: agentEventsFields.conversationEnded.default(true),
+          conversationRefined: agentEventsFields.conversationRefined.default(true),
+          bookmark: agentEventsFields.bookmark.default(true),
+        })
+        .prefault({}),
+    })
+    .prefault({}),
 });
 
 export type Settings = z.infer<typeof settingsSchema>;
@@ -98,6 +122,10 @@ export const settingsPatchSchema = z.object({
     .optional(),
   button: z.object(buttonFields).partial().optional(),
   alerts: z.object(alertsFields).partial().optional(),
+  agent: z
+    .object({ ...agentFields, events: z.object(agentEventsFields).partial() })
+    .partial()
+    .optional(),
 });
 export type SettingsPatch = z.infer<typeof settingsPatchSchema>;
 
@@ -118,5 +146,10 @@ export function mergeSettings(current: Settings, patch: SettingsPatch): Settings
     },
     button: { ...current.button, ...patch.button },
     alerts: { ...current.alerts, ...patch.alerts },
+    agent: {
+      ...current.agent,
+      ...patch.agent,
+      events: { ...current.agent.events, ...patch.agent?.events },
+    },
   });
 }

@@ -335,3 +335,21 @@ export const userSettings = pgTable("user_settings", {
     .defaultNow()
     .$onUpdate(() => new Date()),
 });
+
+/** Tokens for agents (e.g. a Hermes agent over MCP). Only a SHA-256 hash is stored. */
+export const apiTokens = pgTable(
+  "api_tokens",
+  {
+    id: id(),
+    userId: owner(),
+    name: text().notNull(),
+    /** First characters of the token, for recognizing it in the console. */
+    prefix: text().notNull(),
+    tokenHash: text().notNull(),
+    scopes: text().array().$type<Array<"read" | "notify">>().notNull(),
+    lastUsedAt: ts(),
+    revokedAt: ts(),
+    createdAt: createdAt(),
+  },
+  (t) => [uniqueIndex().on(t.tokenHash), index().on(t.userId)],
+);

@@ -141,6 +141,15 @@ export const personSchema = z.object({
   lastHeardAt: z.date().nullable(),
 });
 
+export const apiTokenSchema = z.object({
+  id: z.uuid(),
+  name: z.string(),
+  prefix: z.string(),
+  scopes: z.array(z.enum(["read", "notify"])),
+  createdAt: z.date(),
+  lastUsedAt: z.date().nullable(),
+});
+
 export const contract = {
   me: {
     get: oc.output(
@@ -226,6 +235,25 @@ export const contract = {
       )
       .output(z.object({ personId: z.uuid(), sampleSeconds: z.number() })),
   },
+  agent: {
+    tokens: {
+      list: oc.output(z.array(apiTokenSchema)),
+      /** Returns the token once; only its hash is stored. */
+      create: oc
+        .input(
+          z.object({
+            name: z.string().trim().min(1).max(80),
+            scopes: z.array(z.enum(["read", "notify"])).min(1),
+          }),
+        )
+        .output(z.object({ token: z.string(), info: apiTokenSchema })),
+      revoke: oc.input(z.object({ id: z.uuid() })).output(ok),
+    },
+    /** Send a test event to the configured webhook. */
+    testWebhook: oc.output(
+      z.object({ ok: z.boolean(), status: z.number(), error: z.string().nullable() }),
+    ),
+  },
   bookmarks: {
     create: oc
       .input(z.object({ at: z.date().optional(), note: z.string().max(500).optional() }))
@@ -269,6 +297,7 @@ export type Timeline = z.infer<typeof timelineSchema>;
 export type NotificationItem = z.infer<typeof notificationSchema>;
 export type AudioChunk = z.infer<typeof audioChunkSchema>;
 export type Person = z.infer<typeof personSchema>;
+export type ApiToken = z.infer<typeof apiTokenSchema>;
 
 /** Realtime events pushed to console/app sockets (`/realtime`). Clients refetch on these. */
 export type RealtimeEvent =

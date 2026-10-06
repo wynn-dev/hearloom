@@ -3,6 +3,7 @@ import { RPCHandler } from "@orpc/server/fetch";
 import { Hono } from "hono";
 import { auth } from "../auth";
 import { env } from "../env";
+import { handleMcp } from "../mcp/server";
 import { router } from "../rpc/router";
 import { serveChunk } from "./media";
 
@@ -21,6 +22,9 @@ app.all("/rpc/*", async (c) => {
   });
   return matched ? response : c.notFound();
 });
+
+// MCP endpoint for agents (Hermes etc.), authenticated with an agent token (console → Agent).
+app.on(["GET", "POST", "DELETE"], "/mcp", (c) => handleMcp(c.req.raw));
 
 app.get("/media/chunks/:file", (c) => {
   const id = c.req.param("file").replace(/\.ogg$/, "");

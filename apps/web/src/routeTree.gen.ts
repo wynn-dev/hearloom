@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as AppRouteImport } from './routes/_app'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as AppIndexRouteImport } from './routes/_app/index'
+import { Route as AppAgentRouteImport } from './routes/_app/agent'
 import { Route as AppDevicesRouteImport } from './routes/_app/devices'
 import { Route as AppNotificationsRouteImport } from './routes/_app/notifications'
 import { Route as AppPeopleRouteImport } from './routes/_app/people'
@@ -31,6 +32,11 @@ const LoginRoute = LoginRouteImport.update({
 const AppIndexRoute = AppIndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppAgentRoute = AppAgentRouteImport.update({
+  id: '/agent',
+  path: '/agent',
   getParentRoute: () => AppRoute,
 } as any)
 const AppDevicesRoute = AppDevicesRouteImport.update({
@@ -67,6 +73,7 @@ const AppUsersRoute = AppUsersRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof AppIndexRoute
   '/login': typeof LoginRoute
+  '/agent': typeof AppAgentRoute
   '/devices': typeof AppDevicesRoute
   '/notifications': typeof AppNotificationsRoute
   '/people': typeof AppPeopleRoute
@@ -76,6 +83,7 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/login': typeof LoginRoute
+  '/agent': typeof AppAgentRoute
   '/devices': typeof AppDevicesRoute
   '/notifications': typeof AppNotificationsRoute
   '/people': typeof AppPeopleRoute
@@ -88,6 +96,7 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/_app': typeof AppRouteWithChildren
   '/login': typeof LoginRoute
+  '/_app/agent': typeof AppAgentRoute
   '/_app/devices': typeof AppDevicesRoute
   '/_app/notifications': typeof AppNotificationsRoute
   '/_app/people': typeof AppPeopleRoute
@@ -101,6 +110,7 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/login'
+    | '/agent'
     | '/devices'
     | '/notifications'
     | '/people'
@@ -110,6 +120,7 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/login'
+    | '/agent'
     | '/devices'
     | '/notifications'
     | '/people'
@@ -121,6 +132,7 @@ export interface FileRouteTypes {
     | '__root__'
     | '/_app'
     | '/login'
+    | '/_app/agent'
     | '/_app/devices'
     | '/_app/notifications'
     | '/_app/people'
@@ -156,6 +168,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof AppIndexRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/agent': {
+      id: '/_app/agent'
+      path: '/agent'
+      fullPath: '/agent'
+      preLoaderRoute: typeof AppAgentRouteImport
       parentRoute: typeof AppRoute
     }
     '/_app/devices': {
@@ -204,6 +223,7 @@ declare module '@tanstack/react-router' {
 }
 
 interface AppRouteChildren {
+  AppAgentRoute: typeof AppAgentRoute
   AppDevicesRoute: typeof AppDevicesRoute
   AppNotificationsRoute: typeof AppNotificationsRoute
   AppPeopleRoute: typeof AppPeopleRoute
@@ -214,6 +234,7 @@ interface AppRouteChildren {
 }
 
 const AppRouteChildren: AppRouteChildren = {
+  AppAgentRoute: AppAgentRoute,
   AppDevicesRoute: AppDevicesRoute,
   AppNotificationsRoute: AppNotificationsRoute,
   AppPeopleRoute: AppPeopleRoute,
