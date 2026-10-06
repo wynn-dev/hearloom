@@ -16,14 +16,19 @@ A child process of the server (`apps/server/src/live`) receives every stored bat
      starts (with 0.5 s pre-roll), streams only while there's speech activity and closes after 45 s
      without speech, so you pay for speech rather than silence. Per-word language ID (EN↔NL code-switching)
      and speaker labels come from Soniox.
-   - Otherwise, and for backlog audio uploaded late: NVIDIA Parakeet TDT 0.6B v3 (int8) locally on each
-     VAD segment. 25 European languages including Dutch; ~0.06× real time on an M5 Pro. Language is
+   - Otherwise, for backlog audio uploaded late, and for any speech a Soniox session didn't transcribe
+     (connection/auth failure — Soniox is then skipped for 30 s): NVIDIA Parakeet TDT 0.6B v3 (int8)
+     locally on each VAD segment. 25 European languages including Dutch; ~0.06× real time on an M5 Pro. Language is
      guessed from common EN/NL function words.
 4. **Speakers** — 3D-Speaker CAM++ embeddings per utterance (≥ 1 s), matched against enrolled voiceprints
-   (cosine ≥ `SPEAKER_MATCH_THRESHOLD`, default 0.6) and clustered within a conversation (S1, S2, …).
+   (cosine ≥ `SPEAKER_MATCH_THRESHOLD`, default 0.6) and clustered within a conversation (S1, S2, …;
+   Soniox's per-session labels map into the same series). Re-attributing an utterance replaces the
+   voiceprint learned from it.
 5. **Sound events** — CED-base (AudioSet, 527 classes, 16 kHz) on 2 s windows every 1 s, smoothed with
    hysteresis (open ≥ 0.45, close after two windows < 0.25). Speech classes are dropped.
-6. **Conversations** — consecutive utterances less than 2 minutes apart.
+6. **Conversations** — consecutive utterances less than 2 minutes apart. Backlog audio joins (and
+   extends) the closed conversation it falls in, or starts a closed one of its own; conversations left
+   open by a crashed pipeline are closed when it restarts.
 
 ### Why CAM++ instead of WeSpeaker ResNet293
 

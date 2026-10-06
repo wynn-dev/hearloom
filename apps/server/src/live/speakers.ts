@@ -61,9 +61,14 @@ export class SpeakerDirectory {
   }
 }
 
-/** Groups unidentified voices within one conversation into S1, S2, … by embedding similarity. */
+/**
+ * Groups unidentified voices within one conversation into S1, S2, … by embedding similarity, and
+ * gives engine speaker labels (e.g. Soniox's per-session numbers) keys from the same series.
+ */
 export class SpeakerClusters {
   private clusters: { key: string; centroid: Float32Array; n: number }[] = [];
+  private aliases = new Map<string, string>();
+  private next = 1;
 
   constructor(private readonly threshold = 0.6) {}
 
@@ -84,8 +89,18 @@ export class SpeakerClusters {
       best.n++;
       return best.key;
     }
-    const key = `S${this.clusters.length + 1}`;
+    const key = `S${this.next++}`;
     this.clusters.push({ key, centroid: Float32Array.from(embedding), n: 1 });
+    return key;
+  }
+
+  /** Stable `S…` key for an engine's speaker label within this conversation. */
+  alias(external: string): string {
+    let key = this.aliases.get(external);
+    if (!key) {
+      key = `S${this.next++}`;
+      this.aliases.set(external, key);
+    }
     return key;
   }
 }

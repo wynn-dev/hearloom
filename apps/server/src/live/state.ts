@@ -37,6 +37,13 @@ export function updateLiveState(userId: string, patch: Partial<LiveState>): void
   }
 }
 
+/** The live pipeline stopped: nobody is in a conversation it is tracking anymore. */
+export function resetConversationState(): void {
+  for (const [userId, s] of states) {
+    if (s.inConversation) updateLiveState(userId, { inConversation: false, conversationId: null });
+  }
+}
+
 export function onConversationEnd(fn: (userId: string) => void): () => void {
   conversationEndListeners.add(fn);
   return () => conversationEndListeners.delete(fn);

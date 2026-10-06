@@ -49,9 +49,11 @@ const deps: LiveDeps = {
   conversations: new ConversationTracker(
     db,
     {
-      started: (userId) => send({ t: "state", userId, patch: { inConversation: true } }),
-      ended: (userId, conversationId) => {
-        send({ t: "state", userId, patch: { inConversation: false, conversationId: null } });
+      started: (userId, conversationId) =>
+        send({ t: "state", userId, patch: { inConversation: true, conversationId } }),
+      ended: (userId, conversationId, live) => {
+        if (live)
+          send({ t: "state", userId, patch: { inConversation: false, conversationId: null } });
         send({ t: "conversation_ended", userId, conversationId });
       },
     },
@@ -70,6 +72,10 @@ const deps: LiveDeps = {
   invalidate: (userId, keys) => send({ t: "invalidate", userId, keys }),
   log,
 };
+
+// A previous child may have died with conversations open; close them before taking new audio.
+const orphans = await deps.conversations.closeOrphans();
+if (orphans > 0) log(`closed ${orphans} conversation(s) left open by a previous run`);
 
 log(
   `ready: asr=${asrMode}${deps.localAsr ? " (+local parakeet)" : ""}, tagger=${deps.tagger ? "ced-base" : "off"}, speakers=${embedder ? SPEAKER_MODEL_ID : "off"}`,
@@ -124,13 +130,22 @@ async function enroll(msg: Extract<HostMessage, { t: "enroll" }>): Promise<numbe
     .select({ isSelf: schema.people.isSelf })
     .from(schema.people)
     .where(eq(schema.people.id, msg.personId));
-  await db.insert(schema.voiceprints).values({
-    userId: msg.userId,
-    personId: msg.personId,
-    model: SPEAKER_MODEL_ID,
-    embedding: Array.from(embedding),
-    sampleSeconds: audio.length / 16000,
-    source: "confirmed",
+  await db.transaction(async (tx) => {
+    // Re-attributing an utterance replaces the voiceprint learned from it (it was the wrong person).
+    await tx
+      .delete(schema.voiceprints)
+      .where(
+        and(eq(schema.voiceprints.userId, msg.userId), eq(schema.voiceprints.utteranceId, u.id)),
+      );
+    await tx.insert(schema.voiceprints).values({
+      userId: msg.userId,
+      personId: msg.personId,
+      utteranceId: u.id,
+      model: SPEAKER_MODEL_ID,
+      embedding: Array.from(embedding),
+      sampleSeconds: audio.length / 16000,
+      source: "confirmed",
+    });
   });
   await db
     .update(schema.utterances)

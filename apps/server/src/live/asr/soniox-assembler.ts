@@ -32,6 +32,16 @@ export class SessionClock {
     return this.sentMs;
   }
 
+  /** Whether `[fromAbs, toAbs]` lies within audio we sent (one contiguous span). */
+  covers(fromAbs: number, toAbs: number, slackMs = 100): boolean {
+    for (let i = 0; i < this.spans.length; i++) {
+      const s = this.spans[i]!;
+      const len = (this.spans[i + 1]?.sessionMs ?? this.sentMs) - s.sessionMs;
+      if (fromAbs >= s.absMs - slackMs && toAbs <= s.absMs + len + slackMs) return true;
+    }
+    return false;
+  }
+
   toAbs(sessionMs: number): number {
     let span = this.spans[0];
     for (const s of this.spans) {
@@ -54,6 +64,7 @@ export class SonioxAssembler {
     private readonly clock: SessionClock,
     private readonly model: string,
     private readonly maxGapMs = 1500,
+    private readonly speakerPrefix = "soniox:",
   ) {}
 
   /** Feed one response's tokens; returns utterances completed by these tokens. */
@@ -108,7 +119,7 @@ export class SonioxAssembler {
       endAt: this.clock.toAbs(last.end_ms ?? last.start_ms ?? 0),
       text,
       lang,
-      speakerKey: first.speaker !== undefined ? `soniox:${first.speaker}` : null,
+      speakerKey: first.speaker !== undefined ? `${this.speakerPrefix}${first.speaker}` : null,
       confidence: confs.length ? confs.reduce((a, b) => a + b, 0) / confs.length : null,
       provider: "soniox",
       model: this.model,

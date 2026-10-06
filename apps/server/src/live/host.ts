@@ -4,7 +4,7 @@ import { env } from "../env";
 import type { StreamMeta } from "../ingest/stream-writer";
 import { invalidate } from "../realtime";
 import type { ChildMessage, HostMessage } from "./ipc";
-import { updateLiveState } from "./state";
+import { resetConversationState, updateLiveState } from "./state";
 
 type ConversationEndedHandler = (userId: string, conversationId: string) => void;
 
@@ -104,6 +104,9 @@ export class LivePipelineHost {
       onExit: (_proc, code) => {
         this.child = null;
         this.ready = false;
+        resetConversationState();
+        for (const p of this.pending.values()) p.reject(new Error("live pipeline restarted"));
+        this.pending.clear();
         if (this.stopped) return;
         if (code === 2) {
           console.error("[live] pipeline not started (missing models); audio is still recorded");

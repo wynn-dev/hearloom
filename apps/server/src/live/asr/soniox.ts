@@ -26,13 +26,19 @@ export class SonioxSession {
   private resolveFinished: (() => void) | null = null;
   readonly openedAt = Date.now();
   closed = false;
+  /** The session broke (connection, auth, quota…); what it didn't transcribe needs another engine. */
+  failed = false;
+  /** Soniox confirmed it processed all audio we sent. */
+  finished = false;
 
   constructor(
     opts: SonioxOptions,
     private readonly onUtterance: (u: Utterance) => void,
     private readonly onError: (message: string) => void,
   ) {
-    this.assembler = new SonioxAssembler(this.clock, opts.model);
+    // Speaker labels restart at 1 in every session: make them unique.
+    const speakerPrefix = `soniox:${crypto.randomUUID().slice(0, 8)}:`;
+    this.assembler = new SonioxAssembler(this.clock, opts.model, undefined, speakerPrefix);
     this.ws = new WebSocket(URL, { headers: { Authorization: `Bearer ${opts.apiKey}` } } as never);
     this.ws.binaryType = "arraybuffer";
     this.ready = new Promise((resolve, reject) => {
@@ -62,6 +68,7 @@ export class SonioxSession {
       clearInterval(this.keepalive);
       const u = this.assembler.flush();
       if (u) this.onUtterance(u);
+      if (!this.closing && !this.finished) this.fail("soniox connection closed unexpectedly");
       this.resolveFinished?.();
     };
     // Soniox requires traffic at least every 40 s.
@@ -80,22 +87,34 @@ export class SonioxSession {
     return this.clock.totalSentMs;
   }
 
+  /** Whether audio for this wall-clock span was streamed to the session. */
+  covers(fromAbs: number, toAbs: number): boolean {
+    return this.clock.covers(fromAbs, toAbs);
+  }
+
   /** Stream PCM captured at wall-clock `absMs`. */
   send(pcm: Int16Array, absMs: number): void {
     if (this.closed || this.closing) return;
     const bytes = new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength).slice();
     this.clock.sent(absMs, pcm.length / 16);
     this.lastSendAt = Date.now();
-    void this.ready.then(() => {
-      if (this.ws.readyState === WebSocket.OPEN) this.ws.send(bytes);
-    });
+    this.ready.then(
+      () => {
+        if (this.ws.readyState === WebSocket.OPEN) this.ws.send(bytes);
+      },
+      () => {}, // reported once by fail()
+    );
   }
 
   /** Ask Soniox to finalize pending tokens now (e.g. the mic went to sleep). */
   finalize(): void {
-    void this.ready.then(() => {
-      if (this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ type: "finalize" }));
-    });
+    this.ready.then(
+      () => {
+        if (this.ws.readyState === WebSocket.OPEN)
+          this.ws.send(JSON.stringify({ type: "finalize" }));
+      },
+      () => {},
+    );
   }
 
   /** End the stream and wait (briefly) for the last tokens. */
@@ -103,6 +122,7 @@ export class SonioxSession {
     this.closing ??= (async () => {
       try {
         await this.ready;
+        if (this.closed || this.finished) return;
         if (this.ws.readyState === WebSocket.OPEN) this.ws.send("");
         await Promise.race([
           new Promise<void>((r) => {
@@ -138,6 +158,7 @@ export class SonioxSession {
     }
     if (msg.tokens?.length) for (const u of this.assembler.push(msg.tokens)) this.onUtterance(u);
     if (msg.finished) {
+      this.finished = true;
       const u = this.assembler.flush();
       if (u) this.onUtterance(u);
       this.resolveFinished?.();
@@ -145,6 +166,8 @@ export class SonioxSession {
   }
 
   private fail(message: string): void {
+    if (this.failed) return;
+    this.failed = true;
     this.closed = true;
     clearInterval(this.keepalive);
     this.onError(message);

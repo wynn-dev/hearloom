@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { SessionClock, SonioxAssembler } from "./asr/soniox-assembler";
 import { guessLanguage } from "./lang";
+import { PcmHistory } from "./pcm";
 import { SoundEventSmoother } from "./sounds";
+import { SpeakerClusters } from "./speakers";
 
 describe("guessLanguage", () => {
   test("detects Dutch and English", () => {
@@ -67,5 +69,42 @@ describe("Soniox assembly", () => {
     const last = a.flush()!;
     expect(last.text).toBe("Later");
     expect(last.startAt).toBe(1_060_100);
+  });
+});
+
+describe("PcmHistory", () => {
+  test("stays bounded during uninterrupted audio and slices across chunks", () => {
+    const h = new PcmHistory(10_000);
+    const t0 = 1_760_000_000_000;
+    // One hour of contiguous 1 s chunks whose sample values encode their second.
+    for (let s = 0; s < 3600; s++) h.push(t0 + s * 1000, new Float32Array(16_000).fill(s));
+    expect(h.size).toBeLessThanOrEqual(12 * 16_000);
+    const cut = h.slice(t0 + 3598_500, t0 + 3599_500)!;
+    expect(cut.length).toBe(16_000);
+    expect(cut[0]).toBe(3598);
+    expect(cut[cut.length - 1]).toBe(3599);
+    expect(h.slice(t0, t0 + 1000)).toBeNull();
+  });
+});
+
+describe("SessionClock.covers", () => {
+  test("only spans that were actually streamed", () => {
+    const c = new SessionClock();
+    c.sent(10_000, 2_000);
+    c.sent(12_000, 1_000); // contiguous
+    c.sent(60_000, 1_000); // after a gap
+    expect(c.covers(10_500, 12_900)).toBe(true);
+    expect(c.covers(12_500, 14_000)).toBe(false);
+    expect(c.covers(60_000, 61_000)).toBe(true);
+    expect(c.covers(30_000, 31_000)).toBe(false);
+  });
+});
+
+describe("SpeakerClusters.alias", () => {
+  test("engine labels from different sessions get distinct keys", () => {
+    const c = new SpeakerClusters();
+    expect(c.alias("soniox:aaaa:1")).toBe("S1");
+    expect(c.alias("soniox:bbbb:1")).toBe("S2");
+    expect(c.alias("soniox:aaaa:1")).toBe("S1");
   });
 });
