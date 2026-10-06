@@ -7,6 +7,7 @@ import {
   type ChunkSink,
   type FinishedChunk,
   recoverSpool,
+  SeqGapError,
   type StreamMeta,
   StreamWriter,
 } from "./stream-writer";
@@ -65,6 +66,19 @@ describe("StreamWriter", () => {
     expect(sink.chunks[0]!.frameCount).toBe(60);
     expect(sink.chunks[0]!.durationMs).toBe(60 * 20);
     expect(sink.acked).toBe(59);
+  });
+
+  test("refuses a batch that skips frames, so the ack never covers a hole", async () => {
+    const sink = new MemorySink();
+    const w = new StreamWriter(meta, -1, sink, opts());
+    const t0 = 1_760_000_000_000;
+    expect(await w.append(run(0, t0, 10))).toBe(9);
+    // Frames 10..19 were lost in transit; 20.. must not be stored or acked.
+    await expect(w.append(run(20, t0 + 400, 10))).rejects.toBeInstanceOf(SeqGapError);
+    expect(w.ackedSeq).toBe(9);
+    // The phone resends from the ack and everything lines up again.
+    expect(await w.append(run(10, t0 + 200, 20))).toBe(29);
+    await w.flush();
   });
 
   test("splits chunks on long silences and at the max length", async () => {

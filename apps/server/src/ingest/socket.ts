@@ -21,7 +21,7 @@ import { invalidate } from "../realtime";
 import { getSettings, phoneConfig } from "../settings";
 import { type IngestSocketData, registerPhoneSocket, unregisterPhoneSocket } from "./phones";
 import { dbChunkSink } from "./sink";
-import { type StreamMeta, StreamWriter } from "./stream-writer";
+import { SeqGapError, type StreamMeta, StreamWriter } from "./stream-writer";
 
 type Ws = ServerWebSocket<IngestSocketData>;
 const { captureStreams, deviceEvents, phones, wearables, bookmarks, notifications } = schema;
@@ -44,8 +44,8 @@ function send(ws: Ws, msg: ServerMessage): void {
   ws.send(JSON.stringify(msg));
 }
 
-function fail(ws: Ws, code: string, message: string, fatal = false): void {
-  send(ws, { t: "error", code, message, fatal });
+function fail(ws: Ws, code: string, message: string, fatal = false, slot?: number): void {
+  send(ws, { t: "error", code, message, fatal, ...(slot === undefined ? {} : { slot }) });
   if (fatal) ws.close(1008, code);
 }
 
@@ -127,27 +127,44 @@ async function deviceEvent(
   });
 }
 
-async function onHello(ws: Ws, msg: Extract<ClientMessage, { t: "hello" }>): Promise<void> {
+/** Bind this socket to a phone (validated against the user). Returns false after failing the socket. */
+async function attachPhone(ws: Ws, v: number, phoneId: string): Promise<boolean> {
   const { userId } = ws.data;
-  if (msg.v !== INGEST_PROTOCOL_VERSION) {
-    return fail(ws, "protocol_version", `server speaks v${INGEST_PROTOCOL_VERSION}`, true);
-  }
-  if (!SUPPORTED_CODECS.has(msg.stream.codec)) {
-    return fail(ws, "codec", `codec ${msg.stream.codec} not supported`, true);
+  if (v !== INGEST_PROTOCOL_VERSION) {
+    fail(ws, "protocol_version", `server speaks v${INGEST_PROTOCOL_VERSION}`, true);
+    return false;
   }
   const [phone] = await db
     .select({ id: phones.id })
     .from(phones)
-    .where(and(eq(phones.id, msg.phoneId), eq(phones.userId, userId)));
-  if (!phone) return fail(ws, "unknown_phone", "register this phone first", true);
-
-  if (ws.data.phoneId !== msg.phoneId) {
-    unregisterPhoneSocket(ws);
-    ws.data.phoneId = msg.phoneId;
-    registerPhoneSocket(msg.phoneId, ws);
-    void onPhoneSocket(userId, msg.phoneId, true);
+    .where(and(eq(phones.id, phoneId), eq(phones.userId, userId)));
+  if (!phone) {
+    fail(ws, "unknown_phone", "register this phone first", true);
+    return false;
   }
-  await db.update(phones).set({ lastSeenAt: new Date() }).where(eq(phones.id, msg.phoneId));
+  if (ws.data.phoneId !== phoneId) {
+    unregisterPhoneSocket(ws);
+    ws.data.phoneId = phoneId;
+    registerPhoneSocket(phoneId, ws);
+    void onPhoneSocket(userId, phoneId, true);
+    invalidate(userId, ["status", "phones"]);
+  }
+  await db.update(phones).set({ lastSeenAt: new Date() }).where(eq(phones.id, phoneId));
+  return true;
+}
+
+async function onPresence(ws: Ws, msg: Extract<ClientMessage, { t: "presence" }>): Promise<void> {
+  if (!(await attachPhone(ws, msg.v, msg.phoneId))) return;
+  const settings = await getSettings(ws.data.userId);
+  send(ws, { t: "ready", serverTime: Date.now(), config: phoneConfig(settings) });
+}
+
+async function onHello(ws: Ws, msg: Extract<ClientMessage, { t: "hello" }>): Promise<void> {
+  const { userId } = ws.data;
+  if (!SUPPORTED_CODECS.has(msg.stream.codec)) {
+    return fail(ws, "codec", `codec ${msg.stream.codec} not supported`, false, msg.slot);
+  }
+  if (!(await attachPhone(ws, msg.v, msg.phoneId))) return;
 
   const wearableId = msg.wearable ? await upsertWearable(userId, msg.wearable) : null;
   await db
@@ -168,7 +185,7 @@ async function onHello(ws: Ws, msg: Extract<ClientMessage, { t: "hello" }>): Pro
     .from(captureStreams)
     .where(eq(captureStreams.id, msg.stream.id));
   if (!stream || stream.userId !== userId)
-    return fail(ws, "stream", "stream belongs to another user", true);
+    return fail(ws, "stream", "stream belongs to another user", false, msg.slot);
 
   const meta: StreamMeta = {
     id: stream.id,
@@ -201,8 +218,21 @@ async function onHello(ws: Ws, msg: Extract<ClientMessage, { t: "hello" }>): Pro
 async function onAudio(ws: Ws, data: Uint8Array): Promise<void> {
   const batch = decodeAudioBatch(data);
   const writer = ws.data.slots.get(batch.slot);
-  if (!writer) return fail(ws, "slot", `slot ${batch.slot} has no stream (send hello first)`);
-  const ack = await writer.append(batch.frames);
+  if (!writer)
+    return fail(
+      ws,
+      "slot",
+      `slot ${batch.slot} has no stream (send hello first)`,
+      false,
+      batch.slot,
+    );
+  let ack: number;
+  try {
+    ack = await writer.append(batch.frames);
+  } catch (err) {
+    if (err instanceof SeqGapError) return fail(ws, "seq_gap", err.message, false, batch.slot);
+    throw err;
+  }
   send(ws, { t: "ack", slot: batch.slot, seq: ack });
   updateLiveState(ws.data.userId, { lastAudioAt: Date.now() });
 }
@@ -223,6 +253,8 @@ async function onBye(ws: Ws, slot: number, endedAt: number): Promise<void> {
 async function onControl(ws: Ws, msg: ClientMessage): Promise<void> {
   const { userId } = ws.data;
   switch (msg.t) {
+    case "presence":
+      return onPresence(ws, msg);
     case "hello":
       return onHello(ws, msg);
     case "bye":

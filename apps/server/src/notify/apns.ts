@@ -48,7 +48,8 @@ export function buildApnsPayload(n: ApnsNotification): Record<string, unknown> {
       category: n.category,
       "interruption-level": n.interruptionLevel,
     },
-    hl: { id: n.id, ...(n.deepLink ? { deepLink: n.deepLink } : {}) },
+    // expo-notifications exposes the `body` object as `content.data` in JS.
+    body: { hlId: n.id, ...(n.deepLink ? { deepLink: n.deepLink } : {}) },
   };
 }
 

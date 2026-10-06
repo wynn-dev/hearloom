@@ -1,7 +1,7 @@
 import { contract } from "@hearloom/api";
 import { schema } from "@hearloom/db";
 import { implement, ORPCError } from "@orpc/server";
-import { and, asc, desc, eq, gte, isNull, lt, lte, or } from "drizzle-orm";
+import { and, asc, desc, eq, gte, isNull, lt, lte, or, sql } from "drizzle-orm";
 import { type AuthSession, getSession } from "../auth";
 import { db } from "../db";
 import { chunkUrl } from "../http/media";
@@ -156,6 +156,25 @@ export const router = authed.router({
       return { ok: true as const };
     }),
     list: authed.phones.list.handler(({ context }) => listPhones((context as Ctx).userId)),
+    signOut: authed.phones.signOut.handler(async ({ context, input }) => {
+      const { userId } = context as Ctx;
+      await db
+        .update(captureStreams)
+        .set({ endedAt: sql`coalesce(${captureStreams.lastFrameAt}, ${captureStreams.startedAt})` })
+        .where(
+          and(
+            eq(captureStreams.userId, userId),
+            eq(captureStreams.phoneId, input.id),
+            isNull(captureStreams.endedAt),
+          ),
+        );
+      await db
+        .update(phones)
+        .set({ apnsToken: null })
+        .where(and(eq(phones.id, input.id), eq(phones.userId, userId)));
+      invalidate(userId, ["phones", "status"]);
+      return { ok: true as const };
+    }),
     remove: authed.phones.remove.handler(async ({ context, input }) => {
       const { userId } = context as Ctx;
       await db.delete(phones).where(and(eq(phones.id, input.id), eq(phones.userId, userId)));

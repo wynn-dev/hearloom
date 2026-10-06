@@ -12,3 +12,10 @@ allowBuilds:
 # Packages newer than pnpm's minimum release age that we deliberately pin.
 minimumReleaseAgeExclude:
   - mediabunny@1.61.3
+
+# Keep React Native tooling on the version the Expo SDK ships with.
+overrides:
+  "@react-native/metro-config": "0.88.0-rc.3"
+  # One React for the whole monorepo (Expo app + web console + optional peers).
+  react: "19.3.0"
+  react-dom: "19.3.0"

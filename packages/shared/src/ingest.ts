@@ -109,6 +109,8 @@ export type WearableInfo = z.infer<typeof wearableInfoSchema>;
 const unixMs = z.number().int().nonnegative();
 
 export const clientMessageSchema = z.discriminatedUnion("t", [
+  /** Register the phone on this socket (notifications, config) without opening a stream. */
+  z.object({ t: z.literal("presence"), v: z.number().int(), phoneId: z.uuid() }),
   z.object({
     t: z.literal("hello"),
     v: z.number().int(),
@@ -159,6 +161,7 @@ export type ServerMessage =
       serverTime: number;
       config: PhoneConfig;
     }
+  | { t: "ready"; serverTime: number; config: PhoneConfig }
   | { t: "config"; config: PhoneConfig }
   | { t: "ack"; slot: number; seq: number }
   | {
@@ -173,7 +176,8 @@ export type ServerMessage =
       haptic?: HapticPattern;
     }
   | { t: "haptic"; pattern: HapticPattern }
-  | { t: "error"; code: string; message: string; fatal?: boolean }
+  /** `slot` is set when the error concerns one stream; the rest of the socket keeps working. */
+  | { t: "error"; code: string; message: string; fatal?: boolean; slot?: number }
   | { t: "pong"; at: number; serverTime: number };
 
 export function parseClientMessage(text: string): ClientMessage {
