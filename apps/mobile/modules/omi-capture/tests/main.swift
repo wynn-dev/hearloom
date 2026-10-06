@@ -73,5 +73,77 @@ let out = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "/tmp/hl-
 try batch.write(to: URL(fileURLWithPath: out))
 print("wrote \(batch.count)-byte batch to \(out)")
 
+// --- offline storage: firmware packing (transport.c write_to_storage) → BLE chunks → parser ---
+do {
+    var rng = SystemRandomNumberGenerator()
+    var temp = [UInt8](repeating: 0, count: 440)
+    var bufferOffset = 0
+    var records: [Data] = []
+    var flushed: [(data: Data, at: Int64)] = []
+    var pending: [(data: Data, at: Int64)] = []
+    let t0: Int64 = 1_760_000_000_000
+    func writeRecord(_ nowMs: Int64) {
+        var r = Data()
+        var ts = UInt32(nowMs / 1000).bigEndian
+        withUnsafeBytes(of: &ts) { r.append(contentsOf: $0) }
+        r.append(contentsOf: temp)
+        records.append(r)
+        flushed.append(contentsOf: pending)
+        pending = []
+    }
+    for i in 0..<600 {
+        let len = Int.random(in: 40...120, using: &rng)
+        let frame = Data((0..<len).map { _ in UInt8.random(in: 0...255, using: &rng) })
+        let at = t0 + Int64(i) * 20
+        let packetSize = len + 1
+        if bufferOffset + packetSize > 439 {
+            temp[bufferOffset] = UInt8(len)
+            writeRecord(at)
+            bufferOffset = packetSize
+            temp[0] = UInt8(len)
+            temp.replaceSubrange(1..<(1 + len), with: frame)
+            pending = [(frame, at)]
+        } else if bufferOffset + packetSize == 439 {
+            temp[bufferOffset] = UInt8(len)
+            temp.replaceSubrange((bufferOffset + 1)..<(bufferOffset + 1 + len), with: frame)
+            pending.append((frame, at))
+            bufferOffset = 0
+            writeRecord(at)
+        } else {
+            temp[bufferOffset] = UInt8(len)
+            temp.replaceSubrange((bufferOffset + 1)..<(bufferOffset + 1 + len), with: frame)
+            bufferOffset += packetSize
+            pending.append((frame, at))
+        }
+    }
+    // Ship as DATA notifications of random sizes (MTU-dependent).
+    let all = records.reduce(Data(), +)
+    var parser = OfflineRecordParser()
+    var clock = OfflineClock(frameMs: 20)
+    var got: [(Data, Int64)] = []
+    var o = 0
+    while o < all.count {
+        let n = min(all.count - o, Int.random(in: 20...240, using: &rng))
+        let note = Data([0x03]) + all.subdata(in: o..<(o + n))
+        guard case .data(let chunk) = StorageNotification.parse(note) else { check(false, "data parse"); break }
+        for record in parser.push(chunk) {
+            let (ts, frames) = OfflineRecordParser.parse(record)
+            let times = clock.stamp(recordSeconds: ts, frames: frames.count)
+            got.append(contentsOf: zip(frames, times))
+        }
+        o += n
+    }
+    check(parser.pendingBytes == 0, "no leftover bytes")
+    check(got.count == flushed.count, "offline frame count \(got.count) vs \(flushed.count)")
+    check(zip(got, flushed).allSatisfy { $0.0 == $1.data }, "offline frame bytes match")
+    let maxSkew = zip(got, flushed).map { abs($0.1 - $1.at) }.max() ?? 0
+    check(maxSkew <= 1100, "offline timestamps within ~1 s (max skew \(maxSkew) ms)")
+    if case .info(let r, let w, _, _) = StorageNotification.parse(Data([0x02, 0,0,0,0,0,0,0,5, 0,0,0,0,0,0,0,9] + [UInt8](repeating: 0, count: 14))) {
+        check(r == 5 && w == 9, "info parse")
+    } else { check(false, "info parse") }
+    check(StorageCommand.read(from: 258) == Data([0x11, 0,0,0,0,0,0,1,2]), "read command encoding")
+    print("offline: \(records.count) records, \(got.count) frames, max skew \(maxSkew) ms")
+}
+
 if failures > 0 { print("\(failures) failure(s)"); exit(1) }
 print("swift: all checks passed")

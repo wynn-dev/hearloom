@@ -34,6 +34,8 @@ export interface CaptureStatus {
   journalBytes: number;
   framesThisStream: number;
   charging: boolean;
+  /** Recordings stored on the pendant while the phone was away. */
+  offline: { state: "idle" | "requesting" | "downloading"; frames: number; unreadPackets: number };
   button: { tap: string; doubleTap: string; hold: string };
   serverURL?: string;
   pairedPeripheralId?: string;

@@ -103,6 +103,14 @@ export default function Pendant() {
             value={backlogSec < 1 ? "Nothing" : formatDuration(backlogSec * 1000)}
           />
           {status.lastAckAt ? <Row label="Last saved" value={timeAgo(status.lastAckAt)} /> : null}
+          {status.offline.state !== "idle" ? (
+            <Row
+              label="From pendant storage"
+              value={`downloading · ${formatDuration(status.offline.frames * 20)}`}
+            />
+          ) : status.offline.unreadPackets > 0 ? (
+            <Row label="On pendant" value={`${status.offline.unreadPackets} packets waiting`} />
+          ) : null}
           {status.serverError ? <Text style={{ color: t.bad }}>{status.serverError}</Text> : null}
           {status.uplinkError && status.uplink !== "open" ? (
             <Text style={{ color: t.muted }}>{status.uplinkError}</Text>

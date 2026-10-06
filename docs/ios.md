@@ -51,4 +51,7 @@ with the server's TypeScript decoder.
 
 - A force-quit app is not relaunched by iOS for Bluetooth events. AccessorySetupKit pairing (iOS 26+)
   would allow that; it's planned.
-- Offline recordings stored on the pendant (when the phone was away) are not downloaded yet.
+- Offline recordings: when the phone is out of range the pendant records to its own storage (only after
+  its clock has been set once — the app does that on every connect). On reconnect the app downloads
+  them (`OfflineRecords.swift`) as a separate stream. Stock firmware deletes data as it is sent, so each
+  raw record is written to disk before parsing and kept until the stream is uploaded.

@@ -172,6 +172,17 @@ final class FrameJournal {
     streams[id] = s
   }
 
+  /// Keep the raw bytes of offline records next to the stream until it's uploaded (the pendant deletes
+  /// them as it sends, so a parsing bug must never lose data).
+  func appendRaw(_ id: String, _ data: Data) {
+    let url = root.appendingPathComponent(id, isDirectory: true).appendingPathComponent("raw.bin")
+    if !fm.fileExists(atPath: url.path) { fm.createFile(atPath: url.path, contents: nil) }
+    guard let h = try? FileHandle(forWritingTo: url) else { return }
+    defer { try? h.close() }
+    _ = try? h.seekToEnd()
+    try? h.write(contentsOf: data)
+  }
+
   /// Remove a finished, fully uploaded stream.
   func remove(_ id: String) {
     if let s = streams[id] { try? s.handle?.close() }
