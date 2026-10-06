@@ -106,7 +106,7 @@ export default function Pendant() {
           {status.offline.state !== "idle" ? (
             <Row
               label="From pendant storage"
-              value={`downloading · ${formatDuration(status.offline.frames * 20)}`}
+              value={`downloading · ${formatDuration(status.offline.ms)}`}
             />
           ) : status.offline.unreadPackets > 0 ? (
             <Row label="On pendant" value={`${status.offline.unreadPackets} packets waiting`} />

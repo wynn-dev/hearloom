@@ -18,6 +18,40 @@ struct CaptureSettings: Codable {
   var pendantHaptic = true
 }
 
+/// When the user muted capture (kept separately from `CaptureSettings` so its schema can't change).
+/// Recordings the pendant made offline inside these intervals are never uploaded.
+enum MuteLog {
+  private static let key = "hearloom.capture.mutes"
+  private static let keepMs: Int64 = 30 * 86_400_000
+
+  private static func load() -> [[Int64]] {
+    (UserDefaults.standard.array(forKey: key) as? [[NSNumber]])?.map { $0.map(\.int64Value) } ?? []
+  }
+
+  private static func save(_ v: [[Int64]]) {
+    UserDefaults.standard.set(v.map { $0.map { NSNumber(value: $0) } }, forKey: key)
+  }
+
+  /// Muted at `at` (an open interval: `[start]`).
+  static func begin(at: Int64) {
+    var v = load().filter { ($0.count > 1 ? $0[1] : at) > at - keepMs }
+    if v.last?.count == 1 { return }
+    v.append([at])
+    save(v)
+  }
+
+  static func end(at: Int64) {
+    var v = load()
+    guard let last = v.last, last.count == 1 else { return }
+    v[v.count - 1] = [last[0], at]
+    save(v)
+  }
+
+  static func contains(_ ms: Int64) -> Bool {
+    load().contains { ms >= $0[0] && ($0.count == 1 || ms <= $0[1]) }
+  }
+}
+
 enum CaptureStore {
   private static let key = "hearloom.capture.settings"
 

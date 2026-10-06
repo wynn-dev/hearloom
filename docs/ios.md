@@ -53,5 +53,8 @@ with the server's TypeScript decoder.
   would allow that; it's planned.
 - Offline recordings: when the phone is out of range the pendant records to its own storage (only after
   its clock has been set once — the app does that on every connect). On reconnect the app downloads
-  them (`OfflineRecords.swift`) as a separate stream. Stock firmware deletes data as it is sent, so each
-  raw record is written to disk before parsing and kept until the stream is uploaded.
+  them (`OfflineRecords.swift`) as a separate stream: STOP (any transfer left from a previous app
+  process), INFO, READ, then ADVANCE past what was received so the pendant frees it (otherwise its last
+  packet is re-sent forever). Stock firmware deletes data as it is sent, so each raw record is written
+  to disk before parsing and kept for 14 days after upload (`offline-raw/`). Records from times the
+  user had capture muted are dropped. Failed syncs back off from 1 to 30 minutes.

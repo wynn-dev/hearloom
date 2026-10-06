@@ -142,7 +142,23 @@ do {
         check(r == 5 && w == 9, "info parse")
     } else { check(false, "info parse") }
     check(StorageCommand.read(from: 258) == Data([0x11, 0,0,0,0,0,0,1,2]), "read command encoding")
+    check(StorageCommand.advance(to: 258) == Data([0x12, 0,0,0,0,0,0,1,2]), "advance command encoding")
+    check(StorageCommand.stop() == Data([0x03]), "stop command encoding")
+    check(OfflineRecordParser.recordSeconds(records[0]) == OfflineRecordParser.parse(records[0]).timestamp, "record seconds")
     print("offline: \(records.count) records, \(got.count) frames, max skew \(maxSkew) ms")
+}
+
+// --- journal: raw offline records outlive their uploaded stream ---
+do {
+    let base = FileManager.default.temporaryDirectory.appendingPathComponent("hl-raw-\(UUID().uuidString)")
+    let j = FrameJournal(root: base.appendingPathComponent("journal"))
+    j.create(StreamMeta(id: "off", codec: 21, sampleRate: 16000, frameMs: 20, startedAt: 1, endedAt: 2, wearable: nil))
+    j.appendRaw("off", Data(repeating: 7, count: 444))
+    j.remove("off")
+    let archived = base.appendingPathComponent("offline-raw/off.bin")
+    check((try? Data(contentsOf: archived))?.count == 444, "raw records archived on remove")
+    check(!FileManager.default.fileExists(atPath: base.appendingPathComponent("journal/off").path), "stream dir removed")
+    try? FileManager.default.removeItem(at: base)
 }
 
 if failures > 0 { print("\(failures) failure(s)"); exit(1) }

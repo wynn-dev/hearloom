@@ -29,6 +29,13 @@ struct OfflineRecordParser {
 
     mutating func reset() { buffer = Data() }
 
+    /// Timestamp (unix seconds) at the start of a raw record, without parsing its frames.
+    static func recordSeconds(_ record: Data) -> UInt32? {
+        guard record.count >= 4 else { return nil }
+        let b = [UInt8](record.prefix(4))
+        return UInt32(b[0]) << 24 | UInt32(b[1]) << 16 | UInt32(b[2]) << 8 | UInt32(b[3])
+    }
+
     /// Timestamp and Opus frames of one record.
     static func parse(_ record: Data) -> (timestamp: UInt32, frames: [Data]) {
         let bytes = [UInt8](record)
@@ -82,7 +89,17 @@ enum StorageCommand {
         return d
     }
 
+    /// Cancel a transfer in progress (e.g. one started by a previous app process).
     static func stop() -> Data { Data([0x03]) }
+
+    /// Free everything before `seq` on the pendant once it is safely stored here. The firmware only
+    /// frees packets whose delivery it saw confirmed, which never includes the last one.
+    static func advance(to seq: UInt64) -> Data {
+        var d = Data([0x12])
+        var be = seq.bigEndian
+        withUnsafeBytes(of: &be) { d.append(contentsOf: $0) }
+        return d
+    }
 }
 
 enum StorageNotification {
