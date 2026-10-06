@@ -34,7 +34,8 @@ export default defineConfig({
     port: 5173,
     // TRUSTED_ORIGINS and `tailscale serve` both expect 5173; fail rather than drift to 5174.
     strictPort: true,
-    host,
+    // IPv4 loopback, not Vite's default localhost (::1 only on macOS), so `tailscale serve` reaches it.
+    host: host ?? "127.0.0.1",
     // Tailscale MagicDNS names, as forwarded by `tailscale serve` (localhost is always allowed).
     allowedHosts: [".ts.net"],
     proxy: {

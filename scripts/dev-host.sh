@@ -15,5 +15,5 @@ serve=$!
 trap 'kill "$serve" 2>/dev/null || true' EXIT
 trap 'exit 130' INT TERM
 
-# Vite on 127.0.0.1 (its default, localhost, can bind ::1 only, which serve would not reach).
+# Setting the host (Vite binds 127.0.0.1 either way) turns on the TRUSTED_ORIGINS hint at startup.
 HEARLOOM_WEB_HOST=127.0.0.1 pnpm dev
