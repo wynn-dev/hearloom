@@ -38,6 +38,7 @@ const server = Bun.serve<SocketData>({
               phoneId: null,
               slots: new Map(),
               queue: Promise.resolve(),
+              closed: false,
             }
           : { kind: "realtime", userId: session.user.id };
       if (server.upgrade(req, { data })) return undefined;

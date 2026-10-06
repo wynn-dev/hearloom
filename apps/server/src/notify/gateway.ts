@@ -258,7 +258,20 @@ async function deliver(row: NotificationRow, pendantHaptic: boolean): Promise<No
 }
 
 /** Re-run held notifications whose hold has expired (quiet hours) or whose condition cleared. */
-export async function releaseHeld(userId?: string): Promise<void> {
+let releasing: Promise<void> | null = null;
+
+/**
+ * Re-run held notifications whose hold has expired (quiet hours) or whose condition cleared.
+ * Runs one at a time, and each row is claimed atomically (held → pending) so the timer and the
+ * conversation-end hook can never deliver the same notification twice.
+ */
+export function releaseHeld(userId?: string): Promise<void> {
+  const run = (releasing ?? Promise.resolve()).then(() => releaseHeldNow(userId));
+  releasing = run.catch(() => {});
+  return run;
+}
+
+async function releaseHeldNow(userId?: string): Promise<void> {
   const now = new Date();
   const rows = await db
     .select()
@@ -278,7 +291,17 @@ export async function releaseHeld(userId?: string): Promise<void> {
     );
   for (const row of rows) {
     if (row.statusReason === "in_conversation" && liveState(row.userId).inConversation) continue;
-    await route({ ...row, status: "pending" });
+    try {
+      const [claimed] = await db
+        .update(notifications)
+        .set({ status: "pending", statusReason: null })
+        .where(and(eq(notifications.id, row.id), eq(notifications.status, "held")))
+        .returning();
+      if (claimed) await route(claimed);
+    } catch (err) {
+      // One bad row (or user) must not block everyone else's notifications.
+      console.error(`[notify] releasing ${row.id} failed`, err);
+    }
   }
 }
 

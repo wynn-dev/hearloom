@@ -38,7 +38,7 @@ CREATE TABLE "captions" (
 CREATE TABLE "capture_streams" (
 	"id" uuid PRIMARY KEY NOT NULL,
 	"user_id" text NOT NULL,
-	"phone_id" uuid NOT NULL,
+	"phone_id" uuid,
 	"wearable_id" uuid,
 	"codec" smallint NOT NULL,
 	"sample_rate" integer NOT NULL,
@@ -263,7 +263,7 @@ ALTER TABLE "audio_chunks" ADD CONSTRAINT "audio_chunks_stream_id_capture_stream
 ALTER TABLE "bookmarks" ADD CONSTRAINT "bookmarks_user_id_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "captions" ADD CONSTRAINT "captions_user_id_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "capture_streams" ADD CONSTRAINT "capture_streams_user_id_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "capture_streams" ADD CONSTRAINT "capture_streams_phone_id_phones_id_fk" FOREIGN KEY ("phone_id") REFERENCES "public"."phones"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "capture_streams" ADD CONSTRAINT "capture_streams_phone_id_phones_id_fk" FOREIGN KEY ("phone_id") REFERENCES "public"."phones"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "capture_streams" ADD CONSTRAINT "capture_streams_wearable_id_wearables_id_fk" FOREIGN KEY ("wearable_id") REFERENCES "public"."wearables"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "conversations" ADD CONSTRAINT "conversations_user_id_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "device_events" ADD CONSTRAINT "device_events_user_id_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint

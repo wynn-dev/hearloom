@@ -9,6 +9,8 @@ export interface IngestSocketData {
   slots: Map<number, StreamWriter>;
   /** Serializes message handling for this socket. */
   queue: Promise<void>;
+  /** Set when the socket closes; queued work after that must not register it again. */
+  closed: boolean;
 }
 
 /** Live phone connections, used to push notifications/haptics down the ingest socket. */

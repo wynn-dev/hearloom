@@ -1,5 +1,5 @@
 {
-  "id": "6c6ea8e2-ab4b-4e62-a413-26d4131ce469",
+  "id": "afe1b423-6d1c-4dc8-a2dc-7064213e9a9a",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -380,7 +380,7 @@
           "name": "phone_id",
           "type": "uuid",
           "primaryKey": false,
-          "notNull": true
+          "notNull": false
         },
         "wearable_id": {
           "name": "wearable_id",
@@ -493,7 +493,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
+          "onDelete": "set null",
           "onUpdate": "no action"
         },
         "capture_streams_wearable_id_wearables_id_fk": {

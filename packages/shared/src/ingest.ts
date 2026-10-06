@@ -22,6 +22,9 @@ export const MSG_AUDIO = 0x01;
 const AUDIO_HEADER = 1 + 1 + 8 + 8 + 2;
 const FRAME_HEADER = 4 + 2;
 export const MAX_FRAMES_PER_BATCH = 1000;
+/** Plausible capture times (2017–2100), so a corrupt batch can't produce invalid dates. */
+const MIN_TIME_MS = 1_500_000_000_000;
+const MAX_TIME_MS = 4_100_000_000_000;
 
 export interface AudioFrame {
   seq: number;
@@ -72,6 +75,8 @@ export function decodeAudioBatch(input: ArrayBuffer | Uint8Array): AudioBatch {
   const base = Number(view.getBigUint64(10, true));
   const count = view.getUint16(18, true);
   if (count === 0 || count > MAX_FRAMES_PER_BATCH) throw new Error("bad frame count");
+  if (firstSeq > Number.MAX_SAFE_INTEGER - count) throw new Error("seq out of range");
+  if (base < MIN_TIME_MS || base > MAX_TIME_MS) throw new Error("capture time out of range");
   const frames: AudioFrame[] = [];
   let o = AUDIO_HEADER;
   for (let i = 0; i < count; i++) {
@@ -79,6 +84,7 @@ export function decodeAudioBatch(input: ArrayBuffer | Uint8Array): AudioBatch {
     const offset = view.getUint32(o, true);
     const len = view.getUint16(o + 4, true);
     o += FRAME_HEADER;
+    if (base + offset > MAX_TIME_MS) throw new Error("capture time out of range");
     if (o + len > buf.length) throw new Error("truncated frame");
     frames.push({ seq: firstSeq + i, at: base + offset, data: buf.slice(o, o + len) });
     o += len;

@@ -76,9 +76,8 @@ export const captureStreams = pgTable(
   {
     id: uuid().primaryKey(),
     userId: owner(),
-    phoneId: uuid()
-      .notNull()
-      .references(() => phones.id, { onDelete: "cascade" }),
+    /** Removing a phone must not delete what it recorded. */
+    phoneId: uuid().references(() => phones.id, { onDelete: "set null" }),
     wearableId: uuid().references(() => wearables.id, { onDelete: "set null" }),
     codec: smallint().notNull(),
     sampleRate: integer().notNull(),

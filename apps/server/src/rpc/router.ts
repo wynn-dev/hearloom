@@ -204,6 +204,7 @@ export const router = authed.router({
             s.endedAt === null &&
             s.lastFrameAt !== null &&
             now - s.lastFrameAt.getTime() < LIVE_WINDOW_MS &&
+            s.phoneId !== null &&
             isPhoneOnline(s.phoneId),
         })),
         serverTime: new Date(),

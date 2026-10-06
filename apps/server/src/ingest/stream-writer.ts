@@ -1,4 +1,4 @@
-import { mkdir, open, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, open, readdir, readFile, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { AudioFrame } from "@hearloom/shared";
 import { lostFramePacket, muxOggOpus } from "../audio/ogg";
@@ -45,6 +45,29 @@ interface OpenChunk {
 }
 
 const RECORD_HEADER = 8 + 8 + 2;
+
+/** Write a small file and fsync it. */
+async function writeDurable(path: string, data: string | Uint8Array): Promise<void> {
+  const fh = await open(path, "w");
+  try {
+    await fh.write(typeof data === "string" ? new TextEncoder().encode(data) : data);
+    await fh.sync();
+  } finally {
+    await fh.close();
+  }
+}
+
+/** fsync a directory so newly created/renamed entries survive power loss. */
+export async function fsyncDir(dir: string): Promise<void> {
+  const fh = await open(dir, "r");
+  try {
+    await fh.sync();
+  } catch {
+    // Some filesystems don't support fsync on directories.
+  } finally {
+    await fh.close();
+  }
+}
 
 function encodeRecords(frames: AudioFrame[]): Uint8Array {
   const size = frames.reduce((n, f) => n + RECORD_HEADER + f.data.length, 0);
@@ -198,8 +221,11 @@ export class StreamWriter {
       await mkdir(dir, { recursive: true });
       const seqStart = frames[0]!.seq;
       const metaPath = join(dir, `${seqStart}.json`);
-      await writeFile(metaPath, JSON.stringify(this.meta));
-      this.chunk = { frames: [], seqStart, spoolPath: join(dir, `${seqStart}.spool`), metaPath };
+      const spoolPath = join(dir, `${seqStart}.spool`);
+      await writeDurable(metaPath, JSON.stringify(this.meta));
+      await writeDurable(spoolPath, new Uint8Array(0));
+      await fsyncDir(dir);
+      this.chunk = { frames: [], seqStart, spoolPath, metaPath };
     }
     const fh = await open(this.chunk.spoolPath, "a");
     try {
@@ -227,7 +253,10 @@ export class StreamWriter {
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = setTimeout(() => {
       this.idleTimer = null;
-      void this.flush().then(() => this.onIdle?.());
+      // On failure the spool files stay on disk and are recovered at the next start.
+      void this.flush()
+        .catch((err) => console.error(`[ingest] closing chunk of ${this.meta.id} failed`, err))
+        .finally(() => this.onIdle?.());
     }, this.opts.idleMs);
   }
 
@@ -251,30 +280,40 @@ export async function recoverSpool(
   }
   for (const streamId of streams) {
     const dir = join(spoolDir, streamId);
-    const files = (await readdir(dir)).filter((f) => f.endsWith(".json"));
+    let files: string[];
+    try {
+      files = (await readdir(dir)).filter((f) => f.endsWith(".json"));
+    } catch {
+      continue;
+    }
     for (const metaFile of files) {
       const base = metaFile.slice(0, -".json".length);
-      const meta = JSON.parse(await readFile(join(dir, metaFile), "utf8")) as StreamMeta;
-      let frames: AudioFrame[] = [];
       try {
-        frames = decodeRecords(new Uint8Array(await readFile(join(dir, `${base}.spool`))));
-      } catch {
-        frames = [];
+        const meta = JSON.parse(await readFile(join(dir, metaFile), "utf8")) as StreamMeta;
+        const frames = decodeRecords(new Uint8Array(await readFile(join(dir, `${base}.spool`))));
+        if (frames.length > 0) {
+          const chunk = await buildChunk(meta, frames);
+          await sink.saveChunk(meta, chunk);
+          const maxSeq = frames[frames.length - 1]!.seq;
+          recovered.set(streamId, Math.max(recovered.get(streamId) ?? -1, maxSeq));
+          await sink.saveProgress(meta, {
+            ackedSeq: maxSeq,
+            lastFrameAt: new Date(frames[frames.length - 1]!.at),
+            frames: 0,
+            bytes: 0,
+          });
+        }
+        await rm(join(dir, `${base}.spool`), { force: true });
+        await rm(join(dir, metaFile), { force: true });
+      } catch (err) {
+        // Don't let one bad file block startup: park it for manual inspection.
+        console.error(`[ingest] could not recover spool ${streamId}/${base}`, err);
+        const parked = join(spoolDir, "..", "spool-failed", streamId);
+        await mkdir(parked, { recursive: true });
+        for (const name of [metaFile, `${base}.spool`]) {
+          await rename(join(dir, name), join(parked, name)).catch(() => {});
+        }
       }
-      if (frames.length > 0) {
-        const chunk = await buildChunk(meta, frames);
-        await sink.saveChunk(meta, chunk);
-        const maxSeq = frames[frames.length - 1]!.seq;
-        recovered.set(streamId, Math.max(recovered.get(streamId) ?? -1, maxSeq));
-        await sink.saveProgress(meta, {
-          ackedSeq: maxSeq,
-          lastFrameAt: new Date(frames[frames.length - 1]!.at),
-          frames: 0,
-          bytes: 0,
-        });
-      }
-      await rm(join(dir, `${base}.spool`), { force: true });
-      await rm(join(dir, metaFile), { force: true });
     }
     await rm(dir, { recursive: true, force: true });
   }

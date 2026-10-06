@@ -1,4 +1,4 @@
-import { settingsPatchSchema, settingsSchema } from "@hearloom/shared";
+import { settingsPatchSchema, settingsSchema, timeZoneSchema } from "@hearloom/shared";
 import { oc } from "@orpc/contract";
 import { z } from "zod";
 
@@ -29,7 +29,7 @@ export const wearableSchema = z.object({
 
 export const streamStatusSchema = z.object({
   id: z.uuid(),
-  phoneId: z.uuid(),
+  phoneId: z.uuid().nullable(),
   wearableName: z.string().nullable(),
   codec: z.number(),
   startedAt: z.date(),
@@ -160,7 +160,7 @@ export const contract = {
           osVersion: z.string().max(40).optional(),
           appVersion: z.string().max(40).optional(),
           bundleId: z.string().max(200).optional(),
-          timezone: z.string().max(64).optional(),
+          timezone: timeZoneSchema.optional(),
         }),
       )
       .output(z.object({ phoneId: z.uuid() })),

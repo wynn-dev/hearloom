@@ -291,6 +291,7 @@ async function acknowledgeLatestNudge(userId: string): Promise<void> {
 }
 
 async function handleMessage(ws: Ws, message: string | Buffer): Promise<void> {
+  if (ws.data.closed) return;
   try {
     if (typeof message === "string") {
       await onControl(ws, parseClientMessage(message));
@@ -309,21 +310,27 @@ export const ingestHandlers = {
   open(ws: Ws): void {
     ws.data.slots = new Map();
     ws.data.queue = Promise.resolve();
+    ws.data.closed = false;
   },
   message(ws: Ws, message: string | Buffer): void {
     // Handle one message at a time per socket so audio never races ahead of its hello.
     ws.data.queue = ws.data.queue.then(() => handleMessage(ws, message));
   },
   close(ws: Ws): void {
-    for (const writer of ws.data.slots.values()) attached.get(writer.meta.id)?.delete(ws);
-    ws.data.slots.clear();
-    const phoneId = ws.data.phoneId;
-    unregisterPhoneSocket(ws);
-    if (phoneId) {
-      void db.update(phones).set({ lastSeenAt: new Date() }).where(eq(phones.id, phoneId));
-      void onPhoneSocket(ws.data.userId, phoneId, false);
-      invalidate(ws.data.userId, ["status", "phones"]);
-    }
+    ws.data.closed = true;
+    // Run after any in-flight message (e.g. a hello still awaiting the DB), so nothing registers
+    // this socket again once it's gone.
+    ws.data.queue = ws.data.queue.then(() => {
+      for (const writer of ws.data.slots.values()) attached.get(writer.meta.id)?.delete(ws);
+      ws.data.slots.clear();
+      const phoneId = ws.data.phoneId;
+      unregisterPhoneSocket(ws);
+      if (phoneId) {
+        void db.update(phones).set({ lastSeenAt: new Date() }).where(eq(phones.id, phoneId));
+        void onPhoneSocket(ws.data.userId, phoneId, false);
+        invalidate(ws.data.userId, ["status", "phones"]);
+      }
+    });
   },
 };
 

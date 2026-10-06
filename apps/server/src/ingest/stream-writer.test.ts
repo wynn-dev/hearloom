@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AudioFrame } from "@hearloom/shared";
@@ -108,5 +108,17 @@ describe("StreamWriter", () => {
     expect(sink.chunks).toHaveLength(1);
     expect(sink.chunks[0]!.frameCount).toBe(75);
     expect(await readdir(dir)).toHaveLength(0);
+  });
+});
+
+describe("recoverSpool", () => {
+  test("parks unreadable spool files instead of failing startup", async () => {
+    const spool = join(dir, "spool");
+    await mkdir(join(spool, "bad-stream"), { recursive: true });
+    await writeFile(join(spool, "bad-stream", "0.json"), ""); // torn meta write
+    await writeFile(join(spool, "bad-stream", "0.spool"), new Uint8Array(10));
+    const recovered = await recoverSpool(spool, new MemorySink());
+    expect(recovered.size).toBe(0);
+    expect(await readdir(join(dir, "spool-failed", "bad-stream"))).toEqual(["0.json", "0.spool"]);
   });
 });
