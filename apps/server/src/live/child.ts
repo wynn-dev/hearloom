@@ -34,7 +34,7 @@ if (!hasModel(modelsDir, MODEL_FILES.vad))
 if (env.LIVE_ASR === "soniox" && !env.SONIOX_API_KEY)
   fatal("SONIOX_API_KEY is not set (set it, or LIVE_ASR=off to run without transcription)");
 
-const { db, client } = createDb(env.DATABASE_URL, { max: 4 });
+const { db, client } = createDb(env.DATABASE_URL, { max: 3 });
 
 const embedder = hasModel(modelsDir, MODEL_FILES.speaker) ? new SpeakerEmbedder(modelsDir) : null;
 const deps: LiveDeps = {

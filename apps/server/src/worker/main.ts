@@ -11,7 +11,7 @@ import { jobs, QUEUES, type RefineJob, stopJobs } from "../jobs";
 import { Diarizer } from "./diarizer";
 import { type RefineDeps, refineConversation } from "./refine";
 
-const { db, client } = createDb(env.DATABASE_URL, { max: 4 });
+const { db, client } = createDb(env.DATABASE_URL, { max: 2 });
 
 const deps: RefineDeps = {
   db,
