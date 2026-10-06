@@ -83,6 +83,43 @@ describe("Soniox assembly", () => {
   });
 });
 
+describe("Soniox assembly of async results", () => {
+  const tok = (text: string, s: number, e: number) => ({
+    text,
+    start_ms: s,
+    end_ms: e,
+    is_final: true,
+    speaker: "1",
+  });
+
+  test("splits where stitched segments meet, even after a short real pause", () => {
+    // Two VAD segments 0.8 s apart (under the 1.5 s pause rule), stitched with 300 ms of silence.
+    const clock = new SessionClock();
+    clock.sent(1_000_000, 2000);
+    clock.sent(1_002_000, 300);
+    clock.sent(1_002_800, 2000);
+    const a = new SonioxAssembler(clock, "stt-async-v5");
+    const out = a.push([tok("One", 100, 1900), tok(" two", 2400, 2900)]);
+    expect(out.map((u) => u.text)).toEqual(["One"]);
+    expect(a.flush()!.startAt).toBe(1_002_900);
+  });
+
+  test("caps long utterances at a word boundary", () => {
+    const clock = new SessionClock();
+    clock.sent(0, 60_000);
+    const a = new SonioxAssembler(clock, "stt-async-v5", 1500, "soniox:", 10_000);
+    const words = Array.from({ length: 30 }, (_, i) =>
+      tok(i ? " w" : "w", i * 1000, i * 1000 + 800),
+    );
+    // A sub-word token (no leading space) never starts a new utterance.
+    words.splice(11, 0, tok("x", 10_850, 10_950));
+    const out = a.push(words);
+    const last = a.flush()!;
+    expect([...out, last].map((u) => u.endAt - u.startAt <= 11_000)).toEqual([true, true, true]);
+    expect(out[0]!.text.endsWith("wx")).toBe(true);
+  });
+});
+
 describe("wav", () => {
   test("16 kHz mono PCM16 header", () => {
     const f = wav(new Int16Array([1, -1, 300]));

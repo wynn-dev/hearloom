@@ -36,11 +36,13 @@ export interface ConversationEvents {
  *
  * Live audio drives the user's open conversation. Backlog (audio uploaded late, e.g. after the
  * phone was offline) is placed into the closed conversation it falls in, extending it, or a new
- * closed one; those report `ended` once their upload goes quiet.
+ * closed one; those report `ended` once their upload goes quiet and none of the user's backlog is
+ * still being transcribed (see `hold`).
  */
 export class ConversationTracker {
   private open = new Map<string, Open>();
   private touched = new Map<string, Touched>();
+  private holds = new Map<string, number>();
   private locks = new Map<string, Promise<unknown>>();
 
   constructor(
@@ -133,13 +135,30 @@ export class ConversationTracker {
     return !!cur && now - cur.lastEndAt <= CONVERSATION_GAP_MS;
   }
 
+  /**
+   * Backlog audio for this user is waiting to be transcribed: don't report their backlog
+   * conversations as ended (which queues the refine pass) until it has been placed. Pair with
+   * `release`.
+   */
+  hold(userId: string): void {
+    this.holds.set(userId, (this.holds.get(userId) ?? 0) + 1);
+  }
+
+  release(userId: string, now = Date.now()): void {
+    const n = (this.holds.get(userId) ?? 1) - 1;
+    if (n > 0) this.holds.set(userId, n);
+    else this.holds.delete(userId);
+    // The quiet period starts now, not at the last placement before the wait.
+    for (const t of this.touched.values()) if (t.userId === userId) t.at = Math.max(t.at, now);
+  }
+
   /** Close conversations that have been quiet long enough. */
   async tick(now = Date.now()): Promise<void> {
     for (const [userId, cur] of this.open) {
       if (now - cur.lastEndAt > CONVERSATION_GAP_MS) await this.close(userId, cur);
     }
     for (const [id, t] of this.touched) {
-      if (now - t.at <= CONVERSATION_GAP_MS) continue;
+      if (now - t.at <= CONVERSATION_GAP_MS || this.holds.has(t.userId)) continue;
       this.touched.delete(id);
       this.events.ended(t.userId, id, false);
     }
@@ -192,6 +211,8 @@ export class ConversationTracker {
         .set({
           startedAt: sql`least(${c.startedAt}, ${new Date(startAt).toISOString()}::timestamptz)`,
           endedAt: sql`greatest(${c.endedAt}, ${new Date(endAt).toISOString()}::timestamptz)`,
+          // Already refined: the new speech needs another pass (queued once this upload is quiet).
+          status: sql`case when ${c.status} = 'refined' then 'closed' else ${c.status} end`,
         })
         .where(eq(c.id, id));
     } else {

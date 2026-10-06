@@ -18,9 +18,13 @@ A child process of the server (`apps/server/src/live`) receives every stored bat
      speech rather than silence. If a session fails (connection, auth, quota), the speech it didn't
      transcribe is lost and Soniox is retried after 30 s; there is no local fallback.
    - Backlog audio uploaded late (> 30 s old, e.g. recordings downloaded from the pendant): its VAD
-     segments are stitched together (0.3 s of silence between them) into batches of up to 5 minutes
-     of speech and transcribed with `stt-async-v5`. A batch is sent once it's full or its upload has
-     been quiet for 10 s, and retried twice before it's given up.
+     segments are stitched together (up to 0.3 s of silence between them) into batches of up to 5
+     minutes of speech and transcribed with `stt-async-v5`. A batch is sent once it's full or its
+     upload has been quiet for 10 s; one batch is in flight at a time per stream. API calls retry
+     rate limits and outages for a few minutes, then the batch is retried twice more before it's
+     given up (logged). Utterances split at segment boundaries and are capped at 30 s. Backlog
+     conversations aren't reported as ended (and refined) until all their batches are placed.
+     Batches still in memory when the pipeline restarts are lost.
 4. **Speakers** — 3D-Speaker CAM++ embeddings per utterance (≥ 1 s), matched against enrolled voiceprints
    (cosine ≥ `SPEAKER_MATCH_THRESHOLD`, default 0.6) and clustered within a conversation (S1, S2, …;
    Soniox's per-session labels map into the same series). Re-attributing an utterance replaces the

@@ -1,6 +1,18 @@
 import type { SonioxToken } from "./soniox-assembler";
 
 const API = "https://api.soniox.com/v1";
+/** Waits before retrying a call that hit a rate limit, server error or network error. */
+const CALL_RETRY_MS = [2_000, 10_000, 30_000, 60_000, 120_000];
+
+/** `retryable`: worth trying the whole request again later (rate limit, outage, timeout). */
+export class SonioxError extends Error {
+  constructor(
+    message: string,
+    readonly retryable: boolean,
+  ) {
+    super(message);
+  }
+}
 
 export interface SonioxAsyncOptions {
   apiKey: string;
@@ -38,25 +50,41 @@ export function wav(pcm: Int16Array): Uint8Array {
 /**
  * Transcribe recorded audio with the Soniox async API: upload, create a transcription, poll until
  * it's done, fetch the tokens, then delete both (Soniox caps stored files and transcriptions).
+ * Each call is retried on rate limits, server and network errors; throws `SonioxError`.
  */
 export async function transcribeFile(
   pcm: Int16Array,
   opts: SonioxAsyncOptions,
   poll = { intervalMs: 2000, timeoutMs: 15 * 60_000 },
+  retryMs = CALL_RETRY_MS,
 ): Promise<SonioxToken[]> {
   const call = async <T>(method: string, path: string, body?: FormData | object): Promise<T> => {
     const json = body !== undefined && !(body instanceof FormData);
-    const res = await fetch(`${API}${path}`, {
-      method,
-      headers: {
-        Authorization: `Bearer ${opts.apiKey}`,
-        ...(json ? { "Content-Type": "application/json" } : {}),
-      },
-      body: json ? JSON.stringify(body) : (body as FormData | undefined),
-    });
-    const text = await res.text();
-    if (!res.ok) throw new Error(`soniox ${method} ${path} ${res.status}: ${text.slice(0, 300)}`);
-    return (text ? JSON.parse(text) : undefined) as T;
+    for (let attempt = 0; ; attempt++) {
+      let failure: string;
+      let wait = retryMs[attempt];
+      try {
+        const res = await fetch(`${API}${path}`, {
+          method,
+          headers: {
+            Authorization: `Bearer ${opts.apiKey}`,
+            ...(json ? { "Content-Type": "application/json" } : {}),
+          },
+          body: json ? JSON.stringify(body) : (body as FormData | undefined),
+        });
+        const text = await res.text();
+        if (res.ok) return (text ? JSON.parse(text) : undefined) as T;
+        failure = `soniox ${method} ${path} ${res.status}: ${text.slice(0, 300)}`;
+        if (res.status !== 429 && res.status < 500) throw new SonioxError(failure, false);
+        const after = Number(res.headers.get("retry-after"));
+        if (wait !== undefined && after > 0) wait = Math.max(wait, after * 1000);
+      } catch (err) {
+        if (err instanceof SonioxError || err instanceof SyntaxError) throw err;
+        failure = `soniox ${method} ${path}: ${err}`;
+      }
+      if (wait === undefined) throw new SonioxError(failure, true);
+      await Bun.sleep(wait);
+    }
   };
 
   const form = new FormData();
@@ -80,8 +108,9 @@ export async function transcribeFile(
         `/transcriptions/${created.id}`,
       );
       if (t.status === "completed") break;
-      if (t.status === "error") throw new Error(`soniox transcription failed: ${t.error_message}`);
-      if (Date.now() > deadline) throw new Error("soniox transcription timed out");
+      if (t.status === "error")
+        throw new SonioxError(`soniox transcription failed: ${t.error_message}`, false);
+      if (Date.now() > deadline) throw new SonioxError("soniox transcription timed out", true);
       await Bun.sleep(poll.intervalMs);
     }
     const { tokens } = await call<{ tokens: Omit<SonioxToken, "is_final">[] }>(

@@ -13,7 +13,7 @@ import type { AudioFrame } from "@hearloom/shared";
 import { eq } from "drizzle-orm";
 import { SonioxSession } from "./asr/soniox";
 import { SessionClock, SonioxAssembler, type SonioxToken } from "./asr/soniox-assembler";
-import { transcribeFile } from "./asr/soniox-async";
+import { SonioxError, transcribeFile } from "./asr/soniox-async";
 import type { Utterance } from "./asr/types";
 import type { ConversationTracker } from "./conversations";
 import { PcmHistory } from "./pcm";
@@ -55,9 +55,12 @@ const SONIOX_RETRY_MS = 30_000;
 const BACKLOG_BATCH_SAMPLES = 5 * 60 * 16_000;
 /** Send a partial backlog batch after no new backlog speech for this long (upload paused or done). */
 const BACKLOG_IDLE_MS = 10_000;
-/** Silence between stitched backlog segments, so words at the cuts don't run together. */
-const BACKLOG_GAP_SAMPLES = 0.3 * 16_000;
-const BACKLOG_RETRY_MS = [5_000, 30_000];
+/** Silence between stitched backlog segments (at most their real gap), so words don't run together. */
+const BACKLOG_GAP_MS = 300;
+/** Retries of a whole backlog batch after a retryable failure (each API call also retries). */
+const BACKLOG_RETRY_MS = [30_000, 120_000];
+/** How long dispose() waits for backlog still being transcribed. */
+const DISPOSE_WAIT_MS = 3_000;
 /** Gaps up to this are lost packets (concealed); longer gaps are mic sleep (silence). */
 const RUN_GAP_MS = 2000;
 const TAG_WINDOW_SAMPLES = 32_000; // 2 s
@@ -71,7 +74,10 @@ interface Segment {
   samples: Float32Array;
 }
 
-/** Backlog speech waiting to be transcribed in one Soniox async request. */
+/**
+ * Backlog speech waiting to be transcribed in one Soniox async request. While it exists, the user's
+ * backlog conversations are held open (ConversationTracker.hold).
+ */
 interface BacklogBatch {
   segments: Segment[];
   samples: number;
@@ -127,8 +133,11 @@ export class StreamProcessor {
   private live: SonioxSession | null = null;
   private sonioxRetryAt = 0;
   private lastSpeechAt = 0;
+  /** Wall-clock spans of audio that arrived too late to stream (merged, recent only). */
+  private backlogSpans: { from: number; to: number }[] = [];
   private backlog: BacklogBatch | null = null;
   private backlogQueue: Promise<void> = Promise.resolve();
+  private backlogInFlightSamples = 0;
   private queue: Promise<void> = Promise.resolve();
 
   constructor(
@@ -157,7 +166,7 @@ export class StreamProcessor {
           await this.endRun();
         if (this.live && (now - this.lastSpeechAt > SONIOX_IDLE_MS || this.live.closed))
           await this.closeSoniox();
-        if (this.backlog && now - this.backlog.addedAt > BACKLOG_IDLE_MS) this.sendBacklog();
+        if (this.backlog && now - this.backlog.addedAt > BACKLOG_IDLE_MS) await this.sendBacklog();
       })
       .catch((err) => this.deps.log(`tick: ${err}`));
     return this.queue;
@@ -167,8 +176,18 @@ export class StreamProcessor {
     await this.queue;
     await this.endRun();
     await this.closeSoniox();
-    this.sendBacklog();
-    await this.backlogQueue;
+    await this.queue; // the closed session's last utterances
+    const pending = (this.backlog?.samples ?? 0) + this.backlogInFlightSamples;
+    const done = await Promise.race([
+      this.sendBacklog()
+        .then(() => this.backlogQueue)
+        .then(() => true),
+      Bun.sleep(DISPOSE_WAIT_MS).then(() => false),
+    ]);
+    if (!done)
+      this.deps.log(
+        `soniox backlog: ${Math.round(pending / 16_000)} s of speech still being transcribed (lost if the process exits)`,
+      );
     this.decoder.destroy();
   }
 
@@ -221,6 +240,7 @@ export class StreamProcessor {
 
   private startRun(at: number): void {
     this.vad = new VadSession(this.deps.modelsDir);
+    this.backlogSpans = []; // the previous run's segments were flushed in endRun
     this.runStartAt = at;
     this.runSamples = 0;
     this.tagFill = 0;
@@ -246,6 +266,7 @@ export class StreamProcessor {
     this.runSamples += samples.length;
     this.history.push(absAt, samples);
     const fresh = Date.now() - absAt < FRESH_MS;
+    if (!fresh && this.deps.soniox) this.markBacklog(absAt, absAt + samples.length / 16);
 
     // Speech detection.
     const { segments, speaking } = this.vad!.accept(samples);
@@ -263,42 +284,74 @@ export class StreamProcessor {
     if (this.deps.tagger) await this.tag(samples);
   }
 
+  private markBacklog(from: number, to: number): void {
+    const last = this.backlogSpans[this.backlogSpans.length - 1];
+    if (last && from <= last.to + 1) last.to = Math.max(last.to, to);
+    else this.backlogSpans.push({ from, to });
+  }
+
   private async onSegment(seg: SpeechSegment): Promise<void> {
-    // Fresh speech is transcribed by the Soniox session it was streamed to (if one was healthy;
-    // otherwise it's lost). Backlog speech is batched for Soniox async.
+    // Speech in audio that arrived fresh was streamed to Soniox real-time (if a session was healthy;
+    // otherwise it's lost). The parts that arrived late are batched for Soniox async.
     if (!this.deps.soniox) return;
     const startAt = this.runStartAt + seg.start / 16;
     const endAt = startAt + seg.samples.length / 16;
-    if (Date.now() - endAt < FRESH_MS) return;
-    this.backlog ??= { segments: [], samples: 0, addedAt: 0 };
-    const b = this.backlog;
-    b.segments.push({ startAt, endAt, samples: seg.samples });
-    b.samples += seg.samples.length;
-    b.addedAt = Date.now();
-    if (b.samples >= BACKLOG_BATCH_SAMPLES) this.sendBacklog();
+    // Segments come in time order: earlier spans can't overlap later segments.
+    while (this.backlogSpans.length > 0 && this.backlogSpans[0]!.to <= startAt)
+      this.backlogSpans.shift();
+    for (const span of this.backlogSpans) {
+      const from = Math.max(span.from, startAt);
+      const to = Math.min(span.to, endAt);
+      if (to <= from) continue;
+      const samples = seg.samples.subarray(
+        Math.floor((from - startAt) * 16),
+        Math.ceil((to - startAt) * 16),
+      );
+      if (!this.backlog) {
+        this.backlog = { segments: [], samples: 0, addedAt: 0 };
+        this.deps.conversations.hold(this.stream.userId);
+      }
+      this.backlog.segments.push({ startAt: from, endAt: from + samples.length / 16, samples });
+      this.backlog.samples += samples.length;
+      this.backlog.addedAt = Date.now();
+    }
+    if (this.backlog && this.backlog.samples >= BACKLOG_BATCH_SAMPLES) await this.sendBacklog();
   }
 
-  /** Transcribe the pending backlog batch in the background (batches run one at a time). */
-  private sendBacklog(): void {
+  /**
+   * Transcribe the pending backlog batch in the background. At most one batch is in flight:
+   * decoding runs far ahead of transcription, so wait rather than pile up audio in memory.
+   */
+  private async sendBacklog(): Promise<void> {
     const batch = this.backlog;
     this.backlog = null;
     if (!batch) return;
-    this.backlogQueue = this.backlogQueue
-      .then(() => this.transcribeBacklog(batch))
-      .catch((err) => this.deps.log(`soniox backlog: ${err}`));
+    await this.backlogQueue;
+    this.backlogInFlightSamples = batch.samples;
+    this.backlogQueue = this.transcribeBacklog(batch)
+      .catch((err) => this.deps.log(`soniox backlog: ${err}`))
+      .finally(() => {
+        this.backlogInFlightSamples = 0;
+        this.deps.conversations.release(this.stream.userId);
+      });
   }
 
   private async transcribeBacklog(batch: BacklogBatch): Promise<void> {
     const cfg = this.deps.soniox!;
     // Stitch the speech together; the clock maps positions in the stitched audio back to wall clock.
     const clock = new SessionClock();
-    const audio = new Float32Array(batch.samples + batch.segments.length * BACKLOG_GAP_SAMPLES);
+    const gaps = batch.segments.map((seg, i) => {
+      const next = batch.segments[i + 1];
+      const real = next ? next.startAt - seg.endAt : BACKLOG_GAP_MS;
+      return Math.round(Math.max(0, Math.min(BACKLOG_GAP_MS, real)) * 16);
+    });
+    const audio = new Float32Array(batch.samples + gaps.reduce((n, g) => n + g, 0));
     let o = 0;
-    for (const seg of batch.segments) {
+    for (const [i, seg] of batch.segments.entries()) {
       audio.set(seg.samples, o);
       clock.sent(seg.startAt, seg.samples.length / 16);
-      clock.sent(seg.endAt, BACKLOG_GAP_SAMPLES / 16);
-      o += seg.samples.length + BACKLOG_GAP_SAMPLES;
+      if (gaps[i]) clock.sent(seg.endAt, gaps[i]! / 16);
+      o += seg.samples.length + gaps[i]!;
     }
     const pcm = toPcm16(audio);
     const seconds = Math.round(batch.samples / 16_000);
@@ -311,7 +364,8 @@ export class StreamProcessor {
           languageHints: cfg.languageHints,
         });
       } catch (err) {
-        const wait = BACKLOG_RETRY_MS[attempt];
+        const wait =
+          err instanceof SonioxError && err.retryable ? BACKLOG_RETRY_MS[attempt] : undefined;
         if (wait === undefined) {
           this.deps.log(`soniox backlog: ${err}; ${seconds} s of speech not transcribed`);
           return;

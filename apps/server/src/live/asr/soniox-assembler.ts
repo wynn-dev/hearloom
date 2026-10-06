@@ -41,12 +41,20 @@ export class SessionClock {
     if (!span) return sessionMs;
     return span.absMs + (sessionMs - span.sessionMs);
   }
+
+  /** Index of the contiguous stretch of sent audio that `sessionMs` falls in. */
+  spanAt(sessionMs: number): number {
+    let i = 0;
+    while (i + 1 < this.spans.length && this.spans[i + 1]!.sessionMs <= sessionMs) i++;
+    return i;
+  }
 }
 
 /**
  * Groups final Soniox tokens into utterances: a new utterance starts on the `<end>` endpoint
- * token, a speaker change, or a pause longer than `maxGapMs` (wall clock, so silence cut out of
- * the audio we sent still splits).
+ * token, a speaker change, a pause longer than `maxGapMs` (wall clock), where the audio we sent
+ * was cut (stitched speech segments, mic sleep), or at a word boundary once the utterance is
+ * longer than `maxUtteranceMs` (async results have no endpoints).
  */
 export class SonioxAssembler {
   private current: SonioxToken[] = [];
@@ -56,6 +64,7 @@ export class SonioxAssembler {
     private readonly model: string,
     private readonly maxGapMs = 1500,
     private readonly speakerPrefix = "soniox:",
+    private readonly maxUtteranceMs = 30_000,
   ) {}
 
   /** Feed one response's tokens; returns utterances completed by these tokens. */
@@ -69,20 +78,28 @@ export class SonioxAssembler {
         continue;
       }
       if (/^<\w+>$/.test(t.text)) continue;
-      const prev = this.current[this.current.length - 1];
-      if (
-        prev &&
-        ((t.speaker !== undefined && t.speaker !== prev.speaker) ||
-          (t.start_ms !== undefined &&
-            prev.end_ms !== undefined &&
-            this.clock.toAbs(t.start_ms) - this.clock.toAbs(prev.end_ms) > this.maxGapMs))
-      ) {
+      if (this.splitsBefore(t)) {
         const u = this.emit();
         if (u) out.push(u);
       }
       this.current.push(t);
     }
     return out;
+  }
+
+  private splitsBefore(t: SonioxToken): boolean {
+    const prev = this.current[this.current.length - 1];
+    if (!prev) return false;
+    if (t.speaker !== undefined && t.speaker !== prev.speaker) return true;
+    if (t.start_ms === undefined || prev.end_ms === undefined) return false;
+    const { clock } = this;
+    if (clock.toAbs(t.start_ms) - clock.toAbs(prev.end_ms) > this.maxGapMs) return true;
+    if (clock.spanAt(t.start_ms) !== clock.spanAt(prev.start_ms ?? prev.end_ms)) return true;
+    const first = this.current[0]!;
+    return (
+      t.text.startsWith(" ") &&
+      clock.toAbs(t.start_ms) - clock.toAbs(first.start_ms ?? t.start_ms) > this.maxUtteranceMs
+    );
   }
 
   /** Emit whatever is buffered (session ending). */

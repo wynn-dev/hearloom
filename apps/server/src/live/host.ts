@@ -11,7 +11,7 @@ type ConversationEndedHandler = (userId: string, conversationId: string) => void
 /**
  * Supervises the live pipeline child process: forwards stored frames, applies state updates,
  * restarts it with backoff if it dies. If the child is down, ingest keeps working (audio is
- * stored); the refine pass can fill in transcripts later.
+ * stored), but audio that arrives meanwhile is not transcribed.
  */
 export class LivePipelineHost {
   private child: Subprocess | null = null;
