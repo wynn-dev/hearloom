@@ -1,0 +1,28 @@
+{
+  "name": "hearloom",
+  "private": true,
+  "description": "Self-hosted, always-on audio memory for the Omi wearable.",
+  "license": "AGPL-3.0-only",
+  "packageManager": "pnpm@12.6.0",
+  "engines": {
+    "node": ">=22.13",
+    "bun": ">=1.4.2"
+  },
+  "scripts": {
+    "dev": "turbo run dev --filter=@hearloom/server --filter=@hearloom/web",
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "check": "biome check .",
+    "fix": "biome check --write .",
+    "db:up": "docker compose -f infra/docker-compose.yml up -d postgres",
+    "db:down": "docker compose -f infra/docker-compose.yml down",
+    "db:generate": "pnpm --filter @hearloom/db generate",
+    "db:migrate": "pnpm --filter @hearloom/db migrate"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.15",
+    "turbo": "2.11.7",
+    "typescript": "~6.0.3"
+  }
+}

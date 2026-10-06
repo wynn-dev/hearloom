@@ -1,0 +1,14 @@
+packages:
+  - apps/*
+  - packages/*
+
+# Expo/Metro still has packages that break under pnpm's isolated layout.
+nodeLinker: hoisted
+
+# Dependencies allowed to run install scripts.
+allowBuilds:
+  esbuild: true
+
+# Packages newer than pnpm's minimum release age that we deliberately pin.
+minimumReleaseAgeExclude:
+  - mediabunny@1.61.3
