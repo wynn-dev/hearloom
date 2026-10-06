@@ -1,0 +1,33 @@
+{
+  "name": "@hearloom/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "license": "AGPL-3.0-only",
+  "scripts": {
+    "dev": "bun --env-file=../../.env --watch src/index.ts",
+    "start": "bun --env-file=../../.env src/index.ts",
+    "create-user": "bun --env-file=../../.env src/scripts/create-user.ts",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "bun --env-file=../../.env test",
+    "simulate-phone": "bun --env-file=../../.env src/scripts/simulate-phone.ts"
+  },
+  "dependencies": {
+    "@better-auth/expo": "1.7.7",
+    "@hearloom/api": "workspace:*",
+    "@hearloom/db": "workspace:*",
+    "@hearloom/shared": "workspace:*",
+    "@orpc/server": "1.15.4",
+    "better-auth": "1.7.7",
+    "drizzle-orm": "0.45.3",
+    "hono": "4.13.13",
+    "jose": "6.2.12",
+    "mediabunny": "1.61.3",
+    "zod": "4.6.5",
+    "@hearloom/audio": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.2",
+    "@orpc/client": "1.15.4"
+  }
+}

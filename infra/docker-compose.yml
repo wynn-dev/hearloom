@@ -1,0 +1,22 @@
+name: hearloom
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg18
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-hearloom}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hearloom}
+      POSTGRES_DB: ${POSTGRES_DB:-hearloom}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hearloom}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  pgdata:
