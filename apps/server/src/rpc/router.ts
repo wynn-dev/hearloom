@@ -2,6 +2,8 @@ import { contract } from "@hearloom/api";
 import { schema } from "@hearloom/db";
 import { implement, ORPCError } from "@orpc/server";
 import { and, asc, count, desc, eq, gte, isNull, lt, lte, max, or, sql } from "drizzle-orm";
+import { createToken } from "../agent/tokens";
+import { emitAgentEvent, sendAgentEvent } from "../agent/webhooks";
 import { type AuthSession, getSession } from "../auth";
 import { db } from "../db";
 import { chunkUrl } from "../http/media";
@@ -24,6 +26,7 @@ const {
   soundEvents,
   people,
   voiceprints,
+  apiTokens,
 } = schema;
 
 export interface RpcContext {
@@ -485,6 +488,50 @@ export const router = authed.router({
     }),
   },
 
+  agent: {
+    tokens: {
+      list: authed.agent.tokens.list.handler(async ({ context }) => {
+        const rows = await db
+          .select()
+          .from(apiTokens)
+          .where(and(eq(apiTokens.userId, (context as Ctx).userId), isNull(apiTokens.revokedAt)))
+          .orderBy(desc(apiTokens.createdAt));
+        return rows.map((r) => ({
+          id: r.id,
+          name: r.name,
+          prefix: r.prefix,
+          scopes: r.scopes,
+          createdAt: r.createdAt,
+          lastUsedAt: r.lastUsedAt,
+        }));
+      }),
+      create: authed.agent.tokens.create.handler(async ({ context, input }) => {
+        const { token, row } = await createToken((context as Ctx).userId, input.name, input.scopes);
+        return {
+          token,
+          info: {
+            id: row.id,
+            name: row.name,
+            prefix: row.prefix,
+            scopes: row.scopes,
+            createdAt: row.createdAt,
+            lastUsedAt: row.lastUsedAt,
+          },
+        };
+      }),
+      revoke: authed.agent.tokens.revoke.handler(async ({ context, input }) => {
+        await db
+          .update(apiTokens)
+          .set({ revokedAt: new Date() })
+          .where(and(eq(apiTokens.id, input.id), eq(apiTokens.userId, (context as Ctx).userId)));
+        return { ok: true as const };
+      }),
+    },
+    testWebhook: authed.agent.testWebhook.handler(({ context }) =>
+      sendAgentEvent((context as Ctx).userId, { type: "test", message: "Hello from Hearloom" }),
+    ),
+  },
+
   bookmarks: {
     create: authed.bookmarks.create.handler(async ({ context, input }) => {
       const { userId } = context as Ctx;
@@ -493,6 +540,12 @@ export const router = authed.router({
         .values({ userId, at: input.at ?? new Date(), source: "web", note: input.note ?? null })
         .returning();
       invalidate(userId, ["timeline"]);
+      emitAgentEvent(userId, {
+        type: "bookmark",
+        at: row!.at.toISOString(),
+        source: "web",
+        note: row!.note,
+      });
       return { id: row!.id, at: row!.at, source: row!.source, note: row!.note };
     }),
   },

@@ -4,7 +4,9 @@ Self-hosted, always-on audio memory for the [Omi](https://www.omi.me/) pendant â
 cloud services. The pendant streams to your iPhone over Bluetooth; the phone forwards audio to your own
 server, which keeps every second (speech **and** non-speech sound) as a structured, searchable timeline.
 
-> Status: early development. Capture path, server, notifications and console are being built.
+> Status: early development. Working end to end: iOS capture (Swift), durable upload, live
+> transcription (EN/NL), speakers, sound events, conversations, refine pass, notifications, web console,
+> and an MCP endpoint for agents (Hermes).
 
 ## Layout
 
@@ -15,8 +17,10 @@ apps/mobile      iOS app (Expo) with a native Swift capture module
 packages/db      Postgres schema + migrations (Drizzle)
 packages/api     API contract shared by server, web and app
 packages/shared  Ingest protocol, Omi BLE constants, settings schema
-packages/audio   libopus bindings (bun:ffi)
-docs/            Protocols and architecture
+packages/audio   libopus bindings (bun:ffi), Ogg Opus decoding
+packages/inference  sherpa-onnx models: VAD, sound tagging, voiceprints, local ASR
+sidecars/diarizer   Swift: offline speaker diarization (FluidAudio, Core ML)
+docs/            Protocols (protocol.md), models (models.md), iOS (ios.md), agents (agent.md)
 ```
 
 ## Requirements
@@ -33,7 +37,9 @@ pnpm install
 cp .env.example .env            # then set BETTER_AUTH_SECRET (openssl rand -base64 48)
 pnpm db:up && pnpm db:migrate
 pnpm --filter @hearloom/server create-user -- --email you@example.com --name You --admin
-pnpm dev                        # server on :3000, console on :5173
+pnpm --filter @hearloom/server download-models -- --all   # local speech/sound/speaker models
+pnpm --filter @hearloom/server build:diarizer              # macOS: speaker diarization sidecar
+pnpm dev                        # server :3000 + worker + console :5173
 ```
 
 Simulate a phone streaming audio (no hardware needed):

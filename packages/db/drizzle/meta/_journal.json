@@ -15,6 +15,13 @@
       "when": 1791278461975,
       "tag": "0001_voiceprint_source",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1791278655343,
+      "tag": "0002_api_tokens",
+      "breakpoints": true
     }
   ]
 }

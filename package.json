@@ -9,7 +9,7 @@
     "bun": ">=1.4.2"
   },
   "scripts": {
-    "dev": "turbo run dev --filter=@hearloom/server --filter=@hearloom/web",
+    "dev": "turbo run dev dev:worker --filter=@hearloom/server --filter=@hearloom/web",
     "build": "turbo run build",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",

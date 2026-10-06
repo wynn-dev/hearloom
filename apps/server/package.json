@@ -11,7 +11,10 @@
     "typecheck": "tsc -p tsconfig.json",
     "test": "bun --env-file=../../.env test",
     "simulate-phone": "bun --env-file=../../.env src/scripts/simulate-phone.ts",
-    "download-models": "bun --env-file=../../.env src/scripts/download-models.ts"
+    "download-models": "bun --env-file=../../.env src/scripts/download-models.ts",
+    "worker": "bun --env-file=../../.env src/worker/main.ts",
+    "dev:worker": "bun --env-file=../../.env --watch src/worker/main.ts",
+    "build:diarizer": "cd ../../sidecars/diarizer && swift build -c release"
   },
   "dependencies": {
     "@hearloom/api": "workspace:*",
@@ -25,7 +28,9 @@
     "mediabunny": "1.61.3",
     "zod": "4.6.5",
     "@hearloom/audio": "workspace:*",
-    "@hearloom/inference": "workspace:*"
+    "@hearloom/inference": "workspace:*",
+    "pg-boss": "12.36.0",
+    "@modelcontextprotocol/sdk": "1.32.1"
   },
   "devDependencies": {
     "@types/bun": "1.4.2",
