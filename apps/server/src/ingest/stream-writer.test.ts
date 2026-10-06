@@ -133,6 +133,9 @@ describe("recoverSpool", () => {
     await writeFile(join(spool, "bad-stream", "0.spool"), new Uint8Array(10));
     const recovered = await recoverSpool(spool, new MemorySink());
     expect(recovered.size).toBe(0);
-    expect((await readdir(join(dir, "spool-failed", "bad-stream"))).sort()).toEqual(["0.json", "0.spool"]);
+    expect((await readdir(join(dir, "spool-failed", "bad-stream"))).sort()).toEqual([
+      "0.json",
+      "0.spool",
+    ]);
   });
 });
