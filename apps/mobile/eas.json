@@ -1,0 +1,38 @@
+{
+  "cli": {
+    "version": ">= 24.11.0",
+    "appVersionSource": "remote"
+  },
+  "build": {
+    "base": {
+      "node": "24.21.0",
+      "pnpm": "12.6.0",
+      "ios": { "image": "sdk-58" }
+    },
+    "development": {
+      "extends": "base",
+      "environment": "development",
+      "developmentClient": true,
+      "distribution": "internal",
+      "channel": "development"
+    },
+    "preview": {
+      "extends": "base",
+      "environment": "preview",
+      "distribution": "internal",
+      "channel": "preview"
+    },
+    "production": {
+      "extends": "base",
+      "environment": "production",
+      "distribution": "store",
+      "channel": "production",
+      "autoIncrement": true
+    }
+  },
+  "submit": {
+    "production": {
+      "ios": {}
+    }
+  }
+}

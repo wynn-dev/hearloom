@@ -1,0 +1,60 @@
+# Ships the iOS app from main. Started by GitHub Actions (.github/workflows/ci.yml) once CI is green.
+# If a production build with the same native fingerprint exists, the JS ships as an OTA update;
+# otherwise EAS builds a new binary and submits it to TestFlight.
+name: Deploy to production
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: Build and submit a new binary even if the native fingerprint is unchanged
+        type: boolean
+        default: false
+      message:
+        description: Update / build message
+        type: string
+        default: ""
+
+jobs:
+  fingerprint:
+    name: Fingerprint
+    type: fingerprint
+    environment: production
+
+  get_build:
+    name: Find a build with this fingerprint
+    needs: [fingerprint]
+    type: get-build
+    params:
+      platform: ios
+      profile: production
+      fingerprint_hash: ${{ needs.fingerprint.outputs.ios_fingerprint_hash }}
+      wait_for_in_progress: true
+
+  build:
+    name: Build iOS
+    needs: [get_build]
+    if: ${{ inputs.force_build || !needs.get_build.outputs.build_id }}
+    type: build
+    params:
+      platform: ios
+      profile: production
+      message: ${{ inputs.message }}
+
+  submit:
+    name: Submit to TestFlight
+    needs: [build]
+    type: submit
+    params:
+      build_id: ${{ needs.build.outputs.build_id }}
+
+  update:
+    name: Publish OTA update
+    needs: [get_build]
+    if: ${{ !inputs.force_build && needs.get_build.outputs.build_id }}
+    type: update
+    environment: production
+    params:
+      platform: ios
+      channel: production
+      message: ${{ inputs.message }}

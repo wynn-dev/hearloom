@@ -8,8 +8,7 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "typecheck": "tsc -p tsconfig.json",
-    "test": "bun test"
+    "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
     "sherpa-onnx-node": "1.13.8"
