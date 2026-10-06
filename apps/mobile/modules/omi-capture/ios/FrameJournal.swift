@@ -172,11 +172,48 @@ final class FrameJournal {
     streams[id] = s
   }
 
-  /// Remove a finished, fully uploaded stream.
+  /// Keep the raw bytes of offline records next to the stream until it's uploaded (the pendant deletes
+  /// them as it sends, so a parsing bug must never lose data).
+  func appendRaw(_ id: String, _ data: Data) {
+    let url = root.appendingPathComponent(id, isDirectory: true).appendingPathComponent("raw.bin")
+    if !fm.fileExists(atPath: url.path) { fm.createFile(atPath: url.path, contents: nil) }
+    guard let h = try? FileHandle(forWritingTo: url) else { return }
+    defer { try? h.close() }
+    _ = try? h.seekToEnd()
+    try? h.write(contentsOf: data)
+  }
+
+  /// Remove a finished, fully uploaded stream. Raw offline records are kept a while longer (see
+  /// `rawArchive`), so a parsing bug found later can still be recovered from.
   func remove(_ id: String) {
     if let s = streams[id] { try? s.handle?.close() }
     streams[id] = nil
-    try? fm.removeItem(at: root.appendingPathComponent(id, isDirectory: true))
+    let dir = root.appendingPathComponent(id, isDirectory: true)
+    let raw = dir.appendingPathComponent("raw.bin")
+    if fm.fileExists(atPath: raw.path) {
+      if !fm.fileExists(atPath: rawArchive.path) {
+        try? fm.createDirectory(at: rawArchive, withIntermediateDirectories: true)
+        var excluded = URLResourceValues()
+        excluded.isExcludedFromBackup = true
+        var r = rawArchive
+        try? r.setResourceValues(excluded)
+      }
+      try? fm.moveItem(at: raw, to: rawArchive.appendingPathComponent("\(id).bin"))
+    }
+    try? fm.removeItem(at: dir)
+  }
+
+  /// Raw pendant records of uploaded offline streams, kept for `rawKeepDays`.
+  private var rawArchive: URL { root.deletingLastPathComponent().appendingPathComponent("offline-raw", isDirectory: true) }
+  private static let rawKeepDays = 14.0
+
+  private func pruneRawArchive() {
+    let cutoff = Date().addingTimeInterval(-FrameJournal.rawKeepDays * 86_400)
+    let files = (try? fm.contentsOfDirectory(at: rawArchive, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+    for f in files {
+      let date = (try? f.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+      if date < cutoff { try? fm.removeItem(at: f) }
+    }
   }
 
   /// Close the open segment file of a stream (it stops receiving frames).
@@ -241,6 +278,7 @@ final class FrameJournal {
         handle: nil)
     }
     if !streams.isEmpty { Log.info("journal: \(streams.count) stream(s) awaiting upload") }
+    pruneRawArchive()
   }
 
   static func encode(_ frames: [Frame]) -> Data {

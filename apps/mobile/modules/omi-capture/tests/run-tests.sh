@@ -4,6 +4,6 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 BIN="$(mktemp -d)/omi-capture-tests"
-swiftc -O -o "$BIN" ../ios/Log.swift ../ios/FrameJournal.swift ../ios/BatchCodec.swift main.swift
+swiftc -O -o "$BIN" ../ios/Log.swift ../ios/FrameJournal.swift ../ios/BatchCodec.swift ../ios/OfflineRecords.swift main.swift
 "$BIN" /tmp/hl-swift-batch.bin
 bun verify-batch.ts /tmp/hl-swift-batch.bin

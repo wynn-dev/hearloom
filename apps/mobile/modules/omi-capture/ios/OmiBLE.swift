@@ -17,6 +17,9 @@ enum OmiUUID {
   static let button = CBUUID(string: "23BA7925-0000-1000-7450-346EAC492E92")
   static let hapticService = CBUUID(string: "CAB1AB95-2EA5-4F4D-BB56-874B72CFC984")
   static let haptic = CBUUID(string: "CAB1AB96-2EA5-4F4D-BB56-874B72CFC984")
+  static let storageService = CBUUID(string: "30295780-4301-EABD-2904-2849ADFEAE43")
+  static let storageControl = CBUUID(string: "30295781-4301-EABD-2904-2849ADFEAE43")
+  static let storageStatus = CBUUID(string: "30295782-4301-EABD-2904-2849ADFEAE43")
   static let batteryService = CBUUID(string: "180F")
   static let batteryLevel = CBUUID(string: "2A19")
   static let deviceInfoService = CBUUID(string: "180A")
@@ -27,7 +30,7 @@ enum OmiUUID {
 
   static let services: [CBUUID] = [
     audioService, settingsService, featuresService, timeService, buttonService, hapticService, batteryService,
-    deviceInfoService,
+    deviceInfoService, storageService,
   ]
 }
 
@@ -88,6 +91,8 @@ protocol OmiBLEDelegate: AnyObject {
   func ble(_ ble: OmiBLE, battery: Int)
   func ble(_ ble: OmiBLE, charging: Bool)
   func ble(_ ble: OmiBLE, button: Int)
+  func ble(_ ble: OmiBLE, storageStatus: StorageStatus)
+  func ble(_ ble: OmiBLE, storageNotification: StorageNotification)
 }
 
 /// CoreBluetooth central for the Omi pendant, with state restoration so iOS can relaunch the app in the
@@ -166,6 +171,20 @@ final class OmiBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     central.stopScan()
     if state == .scanning { state = peripheral == nil ? .idle : state }
   }
+
+  /// Send a command to the offline-storage service (see StorageCommand).
+  func writeStorage(_ command: Data) {
+    guard let p = peripheral, let c = characteristics[OmiUUID.storageControl] else { return }
+    p.writeValue(command, for: c, type: .withResponse)
+  }
+
+  /// Re-read the offline-storage status (unread packets etc.).
+  func refreshStorageStatus() {
+    guard let p = peripheral, let c = characteristics[OmiUUID.storageStatus] else { return }
+    p.readValue(for: c)
+  }
+
+  var hasOfflineStorage: Bool { characteristics[OmiUUID.storageControl] != nil }
 
   /// Pulse the pendant's vibration motor: 1 = 100 ms, 2 = 300 ms, 3 = 500 ms.
   func haptic(_ pattern: UInt8) {
@@ -288,7 +307,9 @@ final class OmiBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
       case OmiUUID.batteryLevel, OmiUUID.chargingStatus:
         peripheral.readValue(for: c)
         peripheral.setNotifyValue(true, for: c)
-      case OmiUUID.button:
+      case OmiUUID.button, OmiUUID.storageControl:
+        peripheral.setNotifyValue(true, for: c)
+      case OmiUUID.storageStatus:
         peripheral.setNotifyValue(true, for: c)
       case OmiUUID.timeSet:
         // The pendant timestamps offline recordings with this clock; set it on every connect.
@@ -309,6 +330,7 @@ final class OmiBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
       audioSubscribed = c.isNotifying
       maybeReady()
     }
+    if c.uuid == OmiUUID.storageControl, c.isNotifying { refreshStorageStatus() }
   }
 
   func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor c: CBCharacteristic, error: Error?) {
@@ -332,6 +354,10 @@ final class OmiBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         let code = value.withUnsafeBytes { Int(Int32(littleEndian: $0.loadUnaligned(as: Int32.self))) }
         if code != 0 { delegate?.ble(self, button: code) }
       }
+    case OmiUUID.storageControl:
+      delegate?.ble(self, storageNotification: StorageNotification.parse(value))
+    case OmiUUID.storageStatus:
+      if let status = StorageStatus(value) { delegate?.ble(self, storageStatus: status) }
     case OmiUUID.model:
       info?.model = String(data: value, encoding: .utf8)
       publishInfo()

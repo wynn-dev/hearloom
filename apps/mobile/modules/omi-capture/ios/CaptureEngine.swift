@@ -66,6 +66,23 @@ final class CaptureEngine: NSObject {
   private static let maxInflightFrames: Int64 = 3000
   private static let batchFrames = 100
 
+  // Recordings made by the pendant while the phone was away (offline storage).
+  private enum OfflineState: String { case idle, requesting, downloading, advancing }
+  private var offlineState = OfflineState.idle
+  private var offlineStreamId: String?
+  private var offlineParser = OfflineRecordParser()
+  private var offlineClock = OfflineClock()
+  /// Frames saved by the current/last sync.
+  private var offlineFrames: Int64 = 0
+  private var offlineLastAt: Int64?
+  private var offlineUnread: UInt32 = 0
+  /// The pendant's data before this seq is stored here (never read it again).
+  private var offlineSyncedTo: UInt64 = 0
+  /// Failed syncs in a row, and when to try again (ms).
+  private var offlineFailures = 0
+  private var offlineRetryAt: Int64 = 0
+  private var offlineStopSentAt: Int64 = 0
+
   // JS bridge
   private var eventSink: ((String, [String: Any]) -> Void)?
   private var statusScheduled = false
@@ -235,6 +252,7 @@ final class CaptureEngine: NSObject {
     guard settings.muted != muted else { return }
     settings.muted = muted
     CaptureStore.save(settings)
+    if muted { MuteLog.begin(at: nowMs()) } else { MuteLog.end(at: nowMs()) }
     lastFrameAt = nil
     enqueueEvent(["t": "event", "kind": muted ? "muted" : "unmuted", "at": nowMs()])
     if fromButton || settings.pendantHaptic { ble.haptic(muted ? 3 : 1) }
@@ -402,6 +420,10 @@ final class CaptureEngine: NSObject {
       "journalBytes": journal.diskBytes(),
       "framesThisStream": framesThisStream,
       "charging": charging,
+      "offline": [
+        "state": offlineState.rawValue, "frames": offlineFrames, "unreadPackets": offlineUnread,
+        "ms": offlineFrames * Int64(codec == 20 ? 10 : 20),
+      ],
       "button": ["tap": settings.button.tap, "doubleTap": settings.button.doubleTap, "hold": settings.button.hold],
     ]
     if let s = settings.serverURL { d["serverURL"] = s }
@@ -437,6 +459,10 @@ final class CaptureEngine: NSObject {
 
 extension CaptureEngine: OmiBLEDelegate {
   func ble(_ ble: OmiBLE, stateChanged state: OmiBLE.State) {
+    // iOS reports no disconnect when Bluetooth goes away; close out a sync in progress.
+    if [.poweredOff, .unauthorized, .unsupported, .unknown].contains(state) {
+      finishOffline(reason: "Bluetooth unavailable")
+    }
     emitStatus()
   }
 
@@ -469,6 +495,8 @@ extension CaptureEngine: OmiBLEDelegate {
     // Keep the stream open: if the pendant comes back, the next connection starts a new stream and
     // closes this one. An open stream tells the server capture is still intended (for alerts).
     lastFrameAt = nil
+    finishOffline(reason: "disconnected")
+    offlineSyncedTo = 0 // seqs are per pendant/connection; the pendant checkpoints on disconnect
     if let w = wearable {
       enqueueEvent(["t": "wearable", "wearable": w.json, "connected": false, "at": nowMs()])
     }
@@ -504,6 +532,147 @@ extension CaptureEngine: OmiBLEDelegate {
 
   func ble(_ ble: OmiBLE, button: Int) {
     handleButton(button)
+  }
+
+  // MARK: offline storage
+
+  func ble(_ ble: OmiBLE, storageStatus: StorageStatus) {
+    offlineUnread = storageStatus.unreadPackets
+    if !storageStatus.rtcValid { Log.warn("offline: pendant clock not set; it won't record offline yet") }
+    if storageStatus.unreadPackets > 0, offlineState == .idle, settings.captureEnabled, codec != nil,
+       nowMs() >= offlineRetryAt {
+      Log.info("offline: \(storageStatus.unreadPackets) recorded packets waiting on the pendant")
+      offlineState = .requesting
+      offlineFrames = 0
+      // A transfer started by a previous app process would keep sending (and the pendant deletes what
+      // it sends); stop it before asking where to start.
+      ble.writeStorage(StorageCommand.stop())
+      ble.writeStorage(StorageCommand.info())
+    }
+    emitStatus()
+  }
+
+  func ble(_ ble: OmiBLE, storageNotification note: StorageNotification) {
+    switch note {
+    case .info(let readSeq, let writeSeq, _, let dropped):
+      guard offlineState == .requesting else { return }
+      if dropped > 0 { Log.warn("offline: pendant dropped \(dropped) packets (storage full?)") }
+      // Never re-read what we already stored (if an ADVANCE didn't take, the pendant's pointer lags).
+      let from = max(readSeq, offlineSyncedTo)
+      guard writeSeq > from else {
+        offlineState = .idle
+        if offlineSyncedTo > readSeq { ble.writeStorage(StorageCommand.advance(to: offlineSyncedTo)) }
+        return
+      }
+      offlineParser.reset()
+      offlineClock = OfflineClock(frameMs: codec == 20 ? 10 : 20)
+      offlineState = .downloading
+      Log.info("offline: downloading \(writeSeq - from) packets")
+      ble.writeStorage(StorageCommand.read(from: from))
+    case .readBegin(_, let count):
+      guard offlineState == .downloading else {
+        Log.warn("offline: unexpected transfer; stopping it")
+        stopStrayTransfer()
+        return
+      }
+      Log.info("offline: transfer started (\(count) packets)")
+    case .data(let chunk):
+      guard offlineState == .downloading else {
+        if offlineState != .advancing { stopStrayTransfer() }
+        return
+      }
+      saveOfflineRecords(offlineParser.push(chunk))
+      if offlineFrames % 500 < 10 { emitStatus() }
+    case .done(let status, let nextSeq):
+      guard offlineState == .downloading else { return }
+      finishOffline(reason: status == 0 ? "done" : "ended with status \(status)")
+      if status == 0 {
+        // Everything before nextSeq is on disk here: let the pendant free it, then look again.
+        offlineSyncedTo = max(offlineSyncedTo, nextSeq)
+        offlineFailures = 0
+        offlineState = .advancing
+        ble.writeStorage(StorageCommand.advance(to: nextSeq))
+      } else {
+        offlineFailed()
+      }
+    case .ack(let status):
+      if offlineState == .advancing {
+        offlineState = .idle
+        if status == 0 {
+          ble.refreshStorageStatus()
+        } else {
+          Log.warn("offline: pendant refused to free synced data (status \(status))")
+          offlineFailed()
+        }
+      } else if status != 0, offlineState != .idle {
+        Log.warn("offline: pendant replied status \(status)")
+        finishOffline(reason: "status \(status)")
+        offlineFailed()
+      }
+    case .unknown:
+      break
+    }
+  }
+
+  /// A transfer we didn't ask for (e.g. from before an app relaunch) is still sending: stop it, at
+  /// most once a second.
+  private func stopStrayTransfer() {
+    let now = nowMs()
+    guard now - offlineStopSentAt > 1000 else { return }
+    offlineStopSentAt = now
+    ble.writeStorage(StorageCommand.stop())
+  }
+
+  /// Back off after a failed sync (e.g. a damaged SD batch fails every read): 1, 2, 4 … 30 min.
+  private func offlineFailed() {
+    offlineFailures += 1
+    let delayMs = Int64(min(30, 1 << min(offlineFailures - 1, 5))) * 60_000
+    offlineRetryAt = nowMs() + delayMs
+    Log.warn("offline: sync failed \(offlineFailures)×; retrying in \(delayMs / 60_000) min")
+  }
+
+  /// Persist each record raw first (the pendant has already deleted it), then its frames. Records
+  /// recorded while the user had capture muted are dropped entirely.
+  private func saveOfflineRecords(_ records: [Data]) {
+    for record in records {
+      let seconds = OfflineRecordParser.recordSeconds(record) ?? 0
+      if seconds > 1_700_000_000, MuteLog.contains(Int64(seconds) * 1000) { continue }
+      let id = ensureOfflineStream(startedAt: seconds > 1_700_000_000 ? Int64(seconds) * 1000 : nowMs())
+      journal.appendRaw(id, record)
+      let (ts, frames) = OfflineRecordParser.parse(record)
+      guard !frames.isEmpty, ts > 1_700_000_000 else { continue }
+      let times = offlineClock.stamp(recordSeconds: ts, frames: frames.count)
+      for (frame, at) in zip(frames, times) { journal.append(id, at: at, data: frame) }
+      offlineFrames += Int64(frames.count)
+      offlineLastAt = times.last
+    }
+  }
+
+  private func ensureOfflineStream(startedAt: Int64) -> String {
+    if let id = offlineStreamId { return id }
+    let meta = StreamMeta(
+      id: UUID().uuidString.lowercased(), codec: codec ?? 21, sampleRate: 16000, frameMs: codec == 20 ? 10 : 20,
+      startedAt: startedAt, endedAt: nil, wearable: wearable)
+    journal.create(meta)
+    offlineStreamId = meta.id
+    Log.info("offline: stream \(meta.id) for pendant recordings")
+    if uplink.state == .open { bind(meta.id) }
+    return meta.id
+  }
+
+  private func finishOffline(reason: String) {
+    guard offlineState != .idle || offlineStreamId != nil else { return }
+    if let id = offlineStreamId {
+      let endedAt = offlineLastAt ?? journal.meta(id)?.startedAt ?? nowMs()
+      journal.updateMeta(id) { $0.endedAt = endedAt }
+      journal.seal(id)
+      Log.info("offline: \(reason); \(offlineFrames) frames saved")
+    }
+    offlineStreamId = nil
+    offlineLastAt = nil
+    offlineState = .idle
+    pump()
+    emitStatus()
   }
 }
 
