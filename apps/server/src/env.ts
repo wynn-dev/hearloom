@@ -33,21 +33,21 @@ const schema = z.object({
 
   // --- Live pipeline (transcription, sound events, speakers) ---
   LIVE_PIPELINE: z.enum(["on", "off"]).default("on"),
-  /** auto = Soniox for fresh audio when SONIOX_API_KEY is set, else local Parakeet. */
-  LIVE_ASR: z.enum(["auto", "soniox", "local", "off"]).default("auto"),
+  /** soniox = transcribe with Soniox (needs SONIOX_API_KEY); off = no transcription. */
+  LIVE_ASR: z.enum(["soniox", "off"]).default("soniox"),
   SONIOX_API_KEY: z.string().optional(),
+  /** Real-time model for fresh audio. */
   SONIOX_MODEL: z.string().default("stt-rt-v5"),
+  /** Async (file) model for backlog audio uploaded late. */
+  SONIOX_ASYNC_MODEL: z.string().default("stt-async-v5"),
   LANGUAGE_HINTS: z.string().default("en,nl"),
   /** Local model files (pnpm --filter @hearloom/server download-models). Defaults to DATA_DIR/models. */
   MODELS_DIR: z.string().optional(),
   /** Cosine similarity needed to attribute speech to an enrolled voice. */
   SPEAKER_MATCH_THRESHOLD: z.coerce.number().default(0.6),
   // --- Refine pass (worker) ---
-  /** auto = ElevenLabs Scribe v2 when ELEVENLABS_API_KEY is set, else keep the live text. */
-  REFINE_PROVIDER: z.enum(["auto", "elevenlabs", "keep", "off"]).default("auto"),
-  ELEVENLABS_API_KEY: z.string().optional(),
-  /** Opt out of ElevenLabs storing/training on audio (zero retention needs an enterprise plan). */
-  ELEVENLABS_ENABLE_LOGGING: z.enum(["true", "false"]).default("false"),
+  /** Re-diarize finished conversations (worker). off = keep the live speakers. */
+  REFINE: z.enum(["on", "off"]).default("on"),
   /** FluidAudio diarization sidecar (sidecars/diarizer). Empty = skip re-diarization. */
   DIARIZER_BIN: z
     .string()

@@ -18,7 +18,6 @@ export const MODEL_FILES = {
   // 3D-Speaker CAM++ (zh+en, 200k speakers): raw cosine separates speakers well on Opus audio,
   // unlike WeSpeaker ResNet293 whose raw scores overlapped badly in our tests (docs/models.md).
   speaker: "3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx",
-  parakeetDir: "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8",
 } as const;
 
 export const SPEAKER_MODEL_ID = "3dspeaker-campplus-zh-en-advanced";
@@ -216,54 +215,4 @@ export function cosine(a: ArrayLike<number>, b: ArrayLike<number>): number {
     nb += b[i]! * b[i]!;
   }
   return dot / (Math.sqrt(na * nb) || 1);
-}
-
-// ---- Local ASR (Parakeet TDT v3, 25 European languages incl. Dutch) ---------------------------
-
-export interface AsrResult {
-  text: string;
-  /** Token texts with start offsets (seconds) relative to the input. */
-  tokens: { text: string; start: number }[];
-  lang: string | null;
-}
-
-export class LocalAsr {
-  private rec: {
-    createStream(): { acceptWaveform(w: { samples: Float32Array; sampleRate: number }): void };
-    decode(stream: unknown): void;
-    getResult(stream: unknown): {
-      text: string;
-      tokens?: string[];
-      timestamps?: number[];
-      lang?: string;
-    };
-  };
-
-  constructor(modelsDir: string, numThreads = 4) {
-    const dir = modelPath(modelsDir, MODEL_FILES.parakeetDir);
-    this.rec = new sherpa.OfflineRecognizer({
-      featConfig: { sampleRate: SAMPLE_RATE, featureDim: 80 },
-      modelConfig: {
-        transducer: {
-          encoder: join(dir, "encoder.int8.onnx"),
-          decoder: join(dir, "decoder.int8.onnx"),
-          joiner: join(dir, "joiner.int8.onnx"),
-        },
-        tokens: join(dir, "tokens.txt"),
-        numThreads,
-        provider: "cpu",
-        modelType: "nemo_transducer",
-        debug: 0,
-      },
-    });
-  }
-
-  transcribe(samples: Float32Array): AsrResult {
-    const s = this.rec.createStream();
-    s.acceptWaveform({ samples, sampleRate: SAMPLE_RATE });
-    this.rec.decode(s);
-    const r = this.rec.getResult(s);
-    const tokens = (r.tokens ?? []).map((text, i) => ({ text, start: r.timestamps?.[i] ?? 0 }));
-    return { text: r.text.trim(), tokens, lang: r.lang?.trim() || null };
-  }
 }

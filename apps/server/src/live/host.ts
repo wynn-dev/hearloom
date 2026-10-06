@@ -109,7 +109,7 @@ export class LivePipelineHost {
         this.pending.clear();
         if (this.stopped) return;
         if (code === 2) {
-          console.error("[live] pipeline not started (missing models); audio is still recorded");
+          console.error("[live] pipeline not started (see above); audio is still recorded");
           return;
         }
         if (Date.now() - started > 60_000) this.backoffMs = 1000;

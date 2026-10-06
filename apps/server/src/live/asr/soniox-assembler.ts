@@ -32,16 +32,6 @@ export class SessionClock {
     return this.sentMs;
   }
 
-  /** Whether `[fromAbs, toAbs]` lies within audio we sent (one contiguous span). */
-  covers(fromAbs: number, toAbs: number, slackMs = 100): boolean {
-    for (let i = 0; i < this.spans.length; i++) {
-      const s = this.spans[i]!;
-      const len = (this.spans[i + 1]?.sessionMs ?? this.sentMs) - s.sessionMs;
-      if (fromAbs >= s.absMs - slackMs && toAbs <= s.absMs + len + slackMs) return true;
-    }
-    return false;
-  }
-
   toAbs(sessionMs: number): number {
     let span = this.spans[0];
     for (const s of this.spans) {
@@ -55,7 +45,8 @@ export class SessionClock {
 
 /**
  * Groups final Soniox tokens into utterances: a new utterance starts on the `<end>` endpoint
- * token, a speaker change, or a pause longer than `maxGapMs`.
+ * token, a speaker change, or a pause longer than `maxGapMs` (wall clock, so silence cut out of
+ * the audio we sent still splits).
  */
 export class SonioxAssembler {
   private current: SonioxToken[] = [];
@@ -84,7 +75,7 @@ export class SonioxAssembler {
         ((t.speaker !== undefined && t.speaker !== prev.speaker) ||
           (t.start_ms !== undefined &&
             prev.end_ms !== undefined &&
-            t.start_ms - prev.end_ms > this.maxGapMs))
+            this.clock.toAbs(t.start_ms) - this.clock.toAbs(prev.end_ms) > this.maxGapMs))
       ) {
         const u = this.emit();
         if (u) out.push(u);
