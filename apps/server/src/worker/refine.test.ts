@@ -509,64 +509,85 @@ describe("refining the blocks of a chain", () => {
       sampleSeconds: 10,
       source: "enrollment",
     });
+    /** One block, refined with every line in a single diarizer cluster. */
+    const refineOneCluster = async (
+      lines: { from: number; to: number; voice: number; text: string }[],
+    ) => {
+      const from = lines[0]!.from;
+      const to = lines[lines.length - 1]!.to;
+      const [conv] = await db
+        .insert(schema.conversations)
+        .values({ userId, startedAt: new Date(from), endedAt: new Date(to), status: "closed" })
+        .returning({ id: schema.conversations.id });
+      const [block] = await db
+        .insert(schema.blocks)
+        .values({
+          userId,
+          chainId: conv!.id,
+          startedAt: new Date(from),
+          endedAt: new Date(to),
+          status: "closed",
+        })
+        .returning({ id: schema.blocks.id });
+      await db.insert(schema.utterances).values(
+        lines.map((l) => ({
+          userId,
+          conversationId: conv!.id,
+          blockId: block!.id,
+          streamId,
+          startAt: new Date(l.from),
+          endAt: new Date(l.to),
+          speakerKey: "S1",
+          text: l.text,
+          source: "live" as const,
+          provider: "test",
+        })),
+      );
+      const r = await refineBlock(
+        {
+          ...deps(),
+          diarizer: {
+            diarize: async (samples) => [
+              { speaker: "spk0", start: 0, end: samples.length / 16000 },
+            ],
+          },
+          loadPieces: async (_stream, a, b) => {
+            const samples = new Float32Array(Math.round((b - a) * 16));
+            for (let i = 0; i < samples.length; i++) {
+              const ms = a + i / 16;
+              const l = lines.find((x) => ms >= x.from && ms < x.to);
+              samples[i] = l ? 0.1 * (l.voice + 1) : 0;
+            }
+            return [{ startAt: a, samples }];
+          },
+        },
+        block!.id,
+      );
+      expect(r).toMatchObject({ refined: true, replaced: lines.length });
+      return (await current(block!.id)).map((u) => [u.text, u.personId]);
+    };
+
     const t1 = t0 + 120 * MIN;
-    const lines = [
-      { from: t1, to: t1 + 2000, voice: 0, text: "a1" },
-      { from: t1 + 2500, to: t1 + 4500, voice: 0, text: "a2" },
-      { from: t1 + 5000, to: t1 + 7000, voice: 2, text: "b1" },
-    ];
-    const [conv] = await db
-      .insert(schema.conversations)
-      .values({ userId, startedAt: new Date(t1), endedAt: new Date(t1 + 7000), status: "closed" })
-      .returning({ id: schema.conversations.id });
-    const [block] = await db
-      .insert(schema.blocks)
-      .values({
-        userId,
-        chainId: conv!.id,
-        startedAt: new Date(t1),
-        endedAt: new Date(t1 + 7000),
-        status: "closed",
-      })
-      .returning({ id: schema.blocks.id });
-    await db.insert(schema.utterances).values(
-      lines.map((l) => ({
-        userId,
-        conversationId: conv!.id,
-        blockId: block!.id,
-        streamId,
-        startAt: new Date(l.from),
-        endAt: new Date(l.to),
-        speakerKey: "S1",
-        text: l.text,
-        source: "live" as const,
-        provider: "test",
-      })),
-    );
-    const r = await refineBlock(
-      {
-        ...deps(),
-        // One cluster for everything.
-        diarizer: {
-          diarize: async (samples) => [{ speaker: "spk0", start: 0, end: samples.length / 16000 }],
-        },
-        loadPieces: async (_stream, from, to) => {
-          const samples = new Float32Array(Math.round((to - from) * 16));
-          for (let i = 0; i < samples.length; i++) {
-            const ms = from + i / 16;
-            const l = lines.find((x) => ms >= x.from && ms < x.to);
-            samples[i] = l ? 0.1 * (l.voice + 1) : 0;
-          }
-          return [{ startAt: from, samples }];
-        },
-      },
-      block!.id,
-    );
-    expect(r).toMatchObject({ refined: true, replaced: 3 });
-    const rows = await current(block!.id);
-    expect(rows.map((u) => [u.text, u.personId])).toEqual([
+    expect(
+      await refineOneCluster([
+        { from: t1, to: t1 + 2000, voice: 0, text: "a1" },
+        { from: t1 + 2500, to: t1 + 4500, voice: 0, text: "a2" },
+        { from: t1 + 5000, to: t1 + 7000, voice: 2, text: "b1" },
+      ]),
+    ).toEqual([
       ["a1 a2", aliceId],
       ["b1", bob!.id],
     ]);
+
+    // A named cluster: lines its own check confirms and lines too short to check join alike.
+    const t2 = t0 + 130 * MIN;
+    expect(
+      await refineOneCluster([
+        { from: t2, to: t2 + 2000, voice: 0, text: "I think" },
+        { from: t2 + 2300, to: t2 + 2700, voice: 0, text: "um," },
+        { from: t2 + 3000, to: t2 + 5000, voice: 0, text: "recursion" },
+        { from: t2 + 5200, to: t2 + 5600, voice: 0, text: "is neat." },
+      ]),
+    ).toEqual([["I think um, recursion is neat.", aliceId]]);
   });
 });

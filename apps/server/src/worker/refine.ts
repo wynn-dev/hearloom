@@ -670,8 +670,10 @@ async function refineNow(deps: RefineDeps, blockId: string): Promise<RefineResul
             u.own = { personId: p.id, isSelf: p.isSelf };
           }
         }
-        // No match: if the cluster was named after someone this clip clearly isn't, drop the name.
         const clusterPerson = u.speaker ? speakerPerson.get(u.speaker)?.personId : null;
+        // Agrees with the cluster: no opinion, so it joins the cluster's unchecked lines.
+        if (u.own && u.own.personId === clusterPerson) u.own = undefined;
+        // No match: if the cluster was named after someone this clip clearly isn't, drop the name.
         if (u.own === undefined && clusterPerson && clip.length >= DROP_NAME_MIN_SAMPLES) {
           const theirs = people
             .filter((p) => p.id === clusterPerson)
