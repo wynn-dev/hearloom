@@ -15,12 +15,6 @@
       "previewUrl": "http://localhost:5173"
     },
     {
-      "name": "Dev (tailnet)",
-      "command": "pnpm dev:host",
-      "icon": "play",
-      "previewUrl": "http://localhost:5173"
-    },
-    {
       "name": "Mobile",
       "command": "pnpm --filter @hearloom/mobile start",
       "icon": "play"

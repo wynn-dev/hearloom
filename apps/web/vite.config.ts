@@ -1,26 +1,10 @@
 import tailwindcss from "@tailwindcss/vite";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
 import react from "@vitejs/plugin-react";
-import { defineConfig, type Plugin } from "vite";
+import { defineConfig } from "vite";
 
 /** The Hearloom server the dev console talks to (auth, RPC, media, realtime). */
 const target = process.env.HEARLOOM_SERVER_URL ?? "http://localhost:3000";
-/** `pnpm dev:host` sets 127.0.0.1, where `tailscale serve` forwards the tailnet's HTTPS traffic. */
-const host = process.env.HEARLOOM_WEB_HOST;
-
-/** Signing in over the tailnet needs that origin trusted by the server; say so at startup. */
-const remoteHint: Plugin = {
-  name: "hearloom-remote-hint",
-  configureServer(server) {
-    if (!host) return;
-    server.httpServer?.once("listening", () => {
-      server.config.logger.info(
-        "\n  Signing in over the tailnet? Add its https origin to TRUSTED_ORIGINS in .env and\n" +
-          "  restart, e.g. TRUSTED_ORIGINS=http://localhost:5173,https://<machine>.<tailnet>.ts.net:5173\n",
-      );
-    });
-  },
-};
 
 export default defineConfig({
   plugins: [
@@ -28,15 +12,15 @@ export default defineConfig({
     tanstackRouter({ target: "react", autoCodeSplitting: true }),
     react(),
     tailwindcss(),
-    remoteHint,
   ],
   server: {
     port: 5173,
-    // TRUSTED_ORIGINS and `tailscale serve` both expect 5173; fail rather than drift to 5174.
+    // TRUSTED_ORIGINS expects 5173; fail rather than drift to 5174.
     strictPort: true,
-    // IPv4 loopback, not Vite's default localhost (::1 only on macOS), so `tailscale serve` reaches it.
-    host: host ?? "127.0.0.1",
-    // Tailscale MagicDNS names, as forwarded by `tailscale serve` (localhost is always allowed).
+    // IPv4 loopback, not Vite's default localhost (::1 only on macOS), so proxies forwarding to
+    // 127.0.0.1 reach it.
+    host: "127.0.0.1",
+    // Tailscale MagicDNS names, for a tailnet proxy you set up yourself (localhost is always allowed).
     allowedHosts: [".ts.net"],
     proxy: {
       "/api": { target },

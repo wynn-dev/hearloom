@@ -81,7 +81,7 @@ Self-hosters with their own bundle id: create your own EAS project and set `HEAR
 
 Sign in with the URL your phone can reach, e.g. your Mac over Tailscale:
 `http://your-mac.your-tailnet.ts.net:3000` (plain HTTP is allowed only for `*.ts.net` and local networks;
-Tailscale already encrypts the traffic), or `https://…` via `tailscale serve`.
+Tailscale already encrypts the traffic), or an `https://…` URL from a proxy you set up.
 
 ## Tests
 
