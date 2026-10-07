@@ -9,6 +9,7 @@ import {
   type ClusterFacts,
   consolidate,
   finishChain,
+  mergeLines,
   type RefineDeps,
   refineBlock,
   windows,
@@ -18,6 +19,73 @@ test("long blocks are refined in windows", () => {
   const at = (h: number) => new Date(Date.UTC(2026, 9, 6, 0, 0) + h * 3600_000);
   const rows = [0, 1, 2.5, 3.5, 4, 7.2].map((h) => ({ startAt: at(h), endAt: at(h + 0.1) }));
   expect(windows(rows, 3 * 3600_000).map((w) => w.length)).toEqual([3, 2, 1]);
+});
+
+describe("mergeLines", () => {
+  const line = (
+    startAt: number,
+    endAt: number,
+    text: string,
+    speaker: string | null,
+    lang = "en",
+  ) => ({
+    startAt,
+    endAt,
+    text,
+    lang,
+    speaker,
+    confidence: 0.9,
+    model: "rt",
+  });
+
+  test("joins one speaker's fragments, not other speakers' or across long pauses", () => {
+    const out = mergeLines([
+      line(0, 2000, "Um,", "a"),
+      line(2500, 4000, "so.", "a"),
+      line(4200, 5000, "Recursion.", "a"),
+      line(5500, 6000, "Yes.", "b"),
+      line(6200, 7000, "Right.", "a"),
+      line(9000, 10_000, "Later.", "a"), // 2 s pause
+    ]);
+    expect(out.map((l) => [l.text, l.speaker, l.startAt, l.endAt])).toEqual([
+      ["Um, so. Recursion.", "a", 0, 5000],
+      ["Yes.", "b", 5500, 6000],
+      ["Right.", "a", 6200, 7000],
+      ["Later.", "a", 9000, 10_000],
+    ]);
+  });
+
+  test("short lines without a speaker join a neighbor; longer ones and other languages stay", () => {
+    const out = mergeLines([
+      line(0, 300, "Um,", null),
+      line(500, 3000, "well, the options.", "a"),
+      line(3500, 3700, "Yes.", null),
+      line(4000, 6000, "It did.", null), // no speaker, not short: may be someone else
+      line(6500, 7000, "You're right.", null),
+      line(7500, 9000, "Ja, dat klopt.", "a", "nl"),
+      line(9500, 11_000, "Okay.", "a"),
+    ]);
+    expect(out.map((l) => l.text)).toEqual([
+      "Um, well, the options. Yes.",
+      "It did.",
+      "You're right.",
+      "Ja, dat klopt.",
+      "Okay.",
+    ]);
+    expect(out[0]!.speaker).toBe("a");
+  });
+
+  test("stops at the length cap and keeps a text-weighted confidence", () => {
+    const words = Array.from({ length: 40 }, (_, i) => line(i * 1000, i * 1000 + 900, "w", "a"));
+    const out = mergeLines(words);
+    expect(out.every((l) => l.endAt - l.startAt <= 30_000)).toBe(true);
+    expect(out).toHaveLength(2);
+    const [m] = mergeLines([
+      { ...line(0, 1000, "aaa", "a"), confidence: 1 },
+      { ...line(1000, 2000, "b", "a"), confidence: 0 },
+    ]);
+    expect(m!.confidence).toBeCloseTo(0.75);
+  });
 });
 
 test("timeline lines are ordered by time across days, with day headers", () => {
@@ -355,6 +423,19 @@ describe("refining the blocks of a chain", () => {
     expect(row!.status).toBe("closed");
     // The next pass refines it (the rows refined meanwhile stay as they are).
     expect(await refineBlock(deps(), blockA)).toMatchObject({ refined: true, replaced: 4 });
+  });
+
+  test("a block the diarizer finds no speech in keeps its live rows and is refined", async () => {
+    const { blockA } = await chain();
+    const r = await refineBlock({ ...deps(), diarizer: { diarize: async () => [] } }, blockA);
+    expect(r).toMatchObject({ refined: true, replaced: 0 });
+    const rows = await current(blockA);
+    expect(rows.map((u) => [u.source, u.speakerKey])).toEqual([
+      ["live", "S1"],
+      ["live", "S2"],
+      ["live", "S1"],
+      ["live", "S2"],
+    ]);
   });
 
   test("without voice embeddings, the shared context alone carries keys and names over", async () => {

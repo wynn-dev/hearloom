@@ -91,6 +91,65 @@ export function windows<T extends { startAt: Date; endAt: Date }>(rows: T[], max
   return out;
 }
 
+/** One speaker's lines this close together become one line (the live pause rule). */
+const MERGE_GAP_MS = 1500;
+/** Longest line a merge may produce (the live cap). */
+const MERGE_MAX_MS = 30_000;
+/** A line without a speaker this short (a stray "Um,") joins the speaker next to it. */
+const STRAY_MS = 1000;
+/** Shortest clip whose own voice may overrule its cluster's name (shorter ones are too noisy). */
+const OWN_VOICE_MIN_SAMPLES = 3 * 16000;
+
+export interface Line {
+  startAt: number;
+  endAt: number;
+  text: string;
+  lang: string | null;
+  speaker: string | null;
+  confidence: number | null;
+  model: string | null;
+}
+
+/**
+ * Live transcription splits at every endpoint, so one speaker's sentence often arrives as several
+ * lines ("Um," / "so." / "Recursion."). Joins consecutive lines (sorted by time) of the same
+ * speaker, language and model that are at most MERGE_GAP_MS apart, up to MERGE_MAX_MS long. A
+ * short line without a speaker joins a neighbor; two lines without a speaker stay apart (they may
+ * be two people).
+ */
+export function mergeLines<T extends Line>(lines: T[]): T[] {
+  const stray = (l: Line) => l.speaker === null && l.endAt - l.startAt < STRAY_MS;
+  const out: T[] = [];
+  for (const l of lines) {
+    const prev = out[out.length - 1];
+    const fits =
+      prev &&
+      l.startAt - prev.endAt <= MERGE_GAP_MS &&
+      Math.max(l.endAt, prev.endAt) - prev.startAt <= MERGE_MAX_MS &&
+      (prev.speaker === l.speaker ? prev.speaker !== null : stray(prev) || stray(l)) &&
+      (prev.lang === l.lang || prev.lang === null || l.lang === null) &&
+      prev.model === l.model;
+    if (!fits) {
+      out.push({ ...l });
+      continue;
+    }
+    // Confidence weighted by text length.
+    const confidence =
+      prev.confidence === null || l.confidence === null
+        ? (prev.confidence ?? l.confidence)
+        : (prev.confidence * prev.text.length + l.confidence * l.text.length) /
+          (prev.text.length + l.text.length);
+    Object.assign(prev, {
+      endAt: Math.max(prev.endAt, l.endAt),
+      text: `${prev.text} ${l.text}`,
+      lang: prev.lang ?? l.lang,
+      speaker: prev.speaker ?? l.speaker,
+      confidence,
+    });
+  }
+  return out;
+}
+
 const keyNumber = (key: string) => Number(/^S(\d+)$/.exec(key)?.[1] ?? 0);
 
 /** A speaker the chain already knows (from its refined blocks). */
@@ -461,10 +520,12 @@ async function refineNow(deps: RefineDeps, blockId: string): Promise<RefineResul
     const firstNew = created.length;
     /** Cluster labels are per pass: diarizer labels restart in every pass. */
     const tag = `${pass}:`;
-    replaced.push(...utts);
 
     // 1) Offline diarization over the block (and the context before it).
     const segs: DiarSegment[] = await diarizer.diarize(samples);
+    // No speech found (e.g. one short line in noise): nothing to re-attribute, keep the live rows.
+    if (segs.length === 0) continue;
+    replaced.push(...utts);
     const turns: Turn[] = segs.map((s) => ({
       speaker: s.speaker,
       startAt: toAbs(s.start),
@@ -568,28 +629,32 @@ async function refineNow(deps: RefineDeps, blockId: string): Promise<RefineResul
       usedKeys.push(key);
     }
 
-    // 5) Keep the live text, re-attributed.
-    for (const u of utts) {
-      const label = labelOf.get(u.id);
-      created.push({
-        startAt: u.startAt.getTime(),
-        endAt: u.endAt.getTime(),
-        text: u.text,
-        lang: u.lang,
-        speaker: label ? `${tag}${label}` : null,
-        confidence: u.confidence,
-        provider: u.provider,
-        model: u.model,
-        streamId,
-      });
-    }
+    // 5) Keep the live text, re-attributed, with one speaker's fragments joined into lines.
+    created.push(
+      ...mergeLines(
+        utts.map((u) => {
+          const label = labelOf.get(u.id);
+          return {
+            startAt: u.startAt.getTime(),
+            endAt: u.endAt.getTime(),
+            text: u.text,
+            lang: u.lang,
+            speaker: label ? `${tag}${label}` : null,
+            confidence: u.confidence,
+            provider: u.provider,
+            model: u.model,
+            streamId,
+          };
+        }),
+      ),
+    );
 
     // Per-utterance voice match: diarizers can merge similar voices into one cluster, so a
     // confident match on the utterance itself overrides the cluster's name.
     if (deps.embedder && people.length > 0) {
       for (const u of created.slice(firstNew)) {
         const clip = samples.subarray(toOffset(u.startAt), toOffset(u.endAt));
-        if (clip.length < 16000) continue;
+        if (clip.length < OWN_VOICE_MIN_SAMPLES) continue;
         const emb = deps.embedder.embed(clip);
         let best = deps.matchThreshold;
         for (const p of people) {
@@ -612,8 +677,10 @@ async function refineNow(deps: RefineDeps, blockId: string): Promise<RefineResul
   }
 
   if (replaced.length === 0) {
-    // Nothing to re-derive (no stored audio): the live rows are final.
-    return (await markRefined()) ? result("no stored audio to refine", true) : result(again, false);
+    // Nothing to re-derive (no stored audio, or no speech in it): the live rows are final.
+    return (await markRefined())
+      ? result("no stored audio or speech to refine", true)
+      : result(again, false);
   }
 
   const now = new Date();
@@ -680,7 +747,7 @@ async function refineNow(deps: RefineDeps, blockId: string): Promise<RefineResul
   });
   const kept = live.length - replaced.length;
   const speakers = new Set([...speakerPerson.values()].map((s) => s.key)).size;
-  const done = `refined: ${replaced.length} live → ${created.length} utterances, ${speakers} speakers${kept ? ` (${kept} kept: no audio)` : ""}`;
+  const done = `refined: ${replaced.length} live → ${created.length} utterances, ${speakers} speakers${kept ? ` (${kept} kept: no audio or speech)` : ""}`;
   return result(refined ? done : `${done}; ${again}`, refined, replaced.length);
 }
 
