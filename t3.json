@@ -1,0 +1,49 @@
+{
+  "$schema": "https://t3.codes/schema/t3.json",
+  "scripts": [
+    {
+      "name": "Setup worktree",
+      "command": "sh scripts/setup-worktree.sh",
+      "icon": "configure",
+      "runOnWorktreeCreate": true,
+      "async": false
+    },
+    {
+      "name": "Dev",
+      "command": "pnpm dev",
+      "icon": "play",
+      "previewUrl": "http://localhost:5173"
+    },
+    {
+      "name": "Dev (tailnet)",
+      "command": "pnpm dev:host",
+      "icon": "play",
+      "previewUrl": "http://localhost:5173"
+    },
+    {
+      "name": "Mobile",
+      "command": "pnpm --filter @hearloom/mobile start",
+      "icon": "play"
+    },
+    {
+      "name": "Database up",
+      "command": "pnpm db:up && pnpm db:migrate",
+      "icon": "configure"
+    },
+    {
+      "name": "Check",
+      "command": "pnpm check && pnpm typecheck && pnpm test",
+      "icon": "test"
+    },
+    {
+      "name": "Fix lint",
+      "command": "pnpm fix",
+      "icon": "lint"
+    },
+    {
+      "name": "Build",
+      "command": "pnpm build",
+      "icon": "build"
+    }
+  ]
+}
