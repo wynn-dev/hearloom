@@ -1,3 +1,4 @@
+import "../test-db";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createDb, schema } from "@hearloom/db";
 import { SPEAKER_MODEL_ID } from "@hearloom/inference";
