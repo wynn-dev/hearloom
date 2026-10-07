@@ -18,8 +18,11 @@ export function commandThreshold(sampleScores: number[]): number {
   const scores = sampleScores.filter((s) => Number.isFinite(s)).sort((a, b) => a - b);
   if (scores.length < 3) return DEFAULT_MIN_SCORE;
   const p20 = scores[Math.floor((scores.length - 1) * 0.2)]!;
-  return Math.min(0.75, Math.max(0.55, p20 - 0.05));
+  return Math.min(0.75, Math.max(THRESHOLD_FLOOR, p20 - 0.05));
 }
+
+/** The lowest own-voice bar a command can ever need. */
+export const THRESHOLD_FLOOR = 0.55;
 
 /** Where a user's utterances come from (one stream processor). */
 export interface AudioSource {
@@ -65,8 +68,11 @@ const DUPLICATE_MS = 1_500;
 const DUPLICATE_SIMILARITY = 0.8;
 /** Transcripts sent to the agent are capped (the command itself at 500 by the assembler). */
 export const MAX_TRANSCRIPT_CHARS = 1_000;
-/** A teaching sample must be at least this close to the user's voice (once there is one). */
-export const TEACH_MIN_SELF = 0.45;
+/**
+ * A teaching sample must be at least this close to the user's voice (once there is one): never
+ * below the lowest bar a command could need, so learned samples can't pull the threshold under it.
+ */
+export const TEACH_MIN_SELF = THRESHOLD_FLOOR;
 /** Before the user has a voiceprint: a sample this close to someone else's is theirs, not the user's. */
 const TEACH_OTHER_MATCH = 0.6;
 
@@ -86,6 +92,25 @@ export function teachVoiceVerdict(score: VoiceScore | null): string | null {
   return null;
 }
 
+/**
+ * May audio from the command log (👍 / Missed) be learned as the user's voice? It must clear the
+ * same bar a command needs to be sent; otherwise one click could enrol a family member whose
+ * voice is merely similar, and their commands would be sent from then on.
+ */
+export function logLearnVerdict(score: VoiceScore, minScore: number): string | null {
+  if (score.self === null) return "Teach your voice on this page first.";
+  if (score.self < minScore || score.other > score.self)
+    return "That didn't sound enough like you to learn from.";
+  return null;
+}
+
+/**
+ * After a teaching session stops, speech that started up to this long after is still treated as
+ * teaching: the recognizer finalizes the last phrase a second or two after it's said, and it must
+ * not become a command.
+ */
+export const TEACH_GRACE_MS = 10_000;
+
 /** Audio of the parts only (not the silence or other speech between a wake word and command). */
 function partsAudio(source: AudioSource | null, parts: HeardUtterance[]): Float32Array | null {
   if (!source) return null;
@@ -104,6 +129,8 @@ interface UserState {
   assembler: CommandAssembler;
   source: AudioSource | null;
   teach: TeachPrompt | null;
+  /** Speech starting before this (ms) is still teaching (the session just stopped). */
+  teachGraceUntil: number;
   /** Accepted (sent or shadow) commands, newest last, for dedupe and rate limits. */
   recent: { spokenAt: number; acceptedAt: number; command: string }[];
 }
@@ -129,14 +156,22 @@ export class VoiceDetector {
   private user(userId: string): UserState {
     let s = this.users.get(userId);
     if (!s) {
-      s = { assembler: new CommandAssembler(), source: null, teach: null, recent: [] };
+      s = {
+        assembler: new CommandAssembler(),
+        source: null,
+        teach: null,
+        teachGraceUntil: 0,
+        recent: [],
+      };
       this.users.set(userId, s);
     }
     return s;
   }
 
   setTeach(userId: string, prompt: TeachPrompt | null): void {
-    this.user(userId).teach = prompt;
+    const s = this.user(userId);
+    if (s.teach && !prompt) s.teachGraceUntil = this.now() + TEACH_GRACE_MS;
+    s.teach = prompt;
   }
 
   /** A stream processor was disposed: drop references to its audio, and users with nothing going on. */
@@ -145,7 +180,13 @@ export class VoiceDetector {
     for (const [userId, s] of this.users) {
       if (s.source?.streamId === streamId) s.source = null;
       s.recent = s.recent.filter((r) => now - r.acceptedAt < USER_IDLE_MS);
-      if (!s.source && !s.teach && !s.assembler.busy && s.recent.length === 0)
+      if (
+        !s.source &&
+        !s.teach &&
+        !s.assembler.busy &&
+        s.recent.length === 0 &&
+        now >= s.teachGraceUntil
+      )
         this.users.delete(userId);
     }
   }
@@ -167,6 +208,8 @@ export class VoiceDetector {
       await this.teach(userId, s.teach, u.text, audio, "pendant");
       return;
     }
+    // Said while teaching (or just after): never a command.
+    if (u.startAt < s.teachGraceUntil) return;
     const cfg = await this.deps.config(userId);
     if (cfg.mode === "off") return;
     const step = s.assembler.push(u, cfg.wake, source.lastSpeechAt(), this.now());

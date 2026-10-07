@@ -808,6 +808,7 @@ const REASON: Record<string, string> = {
   near_miss: "name not recognized",
   teaching: "while teaching",
   restart: "server restarted",
+  mode_off: "turned off meanwhile",
   no_webhook: "no webhook",
   route_ignored: "route ignores voice.command",
   too_old: "too old",

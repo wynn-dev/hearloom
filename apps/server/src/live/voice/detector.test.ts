@@ -4,8 +4,11 @@ import {
   type AudioSource,
   commandThreshold,
   DEFAULT_MIN_SCORE,
+  logLearnVerdict,
   MAX_TRANSCRIPT_CHARS,
+  TEACH_GRACE_MS,
   TEACH_MIN_SELF,
+  THRESHOLD_FLOOR,
   teachVoiceVerdict,
   VoiceDetector,
 } from "./detector";
@@ -250,6 +253,36 @@ describe("review fixes", () => {
     expect(teachVoiceVerdict({ self: 0.7, other: 0.3 })).toBeNull();
     expect(teachVoiceVerdict({ self: 0.6, other: 0.65 })).not.toBeNull();
     expect(teachVoiceVerdict({ self: 0.4, other: 0 })).not.toBeNull();
+    // Never below the lowest bar a command can need (review round 2): a 0.5 voice isn't learned.
+    expect(TEACH_MIN_SELF).toBe(THRESHOLD_FLOOR);
+    expect(teachVoiceVerdict({ self: 0.5, other: 0 })).not.toBeNull();
+    expect(teachVoiceVerdict({ self: 0.56, other: 0.2 })).toBeNull();
+  });
+
+  test("learning from the log needs the same bar as sending", () => {
+    // A family member scoring 0.5 against the user (threshold 0.65) is not enrolled by a click.
+    expect(logLearnVerdict({ self: 0.5, other: 0 }, 0.65)).not.toBeNull();
+    expect(logLearnVerdict({ self: 0.64, other: 0 }, 0.65)).not.toBeNull();
+    expect(logLearnVerdict({ self: 0.7, other: 0.72 }, 0.65)).not.toBeNull();
+    expect(logLearnVerdict({ self: null, other: 0 }, 0.65)).not.toBeNull();
+    expect(logLearnVerdict({ self: 0.66, other: 0.3 }, 0.65)).toBeNull();
+  });
+
+  test("the last teaching phrase, finalized after Done, is not a command", async () => {
+    const t = setup();
+    t.detector.setTeach("u1", prompt);
+    t.setNow(3); // Done pressed right after saying the phrase (spoken 0–2.5 s)
+    t.detector.setTeach("u1", null);
+    // Its final arrives ~1.5 s later, then the user says something else within the grace.
+    await t.say("Hey Hermes, what's the weather tomorrow?", 0, 2.5);
+    await t.say("Hey Hermes, remind me to call mom at six", 5, 7);
+    expect(t.detections).toHaveLength(0);
+    expect(t.taught).toHaveLength(0);
+    // Speech that starts after the grace is a command again.
+    const after = 3 + TEACH_GRACE_MS / 1000 + 1;
+    await t.say("Hey Hermes, what time is it?", after, after + 2);
+    expect(t.detections).toHaveLength(1);
+    expect(t.detections[0]!.status).toBe("pending");
   });
 
   test("own-voice check and parts use each utterance's span, not the gap between", async () => {

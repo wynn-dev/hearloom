@@ -155,6 +155,10 @@ test("aliasWorthLearning", () => {
   expect(aliasWorthLearning("Hermes", cfg, 5)).toBe(false);
   expect(aliasWorthLearning("hey", cfg, 5)).toBe(false);
   expect(aliasWorthLearning("air miss", { ...cfg, aliases: ["Air Miss"] }, 3)).toBe(false);
+  // Several words: heard twice (or confirmed by the user) even when it looks like the name.
+  expect(aliasWorthLearning("her mess", cfg, 1)).toBe(false);
+  expect(aliasWorthLearning("her mess", cfg, 2)).toBe(true);
+  expect(aliasWorthLearning("Hermus", cfg, 1)).toBe(true);
 });
 
 test("nearWake", () => {

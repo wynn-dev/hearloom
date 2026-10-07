@@ -364,7 +364,9 @@ export function alignTeach(heard: string, prompt: string, cfg: WakeConfig): Teac
 
 /**
  * Should a spelling heard in place of the name become an alias? It must look like the name
- * (similar letters or sound), or have been heard that way more than once.
+ * (similar letters or sound), or have been heard that way more than once. A spelling of several
+ * words ("her mess") is everyday English, matched exactly once learned: it needs to have been
+ * heard at least twice, or confirmed by the user (callers pass `timesHeard` 2 for that).
  */
 export function aliasWorthLearning(heardAs: string, cfg: WakeConfig, timesHeard: number): boolean {
   const h = compactName(heardAs);
@@ -373,6 +375,7 @@ export function aliasWorthLearning(heardAs: string, cfg: WakeConfig, timesHeard:
   if (cfg.aliases.some((a) => compactName(a) === h)) return false;
   if ((cfg.blocked ?? []).some((b) => compactName(b) === h)) return false;
   if (GREETINGS.has(h) || FILLERS.has(h)) return false;
+  if (normalizeText(heardAs).split(" ").length > 1) return timesHeard >= 2;
   const similar =
     1 - editDistance(h, name) / Math.max(h.length, name.length) >= 0.5 ||
     phoneticKey(h).slice(0, 2) === phoneticKey(name).slice(0, 2);

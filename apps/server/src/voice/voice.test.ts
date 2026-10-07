@@ -8,6 +8,7 @@ import { webhookSignature } from "../agent/webhooks";
 import { db } from "../db";
 import { type IngestSocketData, registerPhoneSocket } from "../ingest/phones";
 import { livePipeline } from "../live/host";
+import { TEACH_GRACE_MS } from "../live/voice/detector";
 import type { VoiceDetection } from "../live/voice/types";
 import { getSettings, updateSettings } from "../settings";
 import { onDetection, recoverPending, sendTestCommand, setFeedback } from "./commands";
@@ -468,6 +469,7 @@ test("browser uploads: one at a time", async () => {
 });
 
 test("after a restart, stuck pending commands are retried or expired", async () => {
+  await updateSettings(userId, { voice: { mode: "on" } });
   const old = detection({ status: "ignored", spokenAt: Date.now() - MAX_AGE_MS - 5_000 });
   const fresh = detection({ status: "ignored", spokenAt: Date.now() - 5_000 });
   await onDetection(old);
@@ -492,6 +494,35 @@ test("after a restart, stuck pending commands are retried or expired", async () 
   await Bun.sleep(200);
   expect(received.map((x) => x.body.id)).toEqual([fresh.id]);
   expect((await row(fresh.id)).status).toBe("sent");
+
+  // Turned off (or to shadow) while it was pending: expired, never sent.
+  await updateSettings(userId, { voice: { mode: "shadow" } });
+  const late = detection({ status: "ignored", spokenAt: Date.now() - 5_000 });
+  await onDetection(late);
+  await db
+    .update(schema.voiceCommands)
+    .set({ status: "pending" })
+    .where(eq(schema.voiceCommands.id, late.id));
+  received.length = 0;
+  expect(await recoverPending()).toEqual({ retried: 0, expired: 1 });
+  expect(await row(late.id)).toMatchObject({ status: "expired", reason: "mode_off" });
+  await Bun.sleep(100);
+  expect(received).toHaveLength(0);
+  await updateSettings(userId, { voice: { mode: "off" } });
+});
+
+test("speech from just before or after Done is still teaching, never sent", async () => {
+  await startTeach(userId, "Tester", "sample");
+  stopTeach(userId);
+  // The last phrase, finalized after Done.
+  const last = detection({ status: "pending", spokenAt: Date.now() - 2_000 });
+  await onDetection(last);
+  expect(await row(last.id)).toMatchObject({ status: "ignored", reason: "teaching" });
+  // Something said well after: a command again.
+  const later = detection({ status: "pending", spokenAt: Date.now() + TEACH_GRACE_MS + 1_000 });
+  await onDetection(later);
+  expect((await row(later.id)).status).toBe("sent");
+  expect(received.map((x) => x.body.id)).toEqual([later.id]);
 });
 
 test("the own-voice threshold ignores scores from vouched-for commands", async () => {

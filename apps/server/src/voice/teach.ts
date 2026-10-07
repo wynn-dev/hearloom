@@ -3,6 +3,7 @@ import { aliasWorthLearning, compactName, teachPhrase } from "@hearloom/shared";
 import { and, count, eq } from "drizzle-orm";
 import { db } from "../db";
 import { livePipeline } from "../live/host";
+import { TEACH_GRACE_MS } from "../live/voice/detector";
 import type { TeachPrompt, TeachResult } from "../live/voice/types";
 import { invalidate } from "../realtime";
 import { getSettings, updateSettings } from "../settings";
@@ -40,6 +41,8 @@ interface Session {
 }
 
 const sessions = new Map<string, Session>();
+/** When each user's last session stopped (ms), for the grace window. */
+const stoppedAt = new Map<string, number>();
 
 export class TeachError extends Error {}
 
@@ -50,9 +53,15 @@ function touch(userId: string, s: Session): void {
   s.idle = setTimeout(() => stopTeach(userId, s.prompt.sessionId), IDLE_MS);
 }
 
-/** Is the user teaching (their wake phrases must not be sent)? */
-export function isTeaching(userId: string): boolean {
-  return sessions.has(userId);
+/**
+ * Was speech at `spokenAt` (ms) part of teaching, so it must not be sent? True while a session
+ * runs, and for speech that started up to TEACH_GRACE_MS after it stopped (the last phrase may
+ * still be on its way through the recognizer when the user presses Done).
+ */
+export function isTeaching(userId: string, spokenAt: number): boolean {
+  if (sessions.has(userId)) return true;
+  const stopped = stoppedAt.get(userId);
+  return stopped !== undefined && spokenAt < stopped + TEACH_GRACE_MS;
 }
 
 /** The live pipeline restarted: it forgot the prompts, so send them again. */
@@ -124,6 +133,7 @@ export function stopTeach(userId: string, sessionId?: string): void {
   clearTimeout(s.idle);
   clearTimeout(s.hardStop);
   sessions.delete(userId);
+  stoppedAt.set(userId, Date.now());
   livePipeline.teach(userId, null);
   invalidate(userId, ["voice"]);
 }
@@ -234,4 +244,5 @@ export function resetTeach(): void {
     clearTimeout(s.hardStop);
   }
   sessions.clear();
+  stoppedAt.clear();
 }

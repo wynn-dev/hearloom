@@ -124,7 +124,8 @@ pendant ─▶ phone ─▶ server ─▶ live pipeline child                   
   - Failed: two short buzzes, plus a **passive** system notification ("Couldn't reach Hermes: the
     webhook secret was rejected"). It deep-links to `/voice`.
 - **After a server restart,** commands still `pending` are delivered again if they're under 60 s
-  old (same id, so Hermes dedupes). Older ones are marked `expired` with reason `restart`.
+  old and the mode is still `on` (same id, so Hermes dedupes). Older ones are marked `expired`
+  with reason `restart`; ones whose mode changed, with `mode_off`.
 
   Shadow mode never buzzes.
 
@@ -141,8 +142,10 @@ Teaching reuses the voiceprint machinery behind "This is me" (`voiceprints` rows
     which is how Soniox spells the name in your voice;
   - the utterance's audio (padded by 250 ms) is embedded with CAM++ and compared with your
     voiceprints so far. That score is the sample's quality and feeds the own-voice threshold;
-  - **it must sound like you.** Once you have a voiceprint, a sample scoring below 0.45 against
-    it, or closer to someone else's voice, is refused ("That didn't sound like you"). Before your
+  - **it must sound like you.** Once you have a voiceprint, a sample is refused ("That didn't
+    sound like you") if it scores below 0.55 against it (the lowest own-voice bar a command can
+    ever need, so learned samples can't drag the threshold under it) or closer to someone else's
+    voice. Before your
     first voiceprint, a sample clearly matching another enrolled person is refused. Whoever else
     talks while the page is open isn't enrolled as you;
   - if the audio is at least 1.5 s long, it is stored as a new voiceprint. Shorter "Hey Hermes"
@@ -154,7 +157,9 @@ Teaching reuses the voiceprint machinery behind "This is me" (`voiceprints` rows
   - after 20 minutes in any case;
   - when you press Done, leave the page, or hide the tab.
 
-  While a session runs, your wake phrases are taught, not sent.
+  While a session runs, your wake phrases are taught, not sent. So is speech that starts within
+  **10 s after it stops**: the recognizer finalizes the last phrase a second or two later, and it
+  must not go out as a command. Both the live pipeline and the server apply this.
 - **If the live pipeline restarts mid-session,** the server sends the prompt again. As a second
   guard, any detection that arrives while you're teaching is stored as ignored (`teaching`) and
   never sent.
@@ -168,19 +173,24 @@ Teaching reuses the voiceprint machinery behind "This is me" (`voiceprints` rows
     commands, and processes it exactly like pendant speech.
   - The mic still differs from the pendant's, so the page recommends the pendant.
 - **Aliases:** a spelling heard in the name's position becomes an alias when it looks like the name
-  (letters or sound) or has been heard at least twice. You can remove aliases in the console.
+  (letters or sound) or has been heard at least twice. A spelling of several words ("her mess")
+  is ordinary English, so it's learned only after being heard twice or confirmed with 👍/Missed.
+  You can remove aliases in the console.
 - **Learning from real use:**
   - **👍 confirmed** (on commands that fired) and **Missed** (on ignored ones) learn from the
     command. The audio of its utterances, not the gap between a wake word and the command, becomes
-    a voiceprint, if the live pipeline finds it sounds like you (same check as teaching). The
-    spelling becomes an alias.
+    a voiceprint, but only if it scores at least your current own-voice threshold, the same bar a
+    command needs to be sent. One click can't enrol a family member whose voice is merely similar.
+    The spelling becomes an alias.
   - **Missed isn't offered on detections ignored as `not_own_voice` or `media_voice`.** The gate
     heard someone else there; learning it would enrol their voice. The server refuses it too.
   - **A Missed detection whose voice doesn't check out teaches nothing,** not even the spelling.
   - **👎 false trigger** removes anything learned from that command and blocks the spelling from
     loose matching.
   - Changing your verdict undoes the earlier one. Verdicts on one command are serialized with a
-    row lock, so a quick 👍 then 👎 can't leave the 👍's voiceprint behind.
+    row lock, held only briefly. The verdict is recorded first, the voice is learned without the
+    lock, and the result is linked only if the verdict hasn't changed meanwhile; otherwise the new
+    voiceprint is deleted. A quick 👍 then 👎 can't leave the 👍's voiceprint behind.
   - **Only taught samples set the own-voice threshold.** Vouched-for commands never pull it down.
 - **Readiness on the Voice page:**
   - number of samples and seconds of voice learned;

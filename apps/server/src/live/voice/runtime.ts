@@ -8,7 +8,7 @@ import { mediaVoices } from "../../episodes/store";
 import type { ChildMessage, HostMessage } from "../ipc";
 import type { SpeakerDirectory } from "../speakers";
 import { throughPendantCodec, transcribeClip } from "./clip";
-import { commandThreshold, teachVoiceVerdict, VoiceDetector } from "./detector";
+import { commandThreshold, logLearnVerdict, VoiceDetector } from "./detector";
 import type { VoiceConfig } from "./types";
 
 /** Reload a user's voice settings at least this often (changes also reload them at once). */
@@ -189,8 +189,13 @@ export class VoiceRuntime {
     if (audio.length < 16_000) throw new Error("need at least 1 s of stored audio");
     const { embedder, speakers } = this.deps;
     if (!embedder || !speakers) throw new Error("speaker model not installed");
-    // The user vouched for it, but it must still sound like them (not a partner, not the TV).
-    const refused = teachVoiceVerdict(await speakers.compare(msg.userId, embedder.embed(audio)));
+    // The user vouched for it, but it must still sound like them (not a partner, not the TV): as
+    // much as a command must to be sent.
+    const { minScore } = await this.config(msg.userId);
+    const refused = logLearnVerdict(
+      await speakers.compare(msg.userId, embedder.embed(audio)),
+      minScore,
+    );
     if (refused) throw new Error(refused);
     const voiceprintId = await this.learn(msg.userId, msg.personId, audio);
     return { voiceprintId, seconds: audio.length / 16000 };
