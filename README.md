@@ -52,6 +52,16 @@ HEARLOOM_EMAIL=you@example.com HEARLOOM_PASSWORD=... pnpm --filter @hearloom/ser
 Reach the server from your phone over [Tailscale](https://tailscale.com): set `PUBLIC_URL` to your
 machine's MagicDNS name (e.g. `https://mac.your-tailnet.ts.net` via `tailscale serve`).
 
+## Tests
+
+```sh
+pnpm check && pnpm typecheck && pnpm test
+```
+
+Server tests create and delete rows and close open conversations, so they only run against a local
+database: `DATABASE_URL` on localhost, or set `TEST_DATABASE_URL` to a throwaway database (needed when
+`.env` points at a hosted one).
+
 ## License
 
 [AGPL-3.0](LICENSE). If you run a modified Hearloom as a network service, you must publish your changes.
