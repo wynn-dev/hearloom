@@ -1,4 +1,10 @@
-import { settingsPatchSchema, settingsSchema, timeZoneSchema } from "@hearloom/shared";
+import {
+  editSourceSchema,
+  episodeKindSchema,
+  settingsPatchSchema,
+  settingsSchema,
+  timeZoneSchema,
+} from "@hearloom/shared";
 import { oc } from "@orpc/contract";
 import { z } from "zod";
 
@@ -73,7 +79,6 @@ export const deviceEventSchema = z.object({
 
 export const utteranceSchema = z.object({
   id: z.uuid(),
-  conversationId: z.uuid().nullable(),
   startAt: z.date(),
   endAt: z.date(),
   speakerKey: z.string().nullable(),
@@ -94,18 +99,28 @@ export const soundEventSchema = z.object({
   confidence: z.number(),
 });
 
-export const conversationSchema = z.object({
+/** What was happening: utterances belong to the episode whose [startedAt, endedAt) holds their start. */
+export const episodeSchema = z.object({
   id: z.uuid(),
   startedAt: z.date(),
+  /** null: still going on. */
   endedAt: z.date().nullable(),
-  status: z.enum(["open", "closed", "refining", "refined"]),
-  languages: z.array(z.string()),
-  speakerCount: z.number(),
+  kind: episodeKindSchema,
+  kindSource: editSourceSchema,
+  boundarySource: editSourceSchema,
   title: z.string().nullable(),
+  summary: z.string().nullable(),
+  /** Ended, and its speakers have been refined. */
+  refined: z.boolean(),
+  /** People and unnamed voices heard (in the requested range). */
+  speakerCount: z.number(),
+  languages: z.array(z.string()),
 });
 
+const knownKind = episodeKindSchema.exclude(["unknown"]);
+
 export const timelineSchema = z.object({
-  conversations: z.array(conversationSchema),
+  episodes: z.array(episodeSchema),
   utterances: z.array(utteranceSchema),
   soundEvents: z.array(soundEventSchema),
   bookmarks: z.array(bookmarkSchema),
@@ -208,6 +223,23 @@ export const contract = {
   timeline: {
     range: oc.input(range).output(timelineSchema),
   },
+  episodes: {
+    /** Rename, describe or re-classify (null clears a title or summary). */
+    update: oc
+      .input(
+        z.object({
+          id: z.uuid(),
+          title: z.string().max(200).nullable().optional(),
+          summary: z.string().max(4000).nullable().optional(),
+          kind: knownKind.optional(),
+        }),
+      )
+      .output(ok),
+    /** Split an ended episode in two at `at`. */
+    split: oc.input(z.object({ id: z.uuid(), at: z.date() })).output(ok),
+    /** Merge an ended episode with the one right after it. */
+    merge: oc.input(z.object({ ids: z.tuple([z.uuid(), z.uuid()]) })).output(ok),
+  },
   people: {
     list: oc.output(z.array(personSchema)),
     save: oc
@@ -294,6 +326,7 @@ export type Phone = z.infer<typeof phoneSchema>;
 export type Wearable = z.infer<typeof wearableSchema>;
 export type LiveStatus = z.infer<typeof liveStatusSchema>;
 export type Timeline = z.infer<typeof timelineSchema>;
+export type Episode = z.infer<typeof episodeSchema>;
 export type NotificationItem = z.infer<typeof notificationSchema>;
 export type AudioChunk = z.infer<typeof audioChunkSchema>;
 export type Person = z.infer<typeof personSchema>;

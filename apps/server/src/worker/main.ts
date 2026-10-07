@@ -1,12 +1,13 @@
 /**
  * Hearloom worker: background jobs from the Postgres queue (pg-boss).
  *   refine-block — offline diarization + voice ID after a block of speech ends; once a whole
- *   conversation is refined, its speaker keys are consolidated.
+ *   chain of speech is refined, its speaker keys are consolidated.
  * Run alongside the server: `pnpm --filter @hearloom/server worker`.
  */
 import { createDb } from "@hearloom/db";
 import { hasModel, MODEL_FILES, SpeakerEmbedder } from "@hearloom/inference";
 import { env, modelsDir } from "../env";
+import { episodesRefinedBy, refinedEpisodesOfChain } from "../episodes/store";
 import { publishChange } from "../events";
 import {
   enqueueRefine,
@@ -43,15 +44,34 @@ async function refine(blockId: string): Promise<void> {
   const [row] = await client`select user_id from blocks where id = ${blockId}`;
   const userId = row?.user_id as string | undefined;
   if (!userId) return;
-  if (r.replaced > 0) await publishChange(client, userId, ["timeline", "people"]);
   // Also after "already refined": a run that failed after refining must still finish the chain.
   const done = await finishChain(deps, r.chainId);
-  if (!done.finished) return;
-  console.log(`[worker] conversation ${r.chainId}: ${done.message}`);
-  await publishChange(client, userId, ["timeline", "people"], {
-    type: "conversation.refined",
-    conversationId: r.chainId,
-  });
+  if (done.finished) console.log(`[worker] chain ${r.chainId}: ${done.message}`);
+  if (!r.refined && !done.finished) return;
+  await publishChange(client, userId, ["timeline", "people"]);
+  // Episodes whose speech is all refined now.
+  const refined = r.refined ? await episodesRefinedBy(db, blockId) : null;
+  for (const ep of refined?.episodes ?? []) {
+    await publishChange(client, userId, ["timeline"], {
+      type: "episode.refined",
+      episodeId: ep.id,
+      kind: ep.kind,
+      again: false,
+    });
+  }
+  // Merging speaker keys across the chain renamed speakers its episodes were refined with.
+  if (done.renamed > 0) {
+    const chain = await refinedEpisodesOfChain(db, r.chainId);
+    for (const ep of chain?.episodes ?? []) {
+      if (refined?.episodes.some((x) => x.id === ep.id)) continue;
+      await publishChange(client, userId, ["timeline"], {
+        type: "episode.refined",
+        episodeId: ep.id,
+        kind: ep.kind,
+        again: true,
+      });
+    }
+  }
 }
 
 /**

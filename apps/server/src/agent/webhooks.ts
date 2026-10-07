@@ -1,26 +1,40 @@
 import { createHmac } from "node:crypto";
+import type { EpisodeKind, Settings } from "@hearloom/shared";
 import { getSettings } from "../settings";
 
 export type AgentEvent =
   | {
-      type: "conversation.ended";
-      conversationId: string;
+      type: "episode.ended";
+      episodeId: string;
+      kind: EpisodeKind;
+      title: string | null;
       startedAt: string;
-      endedAt: string | null;
+      endedAt: string;
     }
-  | { type: "conversation.refined"; conversationId: string }
+  | {
+      type: "episode.refined";
+      episodeId: string;
+      kind: EpisodeKind;
+      /** Sent again when a later pass merges speaker labels across the episode's chain. */
+      again: boolean;
+    }
   | { type: "bookmark"; at: string; source: string; note: string | null }
   | { type: "test"; message: string };
 
-const EVENT_SETTING: Record<
-  AgentEvent["type"],
-  "conversationEnded" | "conversationRefined" | "bookmark" | null
-> = {
-  "conversation.ended": "conversationEnded",
-  "conversation.refined": "conversationRefined",
-  bookmark: "bookmark",
-  test: null,
-};
+/** Is this event turned on in the user's settings? */
+function enabled(settings: Settings, event: AgentEvent): boolean {
+  const { events } = settings.agent;
+  switch (event.type) {
+    case "episode.ended":
+      return events.episodeEnded[event.kind];
+    case "episode.refined":
+      return events.episodeRefined && events.episodeEnded[event.kind];
+    case "bookmark":
+      return events.bookmark;
+    case "test":
+      return true;
+  }
+}
 
 /**
  * POST an event to the user's agent webhook. Signed like many webhook providers:
@@ -32,10 +46,10 @@ export async function sendAgentEvent(
   userId: string,
   event: AgentEvent,
 ): Promise<{ ok: boolean; status: number; error: string | null }> {
-  const { agent } = await getSettings(userId);
-  const setting = EVENT_SETTING[event.type];
+  const settings = await getSettings(userId);
+  const { agent } = settings;
   if (!agent.webhookUrl) return { ok: false, status: 0, error: "no webhook configured" };
-  if (setting && !agent.events[setting]) return { ok: false, status: 0, error: "event disabled" };
+  if (!enabled(settings, event)) return { ok: false, status: 0, error: "event disabled" };
   const body = JSON.stringify({ ...event, userId, sentAt: new Date().toISOString() });
   const timestamp = Math.floor(Date.now() / 1000).toString();
   const headers: Record<string, string> = {

@@ -21,7 +21,7 @@ Omi pendant ──BLE (Opus 16 kHz, 20 ms frames)──▶ iPhone app
                                                          ▼
 Server (Bun) ── fsync'd spool → Ogg chunks (disk/S3) ── Postgres 18
    │  auth, typed API (oRPC), realtime, notifications (APNs → socket), MCP
-   ├── live pipeline (child process): decode → VAD → ASR (Soniox) → speakers → sounds → blocks
+   ├── live pipeline (child process): decode → VAD → ASR (Soniox) → speakers → sounds → blocks, episodes
    └── job queue (pg-boss) ──▶ worker: refine finished blocks (diarizer sidecar)
 Web console (Vite/TanStack) ── same-origin to server        Hermes agent ── MCP + signed webhooks
 ```
@@ -30,7 +30,7 @@ Web console (Vite/TanStack) ── same-origin to server        Hermes agent ─
 |---|---|---|
 | `apps/mobile` | Expo SDK 58, RN 0.88, Swift module `omi-capture` | BLE + state restoration, frame journal, uplink, pendant button/haptics, offline-storage download, push |
 | `apps/server` | Bun 1.4, Hono, oRPC, Better Auth, postgres.js + Drizzle | ingest, storage, API, realtime, notifications, live pipeline host, MCP |
-| live pipeline | child process of the server, sherpa-onnx | real-time transcript, speakers, sound events, conversations and blocks |
+| live pipeline | child process of the server, sherpa-onnx | real-time transcript, speakers, sound events, blocks, episodes (what kind of speech: conversation, talk, media…) |
 | worker | Bun + pg-boss | refine pass per block |
 | `sidecars/diarizer` | Swift + FluidAudio (Core ML) | offline speaker diarization |
 | `apps/web` | Vite, TanStack Router/Query, Tailwind | timeline, people, notifications, devices, settings, agent tokens |
@@ -60,8 +60,10 @@ Web console (Vite/TanStack) ── same-origin to server        Hermes agent ─
 
 `phones`, `wearables`, `capture_streams` (ack position), `audio_chunks` (storage key, time range),
 `utterances` (time, text, lang, speaker key, person, wearer flag, source live/refine, superseded,
-EN/NL full-text `tsvector`), `sound_events` (label, point/state, confidence), `conversations`,
-`blocks` (≤ 20 min refine units of a conversation, with the voices refine found),
+EN/NL full-text `tsvector`), `sound_events` (label, point/state, confidence), `episodes` (time range,
+kind, title, summary; who set the kind/boundaries), `context_samples` (per-minute speech-context
+scores: television, narration, laughter…), `chains` (continuous speech; internal) cut into `blocks`
+(≤ 20 min refine units, with the voices refine found),
 `people` + `voiceprints`, `bookmarks`, `device_events`, `notifications` + `notification_deliveries`,
 `user_settings`, `api_tokens`. Every row has a `user_id`; times are absolute (`timestamptz`).
 
@@ -98,8 +100,8 @@ reply).
 ## Agent interface
 
 Stateless MCP endpoint `/mcp` with scoped, hashed tokens (`read`, `notify`): current context, transcript
-search, timeline, conversations, sound events, people, `changes_since`, audio URLs, `send_notification`.
-Signed webhooks (`conversation.ended`, `conversation.refined`, `bookmark`). Output is compact text
+search, timeline, episodes, sound events, people, `changes_since`, audio URLs, `send_notification`.
+Signed webhooks (`episode.ended` per kind, `episode.refined`, `bookmark`). Output is compact text
 (`09:30:12 Me: …`, `[door slam]`, `{music}`). Transcripts are untrusted input; run the agent isolated.
 Details: `docs/agent.md`.
 
@@ -120,6 +122,7 @@ transport. Not yet: encryption at rest, retention policies, bystander redaction.
 | One transcription provider (Soniox), no local fallback | one key and bill; live text is what a proactive agent acts on |
 | Refine pass re-diarizes only | offline diarization far beats live speakers; re-transcribing after the fact is too late to matter |
 | Refine per ≤ 20 min block, not per conversation | a lecture or TV evening has no 2-minute silence: refining it as one unit waited hours and diarized hours of audio at once. Keys carry across blocks via shared context and stored voices |
+| Episodes with kinds, not "conversations" | not everything heard is a conversation (a lecture, the TV, a café). The kind decides whether the user is busy, which webhooks fire and how the timeline shows it; rules classify, the agent and the user can correct (user > agent > rule) |
 | No built-in LLM layer | the agent (Hermes + Claude) does summarizing/reasoning over MCP |
 
 ## Not yet built

@@ -1,6 +1,6 @@
 import type { AudioChunk, Timeline } from "@hearloom/api";
 
-export type Conversation = Timeline["conversations"][number];
+export type Episode = Timeline["episodes"][number];
 export type Utterance = Timeline["utterances"][number];
 export type SoundEvent = Timeline["soundEvents"][number];
 export type Bookmark = Timeline["bookmarks"][number];
@@ -28,8 +28,8 @@ interface Base {
   at: number;
   /** End, unix ms (= at for point items). */
   end: number;
-  /** Id of the conversation this row belongs to, if any. */
-  conv: string | null;
+  /** Id of the episode this row belongs to, if any. */
+  ep: string | null;
 }
 
 export type Row =
@@ -41,8 +41,16 @@ export type Row =
 
 export type Entry =
   | Row
-  | { kind: "conversation"; key: string; at: number; conv: string; item: Conversation }
-  | { kind: "gap"; key: string; at: number; ms: number; conv: null };
+  | {
+      kind: "episode";
+      key: string;
+      at: number;
+      ep: string;
+      item: Episode;
+      /** Rows folded away under this header. */
+      hidden: number;
+    }
+  | { kind: "gap"; key: string; at: number; ms: number; ep: null };
 
 /** Same-time ordering: context first (audio, device), then content. */
 const ORDER: Record<Row["kind"], number> = {
@@ -95,57 +103,67 @@ export function visibleDeviceEvents(events: DeviceEvent[]): DeviceEvent[] {
   });
 }
 
-/** Merge all timeline layers into one time-ordered list with conversation headers and gaps. */
-export function buildEntries(data: Timeline, filters: Filters): Entry[] {
-  const conversations = [...data.conversations].sort(
-    (a, b) => a.startedAt.getTime() - b.startedAt.getTime(),
-  );
-  const convAt = (t: number): string | null => {
+type WithoutEp<T> = T extends unknown ? Omit<T, "ep"> : never;
+
+/** Episodes whose rows start folded away: speech that isn't the user's (TV, people nearby). */
+export function foldedByDefault(ep: Episode): boolean {
+  return ep.kind === "media" || ep.kind === "ambient";
+}
+
+/** Rows a folded episode hides: what was said and heard (not bookmarks, audio or devices). */
+const foldable = (row: Row) => row.kind === "utterance" || row.kind === "sound";
+
+/**
+ * Merge all timeline layers into one time-ordered list with episode headers and gaps. Lines of a
+ * folded episode are left out (its header says how many).
+ */
+export function buildEntries(
+  data: Timeline,
+  filters: Filters,
+  folded: (ep: Episode) => boolean = () => false,
+): Entry[] {
+  const episodes = [...data.episodes].sort((a, b) => a.startedAt.getTime() - b.startedAt.getTime());
+  const epAt = (t: number): string | null => {
     let found: string | null = null;
-    for (const c of conversations) {
-      if (c.startedAt.getTime() > t) break;
-      if (t < (c.endedAt?.getTime() ?? Number.POSITIVE_INFINITY)) found = c.id;
+    for (const e of episodes) {
+      if (e.startedAt.getTime() > t) break;
+      if (t < (e.endedAt?.getTime() ?? Number.POSITIVE_INFINITY)) found = e.id;
     }
     return found;
   };
 
   const rows: Row[] = [];
+  const push = (row: WithoutEp<Row>) => rows.push({ ...row, ep: epAt(row.at) } as Row);
   if (filters.audio) {
     for (const chunks of audioRuns(data.chunks)) {
       const first = chunks[0]!;
-      const at = first.startAt.getTime();
-      rows.push({
+      push({
         kind: "audio",
         key: `a:${first.id}`,
-        at,
+        at: first.startAt.getTime(),
         end: chunks[chunks.length - 1]!.endAt.getTime(),
-        conv: convAt(at),
         chunks,
       });
     }
   }
   if (filters.speech) {
     for (const item of data.utterances) {
-      const at = item.startAt.getTime();
-      rows.push({
+      push({
         kind: "utterance",
         key: `u:${item.id}`,
-        at,
+        at: item.startAt.getTime(),
         end: item.endAt.getTime(),
-        conv: item.conversationId ?? convAt(at),
         item,
       });
     }
   }
   if (filters.sounds) {
     for (const item of data.soundEvents) {
-      const at = item.startAt.getTime();
-      rows.push({
+      push({
         kind: "sound",
         key: `s:${item.id}`,
-        at,
+        at: item.startAt.getTime(),
         end: item.endAt.getTime(),
-        conv: convAt(at),
         item,
       });
     }
@@ -153,69 +171,71 @@ export function buildEntries(data: Timeline, filters: Filters): Entry[] {
   if (filters.bookmarks) {
     for (const item of data.bookmarks) {
       const at = item.at.getTime();
-      rows.push({ kind: "bookmark", key: `b:${item.id}`, at, end: at, conv: convAt(at), item });
+      push({ kind: "bookmark", key: `b:${item.id}`, at, end: at, item });
     }
   }
   if (filters.device) {
     for (const item of visibleDeviceEvents(data.deviceEvents)) {
       const at = item.at.getTime();
-      rows.push({ kind: "device", key: `d:${item.id}`, at, end: at, conv: convAt(at), item });
+      push({ kind: "device", key: `d:${item.id}`, at, end: at, item });
     }
   }
   rows.sort((a, b) => a.at - b.at || ORDER[a.kind] - ORDER[b.kind]);
 
-  const byId = new Map(conversations.map((c) => [c.id, c]));
+  const byId = new Map(episodes.map((e) => [e.id, e]));
+  const hidden = new Map<string, number>();
+  for (const row of rows) {
+    const ep = row.ep ? byId.get(row.ep) : undefined;
+    if (ep && folded(ep) && foldable(row)) hidden.set(ep.id, (hidden.get(ep.id) ?? 0) + 1);
+  }
   const shown = new Set<string>();
   const entries: Entry[] = [];
-  let currentConv: string | null = null;
+  let currentEp: string | null = null;
   let lastEnd: number | null = null;
-  let convIndex = 0;
+  let epIndex = 0;
 
-  const pushConversation = (c: Conversation, suffix = "") => {
+  const pushEpisode = (e: Episode, suffix = "") => {
     entries.push({
-      kind: "conversation",
-      key: `c:${c.id}${suffix}`,
-      at: c.startedAt.getTime(),
-      conv: c.id,
-      item: c,
+      kind: "episode",
+      key: `e:${e.id}${suffix}`,
+      at: e.startedAt.getTime(),
+      ep: e.id,
+      item: e,
+      hidden: hidden.get(e.id) ?? 0,
     });
-    shown.add(c.id);
+    shown.add(e.id);
   };
   const pushGap = (at: number) => {
     if (lastEnd !== null && at - lastEnd >= GAP_MS) {
-      entries.push({ kind: "gap", key: `g:${lastEnd}`, at: lastEnd, ms: at - lastEnd, conv: null });
+      entries.push({ kind: "gap", key: `g:${lastEnd}`, at: lastEnd, ms: at - lastEnd, ep: null });
     }
   };
 
   for (const row of rows) {
-    // Conversations that started before this row but have no rows of their own still get a header.
-    while (
-      convIndex < conversations.length &&
-      conversations[convIndex]!.startedAt.getTime() <= row.at
-    ) {
-      const c = conversations[convIndex++]!;
-      if (row.conv !== c.id && !shown.has(c.id)) {
-        pushGap(c.startedAt.getTime());
-        pushConversation(c);
-        lastEnd = Math.max(lastEnd ?? 0, c.endedAt?.getTime() ?? c.startedAt.getTime());
-        currentConv = c.id;
+    // Episodes that started before this row but have no rows of their own still get a header.
+    while (epIndex < episodes.length && episodes[epIndex]!.startedAt.getTime() <= row.at) {
+      const e = episodes[epIndex++]!;
+      if (row.ep !== e.id && !shown.has(e.id)) {
+        pushGap(e.startedAt.getTime());
+        pushEpisode(e);
+        lastEnd = Math.max(lastEnd ?? 0, e.endedAt?.getTime() ?? e.startedAt.getTime());
+        currentEp = e.id;
       }
     }
     pushGap(row.at);
-    if (row.conv !== null && row.conv !== currentConv) {
-      const c = byId.get(row.conv);
-      if (c) pushConversation(c, shown.has(c.id) ? `:${row.key}` : "");
-    }
-    currentConv = row.conv;
-    entries.push(row);
+    const ep = row.ep ? byId.get(row.ep) : undefined;
+    if (ep && row.ep !== currentEp) pushEpisode(ep, shown.has(ep.id) ? `:${row.key}` : "");
+    currentEp = row.ep;
     lastEnd = Math.max(lastEnd ?? row.end, row.end);
+    if (ep && folded(ep) && foldable(row)) continue;
+    entries.push(row);
   }
-  for (; convIndex < conversations.length; convIndex++) {
-    const c = conversations[convIndex]!;
-    if (!shown.has(c.id)) {
-      pushGap(c.startedAt.getTime());
-      pushConversation(c);
-      lastEnd = Math.max(lastEnd ?? 0, c.endedAt?.getTime() ?? c.startedAt.getTime());
+  for (; epIndex < episodes.length; epIndex++) {
+    const e = episodes[epIndex]!;
+    if (!shown.has(e.id)) {
+      pushGap(e.startedAt.getTime());
+      pushEpisode(e);
+      lastEnd = Math.max(lastEnd ?? 0, e.endedAt?.getTime() ?? e.startedAt.getTime());
     }
   }
   return entries;

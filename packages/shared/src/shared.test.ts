@@ -1,6 +1,12 @@
 import { expect, test } from "bun:test";
 import { decodeAudioBatch, encodeAudioBatch } from "./ingest";
-import { isValidTimeZone, mergeSettings, settingsPatchSchema, settingsSchema } from "./settings";
+import {
+  isValidTimeZone,
+  mergeSettings,
+  resolveSettings,
+  settingsPatchSchema,
+  settingsSchema,
+} from "./settings";
 
 const frame = (seq: number, at: number) => ({ seq, at, data: new Uint8Array([0xb8, 1, 2]) });
 
@@ -54,8 +60,31 @@ test("toggling an agent event keeps the webhook URL and secret", () => {
   expect(next.agent.webhookUrl).toBe("https://hermes.example/hook");
   expect(next.agent.webhookSecret).toBe("s3cret");
   expect(next.agent.events).toEqual({
-    conversationEnded: true,
-    conversationRefined: true,
+    episodeEnded: {
+      conversation: true,
+      talk: true,
+      media: false,
+      ambient: false,
+      solo: false,
+      unknown: true,
+    },
+    episodeRefined: false,
     bookmark: false,
   });
+});
+
+test("one episode kind can be toggled without touching the others", () => {
+  const current = settingsSchema.parse({});
+  const patch = settingsPatchSchema.parse({
+    agent: { events: { episodeEnded: { media: true } } },
+  });
+  const next = mergeSettings(current, patch);
+  expect(next.agent.events.episodeEnded.media).toBe(true);
+  expect(next.agent.events.episodeEnded.conversation).toBe(true);
+});
+
+test("'conversation ended' turned off before episodes keeps episode webhooks off", () => {
+  const s = resolveSettings({ agent: { events: { conversationEnded: false, bookmark: true } } });
+  expect(Object.values(s.agent.events.episodeEnded).every((on) => !on)).toBe(true);
+  expect(resolveSettings({}).agent.events.episodeEnded.conversation).toBe(true);
 });

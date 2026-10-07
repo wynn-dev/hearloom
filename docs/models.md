@@ -27,19 +27,30 @@ A child process of the server (`apps/server/src/live`) receives every stored bat
      placed.
      Batches still in memory when the pipeline restarts are lost.
 4. **Speakers** — 3D-Speaker CAM++ embeddings per utterance (≥ 1 s), matched against enrolled voiceprints
-   (cosine ≥ `SPEAKER_MATCH_THRESHOLD`, default 0.6) and clustered within a conversation (S1, S2, …;
+   (cosine ≥ `SPEAKER_MATCH_THRESHOLD`, default 0.6) and clustered within a chain (S1, S2, …;
    Soniox's per-session labels map into the same series). Re-attributing an utterance replaces the
    voiceprint learned from it.
 5. **Sound events** — CED-base (AudioSet, 527 classes, 16 kHz) on 2 s windows every 1 s, smoothed with
    hysteresis (open ≥ 0.45, close after two windows < 0.25). Speech classes are dropped.
-6. **Conversations and blocks** — consecutive utterances less than 2 minutes apart form a
-   conversation. A conversation is cut into **blocks**, the unit the refine pass works on: a block
-   closes when the conversation ends, at the first pause of ≥ 1.5 s once it is 10 minutes long, and
-   before any utterance that would make it longer than 20 minutes. So a lecture or an evening of TV is
-   refined as it goes instead of hours later. Backlog audio joins the closed block it falls in or
-   next to (while that stays under 20 minutes), else a new block of that conversation, else a new
-   closed conversation; blocks and conversations left open by a crashed pipeline are closed when it
-   restarts.
+6. **Chains and blocks** — consecutive utterances less than 2 minutes apart form a chain
+   (internal). A chain is cut into **blocks**, the unit the refine pass works on: a block closes when
+   the chain ends, at the first pause of ≥ 1.5 s once it is 10 minutes long, and before any utterance
+   that would make it longer than 20 minutes. So a lecture or an evening of TV is refined as it goes
+   instead of hours later. Backlog audio joins the closed block it falls in or next to (while that
+   stays under 20 minutes), else a new block of that chain, else a new closed chain; blocks and
+   chains left open by a crashed pipeline are closed when it restarts.
+7. **Episodes** — what users and the agent see: a chain is split into episodes of one kind —
+   `conversation` (the user talking with people), `talk` (someone presenting, the user listening),
+   `media` (TV, radio, recordings), `ambient` (speech nearby the user isn't part of), `solo` (only the
+   user) — or `unknown` until there's enough speech. Each minute the last two minutes are classified
+   from who spoke how much (the user's share needs their enrolled voice), turn-taking, and the
+   CED speech-context classes per minute (`context_samples`: television, radio, narration, laughter,
+   applause, music…). A new kind must hold for two classifications in a row (≈ 3 minutes); then a
+   young episode (< 5 min) is re-labelled and an older one is cut at the longest pause. Without the
+   user's voiceprint, speech that isn't clearly media or a talk counts as a conversation. Backlog
+   chains are segmented the same way once their upload is quiet. Kinds and boundaries set by the
+   user or an agent are never changed by these rules. Conversation, talk and unclassified speech
+   make the user busy (agent notifications are delivered silently); media, ambient and solo don't.
 
 ### Why CAM++ instead of WeSpeaker ResNet293
 
@@ -67,14 +78,14 @@ When a block closes the server queues a job (pg-boss, in Postgres).
 `pnpm --filter @hearloom/server worker` then:
 
 1. Loads the block's audio from the stored Ogg chunks, plus what the previous (refined) block of the
-   conversation said in the 90 s before it, if that's on the same capture stream.
+   chain said in the 90 s before it, if that's on the same capture stream.
 2. **Diarizes it offline** with FluidAudio (pyannote-style segmentation + embeddings + VBx clustering,
    Core ML on the Neural Engine) — `sidecars/diarizer`, built with
    `pnpm --filter @hearloom/server build:diarizer`. Offline diarization gives consistent speakers
    within a block, which streaming labels can't.
-3. Gives each speaker cluster the conversation's key for that voice (S1, S2, …), so keys stay the same
+3. Gives each speaker cluster the chain's key for that voice (S1, S2, …), so keys stay the same
    across blocks: the previous block's speaker it shares speech with in those 90 s; else a voice the
-   conversation's refined blocks already know (cosine ≥ `SPEAKER_CLUSTER_THRESHOLD`); else the live
+   chain's refined blocks already know (cosine ≥ `SPEAKER_CLUSTER_THRESHOLD`); else the live
    key most of its utterances had (if no earlier block uses it); else a new key. Matches are
    one-to-one: two clusters of one block never share a key.
 4. Names each cluster against enrolled voiceprints (or keeps the name its key already had); a
@@ -89,8 +100,9 @@ When a block closes the server queues a job (pg-boss, in Postgres).
    or where the diarizer finds no speech in the block stay live) and marks the block `refined`, storing
    each cluster's voice for later blocks. If a row was edited meanwhile (e.g. a speaker was
    identified), the job retries.
-7. Once the conversation has ended and all its blocks are refined, merges keys that are the same voice
+7. Once the chain has ended and all its blocks are refined, merges keys that are the same voice
    but were split across blocks (never two keys heard in one block, or named after different people)
-   and marks the conversation `refined`.
+   and marks the chain `refined`. An episode is refined once every block it overlaps is
+   (`episode.refined`).
 
 20 s of audio diarizes in ~0.3–1.3 s on an M5 Pro.

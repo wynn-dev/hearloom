@@ -10,12 +10,14 @@ import {
   VadSession,
 } from "@hearloom/inference";
 import type { AudioFrame } from "@hearloom/shared";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
+import { type ContextMinute, ContextMinutes, contextScores, MINUTE } from "../episodes/rules";
 import { SonioxSession } from "./asr/soniox";
 import { SessionClock, SonioxAssembler, type SonioxToken } from "./asr/soniox-assembler";
 import { SonioxError, transcribeFile } from "./asr/soniox-async";
 import type { Utterance } from "./asr/types";
 import type { BlockTracker } from "./blocks";
+import type { EpisodeTracker } from "./episodes";
 import { PcmHistory } from "./pcm";
 import { type SoundEvent, SoundEventSmoother } from "./sounds";
 import type { SpeakerDirectory } from "./speakers";
@@ -35,6 +37,7 @@ export interface LiveDeps {
   embedder: SpeakerEmbedder | null;
   speakers: SpeakerDirectory | null;
   blocks: BlockTracker;
+  episodes: EpisodeTracker;
   /** null = no transcription. */
   soniox: { apiKey: string; model: string; asyncModel: string; languageHints: string[] } | null;
   /** Ask the server to refresh clients' views for this user. */
@@ -129,6 +132,8 @@ export class StreamProcessor {
   private tagFill = 0;
   private tagSinceHop = 0;
   private openSoundRows = new Map<string, string>();
+  /** Speech-context scores per minute, for classifying episodes. */
+  private readonly context = new ContextMinutes();
   // Transcription: Soniox real-time for fresh audio, Soniox async for backlog.
   private live: SonioxSession | null = null;
   private sonioxRetryAt = 0;
@@ -254,6 +259,7 @@ export class StreamProcessor {
       this.vad = null;
     }
     for (const ev of this.smoother.flush()) await this.saveSound(ev, true);
+    await this.saveContext(this.context.drain());
     this.live?.finalize();
     this.lastFrameAt = null;
   }
@@ -434,10 +440,16 @@ export class StreamProcessor {
       // Without an engine-provided speaker label, cluster voices within the chain.
       speakerKey ??= placed.clusters.assign(emb);
     }
-    this.deps.blocks.note(userId, placed.chainId, u.lang, personId ?? speakerKey);
+    if (fresh) {
+      this.deps.episodes.speech(userId, {
+        startAt: u.startAt,
+        endAt: u.endAt,
+        speaker: personId ?? speakerKey,
+        isWearer,
+      });
+    }
     await this.deps.db.insert(schema.utterances).values({
       userId,
-      conversationId: placed.chainId,
       blockId: placed.blockId,
       streamId: this.stream.id,
       startAt: new Date(u.startAt),
@@ -470,7 +482,12 @@ export class StreamProcessor {
         const windowEnd = this.runStartAt + (this.runSamples - (samples.length - o)) / 16;
         const windowStart = windowEnd - TAG_WINDOW_SAMPLES / 16;
         // Quiet windows aren't worth tagging, but still count as misses for open events.
-        const tags = rms(this.tagBuf) >= TAG_MIN_RMS ? this.deps.tagger!.tag(this.tagBuf, 10) : [];
+        const loud = rms(this.tagBuf) >= TAG_MIN_RMS;
+        // Speech-context classes (television, narration…) rarely make the top 10: ask for more.
+        const all = loud ? this.deps.tagger!.tag(this.tagBuf, 50) : [];
+        const tags = all.slice(0, 10);
+        if (loud) this.context.add(windowStart, windowEnd, contextScores(all));
+        await this.saveContext(this.context.drain(windowStart - 5_000));
         const { opened, closed } = this.smoother.push(tags, windowStart, windowEnd);
         for (const ev of opened) await this.saveSound(ev, false);
         for (const ev of closed) await this.saveSound(ev, true);
@@ -479,6 +496,24 @@ export class StreamProcessor {
         this.tagBuf.copyWithin(0, TAG_HOP_SAMPLES);
         this.tagFill = TAG_WINDOW_SAMPLES - TAG_HOP_SAMPLES;
       }
+    }
+  }
+
+  /** Store finished context minutes; recent ones also go to the live episode tracker. */
+  private async saveContext(minutes: ContextMinute[]): Promise<void> {
+    const { userId } = this.stream;
+    for (const m of minutes) {
+      const c = schema.contextSamples;
+      // Two streams can cover the same minute: keep the one with more tagged audio.
+      await this.deps.db
+        .insert(c)
+        .values({ userId, at: new Date(m.at), windows: m.windows, scores: m.scores })
+        .onConflictDoUpdate({
+          target: [c.userId, c.at],
+          set: { windows: sql`excluded.windows`, scores: sql`excluded.scores` },
+          setWhere: sql`excluded.windows >= ${c.windows}`,
+        });
+      if (Date.now() - (m.at + MINUTE) < FRESH_MS + MINUTE) this.deps.episodes.context(userId, m);
     }
   }
 

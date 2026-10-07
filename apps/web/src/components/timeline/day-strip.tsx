@@ -1,8 +1,9 @@
 import type { Timeline } from "@hearloom/api";
+import { EPISODE_KIND_LABEL } from "@hearloom/shared";
 import { memo, type PointerEvent, useMemo, useRef, useState } from "react";
 import { cn } from "../../lib/cn";
 import { formatHour, formatTime } from "../../lib/time";
-import { mergeIntervals } from "./model";
+import { foldedByDefault, mergeIntervals } from "./model";
 
 const HOUR = 3_600_000;
 
@@ -16,7 +17,7 @@ function Swatch({ className, label }: { className: string; label: string }) {
 }
 
 /**
- * 24-hour overview of a day: recorded audio, conversations and bookmarks on one time axis.
+ * 24-hour overview of a day: recorded audio, episodes and bookmarks on one time axis.
  * Hover shows the time under the cursor; clicking an hour jumps the list below to it.
  */
 export const DayStrip = memo(function DayStrip({
@@ -41,18 +42,21 @@ export const DayStrip = memo(function DayStrip({
   const width = (a: number, b: number) =>
     `max(2px, ${((Math.min(b, start + span) - Math.max(a, start)) / span) * 100}%)`;
 
-  const { audio, conversations, bookmarks } = useMemo(() => {
+  const { audio, episodes, bookmarks } = useMemo(() => {
     const slack = span / 1000; // ~1.5 min on a 24 h strip: merge what's visually contiguous
     return {
       audio: mergeIntervals(
         data.chunks.map((c) => [c.startAt.getTime(), c.endAt.getTime()]),
         slack,
       ),
-      conversations: data.conversations.map((c) => ({
-        id: c.id,
-        title: c.title ?? "Conversation",
-        start: c.startedAt.getTime(),
-        end: c.endedAt?.getTime() ?? Math.min(Date.now(), start + span),
+      episodes: data.episodes.map((e) => ({
+        id: e.id,
+        title: e.title
+          ? `${e.title} (${EPISODE_KIND_LABEL[e.kind].toLowerCase()})`
+          : EPISODE_KIND_LABEL[e.kind],
+        background: foldedByDefault(e),
+        start: e.startedAt.getTime(),
+        end: e.endedAt?.getTime() ?? Math.min(Date.now(), start + span),
       })),
       bookmarks: data.bookmarks.map((b) => ({ id: b.id, at: b.at.getTime() })),
     };
@@ -76,18 +80,19 @@ export const DayStrip = memo(function DayStrip({
   const hoverInfo = useMemo(() => {
     if (hover === null) return null;
     const recording = audio.some(([a, b]) => hover >= a && hover <= b);
-    const conv = conversations.find((c) => hover >= c.start && hover <= c.end);
+    const ep = episodes.find((e) => hover >= e.start && hover <= e.end);
     const parts = [formatTime(hover, tz)];
-    if (conv) parts.push(conv.title);
+    if (ep) parts.push(ep.title);
     else if (recording) parts.push("recorded");
     return parts.join(" · ");
-  }, [hover, audio, conversations, tz]);
+  }, [hover, audio, episodes, tz]);
 
   return (
     <div className="flex flex-col gap-1.5">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-ink-2">
         <Swatch className="h-2.5 w-3 rounded-[3px] bg-series-1" label="Audio recorded" />
-        <Swatch className="h-1.5 w-3 rounded-[3px] bg-series-2" label="Conversations" />
+        <Swatch className="h-1.5 w-3 rounded-[3px] bg-series-2" label="Episodes" />
+        <Swatch className="h-1.5 w-3 rounded-[3px] hatch-series-2" label="Media, ambient" />
         <Swatch className="h-2.5 w-0.5 rounded-full bg-series-3" label="Bookmarks" />
       </div>
       <div
@@ -115,12 +120,15 @@ export const DayStrip = memo(function DayStrip({
             style={{ left: pct(a), width: width(a, b) }}
           />
         ))}
-        {conversations.map((c) => (
+        {episodes.map((e) => (
           <span
-            key={c.id}
+            key={e.id}
             aria-hidden
-            className="absolute top-6 h-1.5 rounded-[3px] bg-series-2"
-            style={{ left: pct(c.start), width: width(c.start, c.end) }}
+            className={cn(
+              "absolute top-6 h-1.5 rounded-[3px]",
+              e.background ? "hatch-series-2" : "bg-series-2",
+            )}
+            style={{ left: pct(e.start), width: width(e.start, e.end) }}
           />
         ))}
         {bookmarks.map((b) => (

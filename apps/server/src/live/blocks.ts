@@ -3,7 +3,7 @@ import { schema } from "@hearloom/db";
 import { and, desc, eq, gte, isNotNull, isNull, lte, sql } from "drizzle-orm";
 import { SpeakerClusters } from "./speakers";
 
-/** Silence longer than this ends a chain (a conversation) and its block. */
+/** Silence longer than this ends a chain and its block. */
 export const SILENCE_GAP_MS = 120_000;
 /** A block this long closes at the next pause of at least BLOCK_PAUSE_MS between utterances… */
 export const BLOCK_TARGET_MS = 10 * 60_000;
@@ -22,15 +22,13 @@ interface OpenBlock {
   lastEndAt: number;
 }
 
-/** The user's live chain: continuous speech, cut into blocks. Its id is its conversation's id. */
+/** The user's live chain: continuous speech, cut into blocks. */
 interface Chain {
   id: string;
   startedAt: number;
   lastEndAt: number;
   /** The open block is the chain's first (no closed block before it). */
   firstBlock: boolean;
-  languages: Set<string>;
-  speakers: Set<string>;
   /** Speaker keys are per chain, so they stay the same across its blocks. */
   clusters: SpeakerClusters;
   block: OpenBlock;
@@ -43,6 +41,9 @@ interface Touched {
 }
 
 interface TouchedChain extends Touched {
+  /** The chain's range (it only grows). */
+  startAt: number;
+  endAt: number;
   clusters: SpeakerClusters;
 }
 
@@ -53,19 +54,22 @@ export interface Placement {
 }
 
 export interface BlockEvents {
-  /** The user's live chain (a conversation) started. */
-  chainStarted(userId: string, chainId: string): void;
-  /** `live`: the user's current chain ended (vs. one rebuilt from uploaded backlog). */
-  chainEnded(userId: string, chainId: string, live: boolean): void;
+  /** The user's live chain started (at its first utterance's start). */
+  chainStarted(userId: string, chainId: string, at: number): void;
+  /**
+   * `live`: the user's current chain [startAt, endAt] ended (vs. one rebuilt from uploaded
+   * backlog, or left open by a crashed pipeline). Reported before the next chain starts.
+   */
+  chainEnded(userId: string, chainId: string, live: boolean, endAt: number, startAt: number): void;
   /** A block is complete and can be refined. */
   blockClosed(userId: string, blockId: string): void;
 }
 
 /**
  * Rule-based segmentation per user. Consecutive utterances less than SILENCE_GAP_MS apart form a
- * chain (stored as a conversation); a chain is cut into blocks of at most BLOCK_MAX_MS so the
- * refine pass never waits for, or works on, hours of continuous speech. Chains and blocks are rows
- * in Postgres so utterances can reference them.
+ * chain; a chain is cut into blocks of at most BLOCK_MAX_MS so the refine pass never waits for, or
+ * works on, hours of continuous speech. Chains and blocks are rows in Postgres so utterances can
+ * reference them. (What users see, episodes, is decided separately: see live/episodes.ts.)
  *
  * Live audio drives the user's open chain. Backlog (audio uploaded late, e.g. after the phone was
  * offline) is placed into the closed block it falls in, extending it, or a new closed block; those
@@ -87,7 +91,7 @@ export class BlockTracker {
 
   /** Close blocks and chains left open by a previous process (it can't extend them anymore). */
   async closeOrphans(): Promise<number> {
-    const { blocks, conversations, utterances } = schema;
+    const { blocks, chains, utterances } = schema;
     const closedBlocks = await this.db
       .update(blocks)
       .set({
@@ -96,17 +100,25 @@ export class BlockTracker {
       })
       .where(isNull(blocks.endedAt))
       .returning({ id: blocks.id, userId: blocks.userId });
-    const chains = await this.db
-      .update(conversations)
+    const closedChains = await this.db
+      .update(chains)
       .set({
         status: "closed",
-        endedAt: sql`coalesce((select max(${utterances.endAt}) from ${utterances} where ${utterances.conversationId} = ${conversations.id}), ${conversations.startedAt})`,
+        endedAt: sql`coalesce((select max(${blocks.endedAt}) from ${blocks} where ${blocks.chainId} = ${chains.id}), ${chains.startedAt})`,
       })
-      .where(isNull(conversations.endedAt))
-      .returning({ id: conversations.id, userId: conversations.userId });
+      .where(isNull(chains.endedAt))
+      .returning({
+        id: chains.id,
+        userId: chains.userId,
+        startedAt: chains.startedAt,
+        endedAt: chains.endedAt,
+      });
     for (const r of closedBlocks) this.events.blockClosed(r.userId, r.id);
-    for (const r of chains) this.events.chainEnded(r.userId, r.id, false);
-    return chains.length;
+    for (const r of closedChains) {
+      const end = r.endedAt?.getTime() ?? r.startedAt.getTime();
+      this.events.chainEnded(r.userId, r.id, false, end, r.startedAt.getTime());
+    }
+    return closedChains.length;
   }
 
   /** Returns the chain and block for an utterance (and the chain's speaker clusters). */
@@ -149,21 +161,19 @@ export class BlockTracker {
 
     if (cur) await this.close(userId, cur);
     const [row] = await this.db
-      .insert(schema.conversations)
+      .insert(schema.chains)
       .values({ userId, startedAt: new Date(startAt), status: "open" })
-      .returning({ id: schema.conversations.id });
+      .returning({ id: schema.chains.id });
     const next: Chain = {
       id: row!.id,
       startedAt: startAt,
       lastEndAt: endAt,
       firstBlock: true,
-      languages: new Set(),
-      speakers: new Set(),
       clusters: new SpeakerClusters(this.clusterThreshold),
       block: await this.openBlock(userId, row!.id, startAt, endAt),
     };
     this.open.set(userId, next);
-    this.events.chainStarted(userId, next.id);
+    this.events.chainStarted(userId, next.id, startAt);
     return { chainId: next.id, blockId: next.block.id, clusters: next.clusters };
   }
 
@@ -215,19 +225,6 @@ export class BlockTracker {
     if (report) this.events.blockClosed(userId, b.id);
   }
 
-  /** Record language/speaker of a placed utterance (persisted when the chain closes). */
-  note(userId: string, chainId: string, lang: string | null, speaker: string | null): void {
-    const cur = this.open.get(userId);
-    if (!cur || cur.id !== chainId) return;
-    if (lang) cur.languages.add(lang);
-    if (speaker) cur.speakers.add(speaker);
-  }
-
-  inConversation(userId: string, now = Date.now()): boolean {
-    const cur = this.open.get(userId);
-    return !!cur && now - cur.lastEndAt <= SILENCE_GAP_MS;
-  }
-
   /**
    * Backlog audio for this user is waiting to be transcribed: don't report their backlog blocks
    * and chains as finished (which queues the refine pass) until it has been placed. Pair with
@@ -261,7 +258,7 @@ export class BlockTracker {
     for (const [id, t] of this.touchedChains) {
       if (!quiet(t)) continue;
       this.touchedChains.delete(id);
-      this.events.chainEnded(t.userId, id, false);
+      this.events.chainEnded(t.userId, id, false, t.endAt, t.startAt);
     }
   }
 
@@ -271,8 +268,10 @@ export class BlockTracker {
 
   private async close(userId: string, cur: Chain): Promise<void> {
     if (this.open.get(userId) === cur) this.open.delete(userId);
+    // Right away: speech may start the next chain while the rows below are being written.
+    this.events.chainEnded(userId, cur.id, true, cur.lastEndAt, cur.startedAt);
     await this.closeBlock(userId, cur.block, false);
-    const c = schema.conversations;
+    const c = schema.chains;
     await this.db
       .update(c)
       .set({
@@ -280,13 +279,10 @@ export class BlockTracker {
         startedAt: sql`least(${c.startedAt}, ${new Date(cur.startedAt).toISOString()}::timestamptz)`,
         endedAt: new Date(cur.lastEndAt),
         status: "closed",
-        languages: [...cur.languages],
-        speakerCount: cur.speakers.size,
       })
       .where(eq(c.id, cur.id));
-    // Only now: refining the last block finishes the conversation, which must have ended by then.
+    // Only now: refining the last block finishes the chain, which must have ended by then.
     this.events.blockClosed(userId, cur.block.id);
-    this.events.chainEnded(userId, cur.id, true);
   }
 
   /** Highest speaker key number (S<n>) used in a chain. */
@@ -307,7 +303,7 @@ export class BlockTracker {
    * under BLOCK_MAX_MS), else in a new block of that block's chain, else in a new chain.
    */
   private async backlog(userId: string, startAt: number, endAt: number): Promise<Placement> {
-    const { blocks: b, conversations: c } = schema;
+    const { blocks: b, chains: c } = schema;
     const near = await this.db
       .select({ id: b.id, chainId: b.chainId, startedAt: b.startedAt, endedAt: b.endedAt })
       .from(b)
@@ -370,15 +366,16 @@ export class BlockTracker {
         .returning({ id: b.id });
       blockId = row!.id;
     }
-    // The chain's conversation covers the new speech (an open one keeps its open end).
-    await this.db
+    // The chain covers the new speech (an open one keeps its open end).
+    const [chain] = await this.db
       .update(c)
       .set({
         startedAt: sql`least(${c.startedAt}, ${new Date(startAt).toISOString()}::timestamptz)`,
         endedAt: sql`case when ${c.endedAt} is null then null else greatest(${c.endedAt}, ${new Date(endAt).toISOString()}::timestamptz) end`,
         status: sql`case when ${c.status} = 'refined' then 'closed' else ${c.status} end`,
       })
-      .where(eq(c.id, chainId));
+      .where(eq(c.id, chainId))
+      .returning({ startedAt: c.startedAt, endedAt: c.endedAt });
 
     const now = Date.now();
     this.touchedBlocks.set(blockId, { userId, at: now });
@@ -388,10 +385,14 @@ export class BlockTracker {
     const t = this.touchedChains.get(chainId) ?? {
       userId,
       at: 0,
+      startAt: 0,
+      endAt: 0,
       // New keys continue after the chain's existing ones.
       clusters: new SpeakerClusters(this.clusterThreshold, (await this.lastKey(chainId)) + 1),
     };
     t.at = now;
+    t.startAt = chain?.startedAt.getTime() ?? startAt;
+    t.endAt = chain?.endedAt?.getTime() ?? endAt;
     this.touchedChains.set(chainId, t);
     return { chainId, blockId, clusters: t.clusters };
   }

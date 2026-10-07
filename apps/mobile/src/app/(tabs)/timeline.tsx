@@ -1,4 +1,5 @@
-import type { Timeline as TimelineData } from "@hearloom/api";
+import type { Episode, Timeline as TimelineData } from "@hearloom/api";
+import { EPISODE_KIND_LABEL } from "@hearloom/shared";
 import { useQuery } from "@tanstack/react-query";
 import { useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
 import { useMemo, useState } from "react";
@@ -40,6 +41,24 @@ function dayRange(offset: number): { from: Date; to: Date; label: string } {
 
 const hhmm = (d: Date) => d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 
+/** Speech that isn't the user's (TV, people nearby) starts folded. */
+const foldedByDefault = (e: Episode) => e.kind === "media" || e.kind === "ambient";
+
+function episodeTitle(e: Episode): string {
+  const kind = EPISODE_KIND_LABEL[e.kind];
+  const span = `${hhmm(e.startedAt)}–${e.endedAt ? hhmm(e.endedAt) : "now"}`;
+  return `${span} · ${e.title ? `${e.title} (${kind.toLowerCase()})` : kind}`;
+}
+
+interface Section {
+  key: string;
+  title: string;
+  episode?: Episode;
+  /** Lines folded away (media / ambient episodes). */
+  hidden: number;
+  data: Item[];
+}
+
 export default function Timeline() {
   const t = useTheme();
   const { orpc, session } = useSignedIn();
@@ -52,10 +71,12 @@ export default function Timeline() {
   const player = useAudioPlayer(null);
   const playback = useAudioPlayerStatus(player);
   const [playing, setPlaying] = useState<string | null>(null);
+  const [foldOverride, setFoldOverride] = useState<ReadonlyMap<string, boolean>>(new Map());
 
-  const sections = useMemo(() => {
+  const sections = useMemo((): Section[] => {
     const d = q.data;
     if (!d) return [];
+    const folded = (e: Episode) => foldOverride.get(e.id) ?? foldedByDefault(e);
     const items: Item[] = [
       ...d.utterances.map((u) => ({ kind: "utterance" as const, at: u.startAt, u })),
       ...d.soundEvents.map((s) => ({ kind: "sound" as const, at: s.startAt, s })),
@@ -68,15 +89,38 @@ export default function Timeline() {
         ? d.chunks.map((c) => ({ kind: "chunk" as const, at: c.startAt, c }))
         : []),
     ].sort((a, b) => b.at.getTime() - a.at.getTime());
-    const byHour = new Map<string, Item[]>();
+    // Newest first: a section per episode, and per hour for runs of what happened outside episodes
+    // (a new section whenever that changes, so everything stays in time order).
+    const episodeAt = (at: Date) =>
+      d.episodes.find((e) => e.startedAt <= at && (e.endedAt === null || at < e.endedAt));
+    const out: Section[] = [];
     for (const it of items) {
-      const h = new Date(it.at);
-      h.setMinutes(0, 0, 0);
-      const key = hhmm(h);
-      byHour.set(key, [...(byHour.get(key) ?? []), it]);
+      const ep = episodeAt(it.at);
+      let group: string;
+      let title: string;
+      if (ep) {
+        group = `e:${ep.id}`;
+        title = episodeTitle(ep);
+      } else {
+        const h = new Date(it.at);
+        h.setMinutes(0, 0, 0);
+        title = hhmm(h);
+        group = `h:${title}`;
+      }
+      let section = out[out.length - 1];
+      if (!section?.key.startsWith(`${group}#`)) {
+        section = { key: `${group}#${out.length}`, title, episode: ep, hidden: 0, data: [] };
+        out.push(section);
+      }
+      // Folding hides what was said and heard, not bookmarks or device events.
+      if (ep && folded(ep) && (it.kind === "utterance" || it.kind === "sound")) section.hidden++;
+      else section.data.push(it);
     }
-    return [...byHour].map(([title, data]) => ({ title, data }));
-  }, [q.data]);
+    return out;
+  }, [q.data, foldOverride]);
+
+  const toggleFold = (e: Episode) =>
+    setFoldOverride((m) => new Map(m).set(e.id, !(m.get(e.id) ?? foldedByDefault(e))));
 
   const play = (id: string, url: string) => {
     if (playing === id && playback.playing) {
@@ -125,13 +169,35 @@ export default function Timeline() {
           <RefreshControl refreshing={q.isRefetching} onRefresh={() => void q.refetch()} />
         }
         stickySectionHeadersEnabled
-        renderSectionHeader={({ section }) => (
-          <Text
-            style={{ color: t.muted, backgroundColor: t.bg, paddingVertical: 6, fontWeight: "600" }}
-          >
-            {section.title}
-          </Text>
-        )}
+        renderSectionHeader={({ section }) => {
+          const ep = section.episode;
+          const canFold = ep && (section.hidden > 0 || foldedByDefault(ep));
+          return (
+            <View
+              style={{
+                backgroundColor: t.bg,
+                paddingVertical: 6,
+                flexDirection: "row",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 8,
+              }}
+            >
+              <Text style={{ color: ep ? t.text : t.muted, fontWeight: "600", flexShrink: 1 }}>
+                {section.title}
+              </Text>
+              {canFold ? (
+                <Pressable onPress={() => toggleFold(ep)} hitSlop={8}>
+                  <Text style={{ color: t.accent, fontSize: 13 }}>
+                    {section.hidden > 0
+                      ? `Show ${section.hidden} line${section.hidden === 1 ? "" : "s"}`
+                      : "Hide"}
+                  </Text>
+                </Pressable>
+              ) : null}
+            </View>
+          );
+        }}
         ListEmptyComponent={
           <Body style={{ color: t.muted, textAlign: "center", marginTop: 48 }}>
             {q.isLoading

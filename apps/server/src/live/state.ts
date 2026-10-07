@@ -1,10 +1,18 @@
+import type { EpisodeKind } from "@hearloom/shared";
+import type { Activity } from "./episodes";
+
 /**
- * In-memory "what is happening right now" per user. The live pipeline (speech + sound
- * events) updates it; notification policy and the agent's get_current_context read it.
+ * In-memory "what is happening right now" per user. The live pipeline (speech, episodes) updates
+ * it; notification policy and the agent's get_current_context read it.
  */
 export interface LiveState {
+  /**
+   * The user is busy: in an episode of a kind where notifications should be quiet (see
+   * `isBusyKind`).
+   */
   inConversation: boolean;
-  conversationId: string | null;
+  /** The episode the user is in right now (null: no speech going on). */
+  activity: Activity | null;
   muted: boolean;
   wearableConnected: boolean;
   lastAudioAt: number | null;
@@ -17,7 +25,7 @@ export function liveState(userId: string): LiveState {
   if (!s) {
     s = {
       inConversation: false,
-      conversationId: null,
+      activity: null,
       muted: false,
       wearableConnected: false,
       lastAudioAt: null,
@@ -31,9 +39,22 @@ export function updateLiveState(userId: string, patch: Partial<LiveState>): void
   Object.assign(liveState(userId), patch);
 }
 
-/** The live pipeline stopped: nobody is in a conversation it is tracking anymore. */
+/** Talking with someone, listening to a talk, or speech not classified yet: keep it quiet. */
+export function isBusyKind(kind: EpisodeKind): boolean {
+  return kind === "conversation" || kind === "talk" || kind === "unknown";
+}
+
+/** The user's current episode changed (started, re-classified, ended). */
+export function setActivity(userId: string, activity: Activity | null): void {
+  updateLiveState(userId, {
+    activity,
+    inConversation: activity !== null && isBusyKind(activity.kind),
+  });
+}
+
+/** The live pipeline stopped: nobody is in an episode it is tracking anymore. */
 export function resetConversationState(): void {
   for (const [userId, s] of states) {
-    if (s.inConversation) updateLiveState(userId, { inConversation: false, conversationId: null });
+    if (s.activity || s.inConversation) setActivity(userId, null);
   }
 }

@@ -4,9 +4,9 @@ import { env } from "../env";
 import type { StreamMeta } from "../ingest/stream-writer";
 import { invalidate } from "../realtime";
 import type { ChildMessage, HostMessage } from "./ipc";
-import { resetConversationState, updateLiveState } from "./state";
+import { resetConversationState, setActivity } from "./state";
 
-type ConversationEndedHandler = (userId: string, conversationId: string) => void;
+type EpisodeEndedHandler = (userId: string, episodeId: string) => void;
 type BlockClosedHandler = (userId: string, blockId: string) => void;
 
 /**
@@ -19,7 +19,7 @@ export class LivePipelineHost {
   private ready = false;
   private backoffMs = 1000;
   private stopped = false;
-  private readonly onEnded = new Set<ConversationEndedHandler>();
+  private readonly onEnded = new Set<EpisodeEndedHandler>();
   private readonly onBlock = new Set<BlockClosedHandler>();
   private pending = new Map<string, { resolve: (s: number) => void; reject: (e: Error) => void }>();
 
@@ -31,7 +31,8 @@ export class LivePipelineHost {
     this.spawn();
   }
 
-  onConversationEnded(fn: ConversationEndedHandler): void {
+  /** An episode ended (live, or rebuilt from backlog). */
+  onEpisodeEnded(fn: EpisodeEndedHandler): void {
     this.onEnded.add(fn);
   }
 
@@ -81,6 +82,11 @@ export class LivePipelineHost {
 
   voiceprintsChanged(userId: string): void {
     this.send({ t: "voiceprints_changed", userId });
+  }
+
+  /** Episodes were edited (the open one may have a new kind). */
+  episodesChanged(userId: string): void {
+    this.send({ t: "episodes_changed", userId });
   }
 
   async stop(): Promise<void> {
@@ -138,8 +144,8 @@ export class LivePipelineHost {
       case "invalidate":
         invalidate(msg.userId, msg.keys);
         return;
-      case "state":
-        updateLiveState(msg.userId, msg.patch);
+      case "activity":
+        setActivity(msg.userId, msg.activity);
         return;
       case "enrolled": {
         const p = this.pending.get(msg.requestId);
@@ -147,9 +153,8 @@ export class LivePipelineHost {
         if (p) msg.ok ? p.resolve(msg.sampleSeconds) : p.reject(new Error(msg.error));
         return;
       }
-      case "conversation_ended":
-        for (const fn of this.onEnded) fn(msg.userId, msg.conversationId);
-        invalidate(msg.userId, ["timeline"]);
+      case "episode_ended":
+        for (const fn of this.onEnded) fn(msg.userId, msg.episodeId);
         return;
       case "block_closed":
         for (const fn of this.onBlock) fn(msg.userId, msg.blockId);

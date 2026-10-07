@@ -2,8 +2,9 @@ import type { RealtimeEvent } from "@hearloom/api";
 import type { ServerWebSocket } from "bun";
 import { emitAgentEvent } from "./agent/webhooks";
 import { getSession } from "./auth";
-import { sql } from "./db";
+import { db, sql } from "./db";
 import { env } from "./env";
+import { getEpisode, refinedIds } from "./episodes/store";
 import { relayChanges } from "./events";
 import { app } from "./http/app";
 import type { IngestSocketData } from "./ingest/phones";
@@ -81,18 +82,32 @@ livePipeline.onBlockClosed((_userId, blockId) => {
   if (env.REFINE === "on")
     void enqueueRefine(blockId).catch((err) => console.error("[jobs] enqueue failed", err));
 });
-livePipeline.onConversationEnded((userId, conversationId) => {
-  void sql`select started_at, ended_at from conversations where id = ${conversationId}`.then(
-    ([c]) => {
-      if (!c) return;
+// Tell the agent what just happened (filtered by kind in its settings).
+livePipeline.onEpisodeEnded((userId, episodeId) => {
+  void getEpisode(db, userId, episodeId)
+    .then((ep) => {
+      if (!ep?.endedAt) return;
       emitAgentEvent(userId, {
-        type: "conversation.ended",
-        conversationId,
-        startedAt: new Date(c.started_at).toISOString(),
-        endedAt: c.ended_at ? new Date(c.ended_at).toISOString() : null,
+        type: "episode.ended",
+        episodeId,
+        kind: ep.kind,
+        title: ep.title,
+        startedAt: ep.startedAt.toISOString(),
+        endedAt: ep.endedAt.toISOString(),
       });
-    },
-  );
+      // Its blocks may all be refined already (the worker only reports when it refines one).
+      return refinedIds(db, userId, [ep]).then((refined) => {
+        if (refined.has(episodeId)) {
+          emitAgentEvent(userId, {
+            type: "episode.refined",
+            episodeId,
+            kind: ep.kind,
+            again: false,
+          });
+        }
+      });
+    })
+    .catch((err) => console.error("[agent] episode.ended failed", err));
 });
 await relayChanges(sql);
 console.log(`[hearloom] listening on http://${env.HOST}:${env.PORT} (public: ${env.PUBLIC_URL})`);
