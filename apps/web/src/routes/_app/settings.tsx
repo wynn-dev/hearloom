@@ -1,4 +1,4 @@
-import type { ButtonAction, Settings, SettingsPatch } from "@hearloom/shared";
+import type { ButtonAction, PublicSettings as Settings, SettingsPatch } from "@hearloom/shared";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { BellRing, Check, Globe, Moon, MousePointerClick, Siren } from "lucide-react";

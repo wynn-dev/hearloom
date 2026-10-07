@@ -63,8 +63,16 @@ Use the console → **Agent → Connect Hermes**. It walks through the setup and
 
 1. **Token:** create one (shown once).
 2. **Webhook secret:** generated on the server as `whsec_` + base64 of 32 random bytes, and shown
-   once. **Regenerate** breaks Hermes's copy until you update its config. "Use my own secret" keeps
-   the manual field (any existing secret keeps working).
+   once. **Regenerate** breaks Hermes's copy until you update its config. "Use my own secret" saves
+   one you choose (any existing secret keeps working).
+
+   **The secret is write-only.**
+   - Only the `agent.generateWebhookSecret` response ever contains it.
+   - `settings.get`, `settings.update` and `me.get` return `agent.webhookSecretSet` and
+     `webhookSecretHint` instead. The hint is the last 4 characters, and only for secrets of 16
+     characters or more.
+   - `settings.update` still accepts `agent.webhookSecret`.
+   - The server keeps the full secret for signing.
 3. **Where Hermes runs:** this machine (`http://127.0.0.1:8644/webhooks/hearloom-voice`), another host
    (`http://<host>:8644/webhooks/hearloom-voice`), or a full URL.
 4. **Copy blocks** for `~/.hermes/.env`, `~/.hermes/config.yaml` and the commands, below.

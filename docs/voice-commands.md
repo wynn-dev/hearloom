@@ -306,7 +306,9 @@ Migration `0008_voice_commands`:
   one was learned.
 
 **Settings:** `voice: { mode: off | shadow | on, names: string[1..3], aliases: string[≤20], blocked: string[≤20] }`.
-The webhook URL and secret are the agent's (`agent.webhookUrl`, `agent.webhookSecret`).
+The webhook URL and secret are the agent's (`agent.webhookUrl`, `agent.webhookSecret`). The secret is
+write-only: the API returns `agent.webhookSecretSet` and a short hint instead (see
+[agent.md](agent.md#hermes-configuration)).
 
 ## Tests
 

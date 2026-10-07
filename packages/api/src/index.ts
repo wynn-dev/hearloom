@@ -1,8 +1,8 @@
 import {
   editSourceSchema,
   episodeKindSchema,
+  publicSettingsSchema,
   settingsPatchSchema,
-  settingsSchema,
   timeZoneSchema,
 } from "@hearloom/shared";
 import { oc } from "@orpc/contract";
@@ -240,13 +240,15 @@ export const contract = {
           email: z.string(),
           role: z.string().nullable(),
         }),
-        settings: settingsSchema,
+        settings: publicSettingsSchema,
       }),
     ),
   },
   settings: {
-    get: oc.output(settingsSchema),
-    update: oc.input(settingsPatchSchema).output(settingsSchema),
+    /** The webhook secret is write-only: `agent.webhookSecretSet` / `webhookSecretHint` instead. */
+    get: oc.output(publicSettingsSchema),
+    /** `agent.webhookSecret` can be set here, but is never returned. */
+    update: oc.input(settingsPatchSchema).output(publicSettingsSchema),
   },
   phones: {
     register: oc
@@ -345,9 +347,12 @@ export const contract = {
     config: oc.output(z.object({ publicUrl: z.string(), mcpUrl: z.string() })),
     /**
      * Generate a new webhook secret (`whsec_` + base64 of 32 random bytes) and save it as
-     * `agent.webhookSecret`. It replaces the old one, so the agent's copy must be updated.
+     * `agent.webhookSecret`. It replaces the old one, so the agent's copy must be updated. This is the
+     * only response that ever contains the secret.
      */
-    generateWebhookSecret: oc.output(z.object({ secret: z.string(), settings: settingsSchema })),
+    generateWebhookSecret: oc.output(
+      z.object({ secret: z.string(), settings: publicSettingsSchema }),
+    ),
   },
   voice: {
     status: oc.output(voiceStatusSchema),

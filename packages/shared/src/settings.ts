@@ -119,6 +119,36 @@ export const settingsSchema = z.object({
 
 export type Settings = z.infer<typeof settingsSchema>;
 
+/**
+ * Settings as the API returns them: the webhook secret is write-only. Clients learn only whether one
+ * is set and its last characters (long secrets only); the full secret is returned once, when the
+ * server generates it, and stays on the server for signing.
+ */
+export const publicSettingsSchema = settingsSchema.extend({
+  agent: z.object({
+    webhookUrl: agentFields.webhookUrl,
+    webhookSecretSet: z.boolean(),
+    /** The last 4 characters, to tell secrets apart; null when unset or too short to hint at. */
+    webhookSecretHint: z.string().nullable(),
+  }),
+});
+export type PublicSettings = z.infer<typeof publicSettingsSchema>;
+
+/** Secrets shorter than this get no hint: 4 characters would give away too much of them. */
+const HINT_MIN_LENGTH = 16;
+
+export function publicSettings(s: Settings): PublicSettings {
+  const { webhookUrl, webhookSecret } = s.agent;
+  return {
+    ...s,
+    agent: {
+      webhookUrl,
+      webhookSecretSet: webhookSecret !== "",
+      webhookSecretHint: webhookSecret.length >= HINT_MIN_LENGTH ? webhookSecret.slice(-4) : null,
+    },
+  };
+}
+
 /** Partial update: any section may be given partially; the server deep-merges. No defaults here. */
 export const settingsPatchSchema = z.object({
   timezone: timeZoneSchema.optional(),

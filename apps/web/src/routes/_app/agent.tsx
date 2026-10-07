@@ -1,3 +1,4 @@
+import { isValidWebhookSecret } from "@hearloom/shared";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import {
@@ -96,14 +97,10 @@ function ConnectHermes() {
         <Step n={2} title="Webhook secret">
           {agent ? (
             <SecretStep
-              stored={agent.webhookSecret}
+              isSet={agent.webhookSecretSet}
+              hint={agent.webhookSecretHint}
               shown={secret}
-              onGenerated={setSecret}
-              saving={save.isPending}
-              onSaveOwn={(s) => {
-                setSecret(null);
-                save.mutate({ agent: { webhookSecret: s } });
-              }}
+              onChanged={setSecret}
             />
           ) : (
             <LoadingRows rows={1} />
@@ -129,7 +126,7 @@ function ConnectHermes() {
             <ConfigStep
               token={token}
               secret={secret}
-              hasSecret={agent.webhookSecret !== ""}
+              hasSecret={agent.webhookSecretSet}
               mcpUrl={config.data.mcpUrl}
               webhookUrl={webhookUrl || hermesWebhookUrl({ kind: "local" })}
             />
@@ -141,7 +138,7 @@ function ConnectHermes() {
         <Step n={5} title="Check">
           <Checklist
             hasToken={hasToken}
-            hasSecret={(agent?.webhookSecret ?? "") !== ""}
+            hasSecret={agent?.webhookSecretSet ?? false}
             hasUrl={webhookUrl !== ""}
           />
         </Step>
@@ -285,34 +282,49 @@ function TokenStep({
   );
 }
 
+/**
+ * The secret is write-only: the API says whether one is set (and its last characters), and returns
+ * the full secret only when it generates one.
+ */
 function SecretStep({
-  stored,
+  isSet,
+  hint,
   shown,
-  onGenerated,
-  saving,
-  onSaveOwn,
+  onChanged,
 }: {
-  stored: string;
+  isSet: boolean;
+  hint: string | null;
+  /** A secret generated in this visit (shown once), or null. */
   shown: string | null;
-  onGenerated: (secret: string) => void;
-  saving: boolean;
-  onSaveOwn: (secret: string) => void;
+  onChanged: (generated: string | null) => void;
 }) {
   const toast = useToast();
   const queryClient = useQueryClient();
-  const [own, setOwn] = useState(stored);
+  const [own, setOwn] = useState("");
   const ownId = useId();
-  useEffect(() => setOwn(stored), [stored]);
   const generate = useMutation(
     orpc.agent.generateWebhookSecret.mutationOptions({
       onSuccess: (res) => {
         queryClient.setQueryData(orpc.settings.get.queryKey(), res.settings);
-        onGenerated(res.secret);
+        onChanged(res.secret);
       },
       onError: (err) =>
         toast({ tone: "bad", title: "Couldn't generate a secret", description: errorMessage(err) }),
     }),
   );
+  const saveOwn = useMutation(
+    orpc.settings.update.mutationOptions({
+      onSuccess: (data) => {
+        queryClient.setQueryData(orpc.settings.get.queryKey(), data);
+        setOwn("");
+        onChanged(null);
+        toast({ tone: "good", title: "Secret saved" });
+      },
+      onError: (err) =>
+        toast({ tone: "bad", title: "Couldn't save", description: errorMessage(err) }),
+    }),
+  );
+  const ownValid = isValidWebhookSecret(own);
 
   return (
     <>
@@ -320,7 +332,7 @@ function SecretStep({
         Hearloom signs every webhook with it (Standard Webhooks); Hermes's route checks it.
       </p>
       <div className="flex flex-wrap items-center gap-3">
-        {stored === "" ? (
+        {!isSet ? (
           <Button
             variant="primary"
             loading={generate.isPending}
@@ -331,7 +343,14 @@ function SecretStep({
         ) : (
           <>
             <span className="inline-flex items-center gap-1.5 text-[13px] text-ink-2">
-              <Check aria-hidden className="size-3.5 text-good" /> A secret is saved.
+              <Check aria-hidden className="size-3.5 text-good" /> A secret is saved
+              {hint ? (
+                <>
+                  {" "}
+                  (ending in <code className="font-mono text-xs">{hint}</code>)
+                </>
+              ) : null}
+              .
             </span>
             <ConfirmButton
               title="Regenerate the webhook secret?"
@@ -359,24 +378,26 @@ function SecretStep({
           className="mt-2 flex flex-wrap items-end gap-3"
           onSubmit={(e) => {
             e.preventDefault();
-            onSaveOwn(own);
+            saveOwn.mutate({ agent: { webhookSecret: own } });
           }}
         >
           <Field
-            label="Secret"
+            label={isSet ? "New secret" : "Secret"}
             htmlFor={ownId}
-            hint="A whsec_ secret must be valid base64; anything else is used as raw bytes."
-            className="w-80"
+            error={own && !ownValid ? "A whsec_ secret must be followed by base64." : undefined}
+            hint="Replaces the saved one; it's never shown again. A whsec_ secret is a base64 key; anything else is used as raw bytes."
+            className="w-96"
           >
             <Input
               id={ownId}
               value={own}
               type="password"
-              autoComplete="off"
+              autoComplete="new-password"
+              aria-invalid={own !== "" && !ownValid}
               onChange={(e) => setOwn(e.target.value)}
             />
           </Field>
-          <Button type="submit" loading={saving} disabled={own === stored}>
+          <Button type="submit" loading={saveOwn.isPending} disabled={!own || !ownValid}>
             Save
           </Button>
         </form>

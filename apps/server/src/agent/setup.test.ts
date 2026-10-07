@@ -8,6 +8,7 @@ import { createRouterClient } from "@orpc/server";
 import { eq } from "drizzle-orm";
 import { db } from "../db";
 import { env } from "../env";
+import { app } from "../http/app";
 import { agentConfig, type RpcContext, router } from "../rpc/router";
 import { getSettings, updateSettings } from "../settings";
 import { generateWebhookSecret, webhookSignature } from "./webhooks";
@@ -74,22 +75,97 @@ test("agent.config needs a session", async () => {
   await expect(anon.agent.config()).rejects.toThrow();
 });
 
+/** Every response that carries settings, as the console and the phone would see them. */
+async function settingsResponses() {
+  return {
+    get: await client.settings.get(),
+    me: (await client.me.get()).settings,
+    update: await client.settings.update({ timezone: "Europe/Amsterdam" }),
+    // Over HTTP, through the RPC handler, as raw text.
+    wire: await (
+      await app.request("/rpc/settings/get", {
+        method: "POST",
+        headers: { authorization: `Bearer ${sessionToken}`, "content-type": "application/json" },
+        body: "{}",
+      })
+    ).text(),
+  };
+}
+
+function expectNoSecret(r: Awaited<ReturnType<typeof settingsResponses>>, secret: string) {
+  for (const [name, value] of Object.entries(r)) {
+    const text = typeof value === "string" ? value : JSON.stringify(value);
+    expect({ name, leaks: text.includes(secret) }).toEqual({ name, leaks: false });
+    expect({ name, field: text.includes('"webhookSecret"') }).toEqual({ name, field: false });
+  }
+}
+
+test("settings responses never contain the webhook secret, only whether one is set", async () => {
+  await updateSettings(userId, { agent: { webhookUrl: "", webhookSecret: "" } });
+  let r = await settingsResponses();
+  expect(r.get.agent).toEqual({ webhookUrl: "", webhookSecretSet: false, webhookSecretHint: null });
+  expect(r.wire).toContain('"webhookSecretSet":false');
+
+  const secret = "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw";
+  await updateSettings(userId, { agent: { webhookSecret: secret } });
+  r = await settingsResponses();
+  expectNoSecret(r, secret);
+  for (const s of [r.get, r.me, r.update]) {
+    expect(s.agent).toEqual({ webhookUrl: "", webhookSecretSet: true, webhookSecretHint: "LaSw" });
+  }
+  expect(r.wire).toContain('"webhookSecretSet":true');
+});
+
+test("a short secret gets no hint (4 characters would give too much away)", async () => {
+  await updateSettings(userId, { agent: { webhookSecret: "s3cret" } });
+  const s = await client.settings.get();
+  expect(s.agent.webhookSecretSet).toBe(true);
+  expect(s.agent.webhookSecretHint).toBeNull();
+  expectNoSecret(await settingsResponses(), "s3cret");
+});
+
+test("a secret saved through settings.update is stored and used, but not returned", async () => {
+  const own = "my own hand-entered secret, not whsec";
+  const res = await client.settings.update({ agent: { webhookSecret: own } });
+  expect(JSON.stringify(res)).not.toContain(own);
+  expect(res.agent.webhookSecretSet).toBe(true);
+  // The server keeps the full secret for signing.
+  expect((await getSettings(userId)).agent.webhookSecret).toBe(own);
+  expectNoSecret(await settingsResponses(), own);
+  // A whsec_ secret that isn't base64 is still refused.
+  await expect(
+    client.settings.update({ agent: { webhookSecret: "whsec_not base64!" } }),
+  ).rejects.toThrow();
+  expect((await getSettings(userId)).agent.webhookSecret).toBe(own);
+  // Saving something else leaves the secret alone.
+  await client.settings.update({ agent: { webhookUrl: "http://127.0.0.1:8644/webhooks/x" } });
+  expect((await getSettings(userId)).agent.webhookSecret).toBe(own);
+});
+
 test("agent.generateWebhookSecret saves a new secret and returns it once", async () => {
   await updateSettings(userId, { agent: { webhookUrl: "http://127.0.0.1:8644/webhooks/x" } });
   const first = await client.agent.generateWebhookSecret();
   expect(isValidWebhookSecret(first.secret)).toBe(true);
   expect(first.secret.startsWith("whsec_")).toBe(true);
-  expect(first.settings.agent.webhookSecret).toBe(first.secret);
-  // The URL is left alone.
-  expect(first.settings.agent.webhookUrl).toBe("http://127.0.0.1:8644/webhooks/x");
+  // The settings in the same response are redacted like any other.
+  expect(first.settings.agent).toEqual({
+    webhookUrl: "http://127.0.0.1:8644/webhooks/x",
+    webhookSecretSet: true,
+    webhookSecretHint: first.secret.slice(-4),
+  });
+  expect(JSON.stringify(first.settings)).not.toContain(first.secret);
   expect((await getSettings(userId)).agent.webhookSecret).toBe(first.secret);
+  // Once: nothing returns it afterwards.
+  expectNoSecret(await settingsResponses(), first.secret);
 
   const second = await client.agent.generateWebhookSecret();
   expect(second.secret).not.toBe(first.secret);
   expect((await getSettings(userId)).agent.webhookSecret).toBe(second.secret);
+  expectNoSecret(await settingsResponses(), second.secret);
 });
 
-test("an existing hand-entered secret keeps working", async () => {
+test("an existing hand-entered secret keeps working (stored, used for signing)", async () => {
   await updateSettings(userId, { agent: { webhookSecret: "a raw secret, not whsec" } });
-  expect((await client.settings.get()).agent.webhookSecret).toBe("a raw secret, not whsec");
+  expect((await getSettings(userId)).agent.webhookSecret).toBe("a raw secret, not whsec");
+  expect((await client.settings.get()).agent.webhookSecretSet).toBe(true);
 });
