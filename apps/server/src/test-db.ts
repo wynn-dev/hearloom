@@ -9,7 +9,8 @@
  */
 import { createDb } from "@hearloom/db";
 
-const LOCAL = new Set(["localhost", "127.0.0.1", "::1"]);
+// No IPv6 literals: postgres.js cuts hosts at the first ":", so "[::1]" never arrives intact.
+const LOCAL = new Set(["localhost", "127.0.0.1"]);
 
 function refuse(why: string): never {
   console.error(
