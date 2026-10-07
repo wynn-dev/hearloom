@@ -12,7 +12,7 @@ import { flushAllWriters, ingestHandlers, SPOOL_DIR, setFrameListener } from "./
 import { recoverSpool } from "./ingest/stream-writer";
 import { enqueueRefine, stopJobs } from "./jobs";
 import { livePipeline } from "./live/host";
-import { startNotificationScheduler, stopNotifications } from "./notify/gateway";
+import { stopNotifications } from "./notify/gateway";
 import { attachRealtimeServer, topicFor } from "./realtime";
 
 interface RealtimeSocketData {
@@ -74,7 +74,6 @@ const server = Bun.serve<SocketData>({
 });
 
 attachRealtimeServer(server as never);
-startNotificationScheduler();
 livePipeline.start();
 setFrameListener((meta, frames) => livePipeline.push(meta, frames));
 // Finished blocks get an offline refine pass (worker process).

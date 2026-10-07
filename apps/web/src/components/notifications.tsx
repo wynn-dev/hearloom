@@ -66,7 +66,7 @@ export const NotificationRow = memo(function NotificationRow({
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-ink-3">
         <span className="inline-flex items-center gap-1.5">
           <Badge>{sourceLabel[n.source]}</Badge>
-          <Badge>{n.category}</Badge>
+          {n.category !== n.source ? <Badge>{n.category}</Badge> : null}
           {compact ? null : (
             <Badge tone={n.interruptionLevel === "time-sensitive" ? "info" : "neutral"}>
               {interruptionLabel[n.interruptionLevel]}
