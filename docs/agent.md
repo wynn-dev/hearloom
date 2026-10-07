@@ -54,7 +54,8 @@ Set a URL and secret in the console → **Agent** (for Hermes: a webhook route o
   base64 after `whsec_` for a `whsec_…` secret, and the secret's UTF-8 bytes otherwise. Sent only when a
   secret is set (Hermes requires one).
 
-No events are sent yet: the "hey <agent>" voice commands add the first one (`voice.command`).
+The only event is `voice.command`: "Hey Hermes, …" spoken to the pendant. See
+[voice-commands.md](voice-commands.md) for the payload and the Hermes route to set up.
 
 ## Hermes configuration
 
