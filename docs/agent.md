@@ -1,35 +1,36 @@
 # Connecting an agent (Hermes)
 
 Hearloom doesn't summarize or "think" on its own. It exposes your memory to an agent of your choice —
-designed for [Hermes Agent](https://github.com/NousResearch/hermes-agent) running Claude.
+designed for [Hermes Agent](https://github.com/NousResearch/hermes-agent) running Claude. The agent
+reads over MCP and can tidy up your episodes; Hearloom can POST events to it over a signed webhook.
 
 ## MCP endpoint
 
 `POST {PUBLIC_URL}/mcp` — stateless Streamable HTTP, `Authorization: Bearer hl_…`.
-Create a token in the console → **Agent**. Scopes: `read` (all tools below), `notify`
-(`send_notification`) and `write` (the episode edits below). Tokens are stored hashed; revoke them
-any time.
+Create a token in the console → **Agent**. A token gives the agent every tool below; there are no
+scopes. Tokens are stored hashed; revoke them any time.
 
 | Tool | What it returns |
 |---|---|
-| `get_current_context` | local time, the current episode (kind, with whom), busy or not, quiet hours, pendant state, last 5 minutes |
+| `get_current_context` | local time, the current episode (kind, with whom), pendant state, last 5 minutes |
 | `search_transcripts` | full-text search (English + Dutch stemming, plus substring), optional speaker/time filter |
 | `get_timeline` | everything in a range (≤ 7 days), one line per event |
 | `list_episodes` / `get_episode` | what was happening — conversation, talk, media (TV, radio), ambient, solo, or a long stretch of sound without speech (music, a commute) — with participants; full transcript in parts of 400 lines |
 | `list_sound_events` | non-speech sounds (AudioSet labels) |
 | `list_people` | known voices, last heard |
-| `changes_since` | episodes started, ended or changed, bookmarks, and responses to your notifications since a cursor — cheap wake-up check |
-| `get_audio_clip_url` | short-lived signed URLs to the Ogg Opus audio |
-| `send_notification` | push to the phone now; see [Notifications](#notifications) |
+| `get_audio_clip_url` | short-lived signed URLs to the Ogg Opus audio (≤ 1 hour) |
 
-With the `write` scope the agent can also curate the timeline (shown to the user; the user's own
-edits always win, and automatic segmentation never undoes the agent's):
+The agent can also curate the timeline (shown to the user; the user's own edits always win, and
+automatic segmentation never undoes the agent's):
 
 | Tool | What it does |
 |---|---|
 | `update_episode` | set a title or summary, or correct the kind (e.g. "that was the TV, not a conversation") |
 | `split_episode` | split an ended episode at a time (a meeting that turned into a chat) |
 | `merge_episodes` | merge two neighbouring ended episodes (a lecture with a break) |
+
+Times are ISO 8601; a time that doesn't parse, or a range whose `to` is before its `from`, is refused
+with a message.
 
 Output is compact text for LLMs. Voices that also speak in a media episode of the same stretch of
 speech (the TV during a chat over it) are marked `(media)`:
@@ -41,44 +42,19 @@ speech (the TV during a chat over it) are marked `(media)`:
 09:31–09:45 {music}
 ```
 
-## Notifications
+## Webhook
 
-`send_notification` delivers immediately. Hearloom never holds, queues or retries a notification: the
-agent picks the moment (with `get_current_context`), and a held message would go stale. Policy can only
-make it quieter:
+Set a URL and secret in the console → **Agent** (for Hermes: a webhook route on its gateway, port
+8644, with the same secret). Hearloom POSTs JSON events — `{ id, type, …, userId, sentAt }` — signed with
+[Standard Webhooks](https://www.standardwebhooks.com) headers, which Hermes verifies:
 
-- **Silent** (no sound, no pendant buzz; it still lands in the notification list) during quiet hours,
-  while the user is in a conversation, or once the user's hourly limit of notifications with sound
-  (default 4) is used up.
-- **Time-sensitive** rings through conversations and the hourly limit (and buzzes the pendant), never
-  through quiet hours.
-- **Refused** past 30 agent notifications in an hour, or when the user turned agent notifications off.
+- `webhook-id`: the event id (receivers dedupe on it; a retry reuses it)
+- `webhook-timestamp`: unix seconds (Hermes refuses anything more than 5 minutes off)
+- `webhook-signature`: `v1,<base64 HMAC-SHA256(key, "{id}.{timestamp}.{body}")>`, where the key is the
+  base64 after `whsec_` for a `whsec_…` secret, and the secret's UTF-8 bytes otherwise. Sent only when a
+  secret is set (Hermes requires one).
 
-The tool result says which happened, e.g.
-`Notification 01a1…: delivered silently (no sound or buzz): quiet hours until 07:30.`
-
-How the user responded comes back through `changes_since`: opened (a tap, or the pendant's "acknowledge"
-button), useful / not useful, or a typed reply:
-
-```
-notification responses: 2
-  01a1… 09:31 "Leave for the train": useful
-  01a2… 09:40 "Call your mom?": replied "done already"
-```
-
-## Webhooks
-
-Set a URL and secret in the console → **Agent**. Hearloom POSTs JSON events:
-`episode.ended` (with its kind; per kind on/off — by default conversations, talks and unclassified
-speech, not media, ambient, solo or sound), `episode.refined` (off by default; same kinds; sent
-when an ended episode's speakers are refined, and again with `again: true` if a later pass merges
-speaker labels across its stretch of speech), `episode.checkpoint` (off by default: every 15
-minutes of a long episode, for the same kinds, so the agent can act during a lecture), `bookmark`
-(and `test`).
-Bodies contain ids, kinds and times only; the agent reads content over MCP.
-
-Headers: `X-Hearloom-Event`, `X-Hearloom-Timestamp`, and
-`X-Hearloom-Signature: sha256=<hex HMAC-SHA256(secret, "{timestamp}.{body}")>`.
+No events are sent yet: the "hey <agent>" voice commands add the first one (`voice.command`).
 
 ## Hermes configuration
 
@@ -86,16 +62,37 @@ Headers: `X-Hearloom-Event`, `X-Hearloom-Timestamp`, and
 # ~/.hermes/config.yaml
 mcp_servers:
   hearloom:
-    url: http://your-mac.your-tailnet.ts.net:3000/mcp
+    url: https://your-mac.your-tailnet.ts.net/mcp   # PUBLIC_URL + /mcp
     headers:
       Authorization: "Bearer ${HEARLOOM_MCP_TOKEN}"
 ```
 
-Point a Hermes webhook route at itself (gateway port 8644) and set that URL in Hearloom; or use a Hermes
-cron job whose pre-check calls `changes_since`.
-
 ## Security
 
 Transcripts are **untrusted input** — anyone near the pendant (or a TV) can say "ignore previous
-instructions…". Run Hermes isolated (Docker or a separate macOS user), give it only the MCP URL, use a
-read-only token unless you want it to send notifications, and keep its shell/browser toolsets off.
+instructions…". Run Hermes isolated (Docker or a separate macOS user), give it only the MCP URL, and keep
+its shell/browser toolsets off. A token can edit episodes (never the user's own edits), not delete
+anything.
+
+## Deferred: proactivity
+
+Hearloom used to let the agent act on its own initiative. That was removed so it can be redesigned (see
+git history before "Agent: remove proactivity"); only the voice commands, where the user asks, remain.
+What went:
+
+- **Agent notifications** (`send_notification`, the `notify` scope): pushed straight away, made silent
+  during quiet hours, while the user was busy (in a conversation, a talk or unclassified speech), or past
+  4 notifications with sound an hour, and refused past 30 an hour. The tool result explained what
+  happened. Taps, Useful / Not useful, replies and the pendant's "acknowledge" press were stored and
+  reported back.
+- **`changes_since`**: episodes, bookmarks and notification responses since a cursor, for cron-polling
+  agents.
+- **Webhook events**: `episode.ended` (per kind), `episode.refined`, `episode.checkpoint` (every 15
+  minutes of a long episode), `bookmark` and `test`, with ids only.
+
+Why: it was a lot of policy for a feature without a clear use yet, and the webhooks never authenticated
+with Hermes (it doesn't know the old `X-Hearloom-Signature`). Lessons for the redesign: the agent never
+heard how the user responded until #23; the per-hour limits counted only finished sends, so parallel
+calls could exceed them; an agent that could edit episodes could also re-kind the ongoing conversation
+and so lift the "busy" quieting; and `changes_since` missed refinement (it changes blocks, not episodes)
+and episodes merged away.

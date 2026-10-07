@@ -91,18 +91,17 @@ transcribed (it's logged; the audio is still stored). Everything else runs on th
 
 ## Notifications
 
-One gateway for system alerts and agent notifications. Nothing is held or queued: the agent decides when
-to speak, and policy can only lower the volume (silent during quiet hours, a conversation, or past the
-hourly limit with sound) or refuse past a hard ceiling of 30 an hour → one copy per phone: APNs first,
-the live socket as fallback (and for the pendant buzz) → audit trail and feedback (useful / not useful /
-reply).
+One gateway for system alerts (pendant disconnected, low battery, test). Nothing is held or queued:
+policy can only lower the volume (silent during quiet hours) or refuse (alerts turned off) → one copy per
+phone: APNs first, the live socket as fallback (and for the pendant buzz) → audit trail.
 
 ## Agent interface
 
-Stateless MCP endpoint `/mcp` with scoped, hashed tokens (`read`, `notify`): current context, transcript
-search, timeline, episodes, sound events, people, `changes_since`, audio URLs, `send_notification`.
-Signed webhooks (`episode.ended` per kind, `episode.refined`, `bookmark`). Output is compact text
+Stateless MCP endpoint `/mcp` with hashed, full-access tokens: current context, transcript search,
+timeline, episodes, sound events, people, audio URLs, and episode edits. A webhook sender signed with
+Standard Webhooks headers (no events yet; voice commands add the first). Output is compact text
 (`09:30:12 Me: …`, `[door slam]`, `{music}`). Transcripts are untrusted input; run the agent isolated.
+Agent proactivity (notifications, `changes_since`, episode webhooks) was removed for a redesign.
 Details: `docs/agent.md`.
 
 ## Security and privacy
@@ -119,10 +118,10 @@ transport. Not yet: encryption at rest, retention policies, bystander redaction.
 | Bun for server + worker, no Python | one language; ONNX via sherpa-onnx, Swift sidecar for Core ML |
 | Native Swift capture, JS only for UI | background BLE must not depend on JS running |
 | Expo SDK 58 beta | Xcode 27 requires the UIScene lifecycle |
-| One transcription provider (Soniox), no local fallback | one key and bill; live text is what a proactive agent acts on |
+| One transcription provider (Soniox), no local fallback | one key and bill; live text is what the agent (and voice commands) act on |
 | Refine pass re-diarizes only | offline diarization far beats live speakers; re-transcribing after the fact is too late to matter |
 | Refine per ≤ 20 min block, not per conversation | a lecture or TV evening has no 2-minute silence: refining it as one unit waited hours and diarized hours of audio at once. Keys carry across blocks via shared context and stored voices |
-| Episodes with kinds, not "conversations" | not everything heard is a conversation (a lecture, the TV, a café, an hour of music). The kind decides whether the user is busy, which webhooks fire and how the timeline shows it; rules classify, the agent (with a `write` token) and the user can correct (user > agent > rule) |
+| Episodes with kinds, not "conversations" | not everything heard is a conversation (a lecture, the TV, a café, an hour of music). The kind decides how the timeline shows it; rules classify, the agent and the user can correct (user > agent > rule) |
 | No built-in LLM layer | the agent (Hermes + Claude) does summarizing/reasoning over MCP |
 
 ## Not yet built

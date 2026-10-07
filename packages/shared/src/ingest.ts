@@ -172,7 +172,6 @@ export type ServerMessage =
       body: string;
       category: string;
       deepLink?: string;
-      threadId?: string;
       interruptionLevel: "passive" | "active" | "time-sensitive";
       haptic?: HapticPattern;
     }
