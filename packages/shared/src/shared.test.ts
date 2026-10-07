@@ -3,6 +3,8 @@ import { decodeAudioBatch, encodeAudioBatch } from "./ingest";
 import {
   isValidTimeZone,
   mergeSettings,
+  publicSettings,
+  publicSettingsSchema,
   resolveSettings,
   settingsPatchSchema,
   settingsSchema,
@@ -104,4 +106,39 @@ test("renaming the agent clears learned spellings", () => {
     voice: { names: ["hermès"] },
   });
   expect(voiceRenameReset(current, { voice: { mode: "on" } })).toEqual({ voice: { mode: "on" } });
+});
+
+test("publicSettings: the webhook secret is write-only", () => {
+  const s = resolveSettings({
+    agent: { webhookUrl: "https://hermes.example/hook", webhookSecret: "whsec_c2VjcmV0c2VjcmV0" },
+  });
+  const pub = publicSettings(s);
+  expect(pub.agent).toEqual({
+    webhookUrl: "https://hermes.example/hook",
+    webhookSecretSet: true,
+    webhookSecretHint: "cmV0",
+  });
+  expect(JSON.stringify(pub)).not.toContain("c2VjcmV0c2VjcmV0");
+  expect(publicSettingsSchema.parse(pub)).toEqual(pub);
+  // The rest is untouched.
+  expect({ ...pub, agent: undefined }).toEqual({ ...s, agent: undefined });
+  expect(publicSettings(resolveSettings({})).agent).toEqual({
+    webhookUrl: "",
+    webhookSecretSet: false,
+    webhookSecretHint: null,
+  });
+  // The hint skips base64 padding: generated secrets all end in "=".
+  expect(
+    publicSettings(
+      resolveSettings({
+        agent: { webhookSecret: "whsec_ymkG+jErdthmowvlVFOlsjJeA9bFMl6V7OWaAwsYa8I=" },
+      }),
+    ).agent.webhookSecretHint,
+  ).toBe("Ya8I");
+  // Too short to hint at.
+  expect(publicSettings(resolveSettings({ agent: { webhookSecret: "s3cret" } })).agent).toEqual({
+    webhookUrl: "",
+    webhookSecretSet: true,
+    webhookSecretHint: null,
+  });
 });

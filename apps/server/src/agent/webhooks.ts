@@ -1,4 +1,4 @@
-import { createHmac } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 import { getSettings } from "../settings";
 
 /** An event for the user's agent. Receivers dedupe on `id`, so a retry must reuse it. */
@@ -32,6 +32,11 @@ export function webhookSignature(
     ? Buffer.from(secret.slice("whsec_".length), "base64")
     : Buffer.from(secret, "utf8");
   return `v1,${createHmac("sha256", key).update(`${id}.${timestamp}.${body}`).digest("base64")}`;
+}
+
+/** A new Standard Webhooks secret: `whsec_` + base64 of 32 random bytes (as Hermes expects). */
+export function generateWebhookSecret(): string {
+  return `whsec_${randomBytes(32).toString("base64")}`;
 }
 
 /**

@@ -1,11 +1,13 @@
 import { contract } from "@hearloom/api";
 import { schema } from "@hearloom/db";
-import { voiceRenameReset } from "@hearloom/shared";
+import { publicSettings, voiceRenameReset } from "@hearloom/shared";
 import { implement, ORPCError } from "@orpc/server";
 import { and, asc, count, desc, eq, gte, isNull, lt, lte, max, or, sql } from "drizzle-orm";
 import { createToken } from "../agent/tokens";
+import { generateWebhookSecret } from "../agent/webhooks";
 import { type AuthSession, getSession } from "../auth";
 import { db } from "../db";
+import { env } from "../env";
 import {
   EpisodeEditError,
   type EpisodeRow,
@@ -189,6 +191,12 @@ async function teachCall(fn: () => unknown): Promise<void> {
   }
 }
 
+/** `PUBLIC_URL` (how phones, browsers and agents reach this server) and the MCP endpoint under it. */
+export function agentConfig(publicUrl: string) {
+  const base = publicUrl.replace(/\/+$/, "");
+  return { publicUrl: base, mcpUrl: `${base}/mcp` };
+}
+
 export const router = authed.router({
   me: {
     get: authed.me.get.handler(async ({ context }) => {
@@ -200,13 +208,15 @@ export const router = authed.router({
           email: user.email,
           role: (user as { role?: string | null }).role ?? null,
         },
-        settings: await getSettings(user.id),
+        settings: publicSettings(await getSettings(user.id)),
       };
     }),
   },
 
   settings: {
-    get: authed.settings.get.handler(({ context }) => getSettings((context as Ctx).userId)),
+    get: authed.settings.get.handler(async ({ context }) =>
+      publicSettings(await getSettings((context as Ctx).userId)),
+    ),
     update: authed.settings.update.handler(async ({ context, input }) => {
       const { userId } = context as Ctx;
       // Voice commands only ever act on the user's own voice: it must be taught first.
@@ -219,7 +229,7 @@ export const router = authed.router({
       }
       const next = await updateSettings(userId, voiceRenameReset(await getSettings(userId), input));
       if (input.voice) livePipeline.voiceChanged(userId);
-      return next;
+      return publicSettings(next);
     }),
   },
 
@@ -624,6 +634,14 @@ export const router = authed.router({
         return { ok: true as const };
       }),
     },
+    config: authed.agent.config.handler(() => agentConfig(env.PUBLIC_URL)),
+    generateWebhookSecret: authed.agent.generateWebhookSecret.handler(async ({ context }) => {
+      const secret = generateWebhookSecret();
+      const settings = await updateSettings((context as Ctx).userId, {
+        agent: { webhookSecret: secret },
+      });
+      return { secret, settings: publicSettings(settings) };
+    }),
   },
 
   voice: {
