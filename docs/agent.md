@@ -106,7 +106,10 @@ platforms:
           prompt: "Hearloom voice command, spoken at {spokenAt} (lang {lang}, name heard as \"{heardAs}\", speaker score {speaker.score}): <<<{command}>>>"
           deliver: telegram          # no chat_id: your home channel
           mirror_to_session: true    # so you can answer "yes, do it" in Telegram
-          toolsets: ["hearloom", "web"]
+          # Full access: the Telegram chat's tools minus clarify and computer_use. Restricted: ["hearloom", "web"]
+          toolsets: ["web", "browser", "terminal", "file", "code_execution", "vision",
+                     "image_gen", "tts", "skills", "todo", "memory", "session_search",
+                     "connections", "delegation", "cronjob"]
 ```
 
 ```bash
@@ -136,20 +139,30 @@ was not run against a real config.
   - **No `toolsets` at all also gets every MCP server.**
   - **Unknown names are dropped silently.** Hermes warns only when every name is invalid.
   - **MCP tools are discovered before the webhook adapter starts,** so they exist for the first run.
-  - **`["hearloom", "web"]` gives the run exactly** the `mcp__hearloom__*` tools, `web_search` and
-    `web_extract`.
-- **Why not `hermes-webhook`.** It's Hermes's webhook default: `web_search`, `web_extract`,
-  `vision_analyze` and `clarify`.
-  - `clarify` would wait in the webhook session for an answer, but the user answers in the Telegram
-    chat. So the skill asks for confirmation in its reply instead.
-  - Vision isn't needed for speech.
-- **What else you can add.**
-  - Drop `web` for a route that can only read Hearloom.
-  - `memory` is low-risk.
-  - `cronjob` (reminders) is not: a cron job chooses its own toolsets (or gets the full `hermes-cron`
-    set, terminal included). Add it only with `agent.disabled_toolsets: [terminal, browser, …]` in
-    `config.yaml`, which also binds cron jobs.
-  - No toolset is needed to reply: the adapter delivers the final answer to Telegram itself.
+- **The default route has full access, by the owner's choice.** It gets the same tools as Hermes's default
+  Telegram chat (`hermes-telegram`), listed one by one so two can be left out. In the isolated check it
+  resolved to exactly the chat's tools minus those two, including `terminal`, `cronjob_manage`,
+  `memory` and `mcp__hearloom__*`.
+  - **Like the chat, it names no MCP server,** so every enabled MCP server is included (Hearloom too).
+  - **It mirrors Hermes's default chat toolset.** If you changed `platform_toolsets.telegram`, use your
+    list instead, minus the two below.
+  - **`clarify` is left out.** It would wait in the webhook run for an answer, but the user answers in
+    the Telegram chat. The skill asks in its reply instead. A composite like `hermes-telegram` would
+    bring `clarify` back, and a route can't subtract from it.
+  - **`computer_use` is left out.** Hermes asks to approve every action, and `/approve` typed in
+    Telegram resolves the chat's session, not the webhook run's. So each action would wait out
+    `approvals.timeout` (300 s by default) and then be denied.
+- **Approvals in a voice run.**
+  - A terminal command that Hermes's approval check escalates (smart mode by default) waits the same
+    way, up to `approvals.timeout`, then is denied; it is never run on silence. So the skill proposes
+    risky commands in its reply, and the user runs them from the Telegram chat, where approvals work.
+  - A pattern you approve with "always" in Telegram goes on the allowlist and no longer waits.
+  - `approvals.mode: off` removes the waits, but for the Telegram chat too.
+  - `execute_code` is denied at once in unattended runs unless `approvals.unattended_mode: approve`.
+- **The restricted alternative:** `toolsets: ["hearloom", "web"]` gives exactly the `mcp__hearloom__*`
+  tools, `web_search` and `web_extract`. Hearloom is named by its bare name: `mcp-hearloom` would
+  bring in every enabled MCP server again.
+- No toolset is needed to reply: the adapter delivers the final answer to Telegram itself.
 - **`skills`.** `skills: ["hearloom"]` loads the installed skill whose frontmatter `name` is
   `hearloom` (`gateway/platforms/webhook.py` `_apply_skills`).
   - The skill text goes into the run's user turn, followed by the rendered prompt.
@@ -164,21 +177,22 @@ Why the route is set up this way is in [voice-commands.md](voice-commands.md#her
 
 ## Security
 
-Transcripts are **untrusted input** — anyone near the pendant (or a TV) can say "ignore previous
-instructions…". Run Hermes isolated (Docker or a separate macOS user), give it only the MCP URL, and keep
-its shell/browser toolsets off. A token can edit episodes (never the user's own edits), not delete
-anything.
+Transcripts are **untrusted input** — anyone near the pendant (or a TV) can be heard, and speech-to-text
+gets things wrong. A token can edit episodes (never the user's own edits), not delete anything. Run
+Hermes isolated (Docker or a separate macOS user).
 
-Harden Hermes (the Connect Hermes card links here):
+**Voice commands have full access by default** (the Connect Hermes card links here). That's the
+owner's choice: the voice route gets the same tools as the Telegram chat, including the terminal,
+browser, files and reminders.
+- **The trade-off:** a misheard command, a recording of your voice, or text the agent reads in a
+  transcript or web page can reach those tools.
+- **What limits it:** Hearloom only sends commands it verified as your voice. The skill confirms on
+  Telegram before anything irreversible and proposes risky commands rather than running them. Hermes's
+  approval check still applies (escalated commands in a voice run are denied after a timeout).
+- **If you'd rather narrow it,** use the restricted route, `toolsets: ["hearloom", "web"]`.
 
-- **Keep approvals on**, so a dangerous action waits for you.
-- **Keep the terminal and browser toolsets out of the voice route**, which has only the toolsets it
-  lists.
-- **Ideally keep them out of the Telegram chat too.** With `mirror_to_session: true` the voice run is
-  mirrored into the chat, so a "yes, do it" reply there runs in the chat's session, with the chat's
-  tools, not the route's.
-- **Never type secrets into the chat.** Hermes stores chat messages unredacted, and it refuses secure
-  secret entry over Telegram. Put tokens and secrets in `~/.hermes/.env` and `config.yaml` yourself.
+**Never type secrets into the chat.** Hermes stores chat messages unredacted, and it refuses secure secret
+entry over Telegram. Put tokens and secrets in `~/.hermes/.env` and `config.yaml` yourself.
 
 ## Deferred: proactivity
 

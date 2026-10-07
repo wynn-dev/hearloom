@@ -24,6 +24,7 @@ import { useToast } from "../../components/ui/toast";
 import { cn } from "../../lib/cn";
 import {
   AGENT_SECURITY_DOCS,
+  HERMES_RESTRICTED_TOOLSETS,
   type HermesWhere,
   hermesCommandsSnippet,
   hermesConfigSnippet,
@@ -143,7 +144,7 @@ function ConnectHermes() {
           />
         </Step>
 
-        <Harden />
+        <AccessNote />
       </CardBody>
     </Card>
   );
@@ -660,24 +661,26 @@ function Checklist({
   );
 }
 
-function Harden() {
+function AccessNote() {
   return (
-    <div className="flex gap-3 rounded-md border border-warn/35 bg-warn-soft p-3 text-[13px] text-warn-ink">
-      <ShieldAlert aria-hidden className="mt-0.5 size-4 shrink-0" />
+    <div className="flex gap-3 rounded-md border border-line bg-surface-2 p-3 text-[13px] text-ink-2">
+      <ShieldAlert aria-hidden className="mt-0.5 size-4 shrink-0 text-ink-3" />
       <div className="flex flex-col gap-1">
-        <p className="font-medium">Harden Hermes</p>
+        <p className="font-medium text-ink">Access</p>
         <p>
-          Transcripts are untrusted: anyone near the pendant (or a TV) can be heard. Keep Hermes's
-          approvals on, and keep the terminal and browser toolsets out of the voice route — and
-          ideally out of the Telegram chat too: with <code>mirror_to_session</code>, a “yes, do it”
-          reply runs in that chat's session, with its tools. Run Hermes isolated (Docker or a
-          separate macOS user).
+          Voice commands run with full access by default: your Telegram chat's tools (terminal,
+          browser, files, reminders, memory, web), minus <code>clarify</code> and{" "}
+          <code>computer_use</code>, which wait for answers a webhook run can't get. Transcripts can
+          be misheard or overheard, so the skill asks on Telegram before anything irreversible, and
+          runs risky commands there. For a restricted route (Hearloom and web search only), use{" "}
+          <code>toolsets: {JSON.stringify(HERMES_RESTRICTED_TOOLSETS).replaceAll(",", ", ")}</code>{" "}
+          instead.
         </p>
         <a
           href={AGENT_SECURITY_DOCS}
           target="_blank"
           rel="noreferrer"
-          className={buttonClass("ghost", "sm", "w-fit px-0 text-warn-ink underline")}
+          className={buttonClass("ghost", "sm", "w-fit px-0 underline")}
         >
           docs/agent.md → Security <ExternalLink aria-hidden />
         </a>

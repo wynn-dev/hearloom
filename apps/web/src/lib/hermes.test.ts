@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   HEARLOOM_SKILL_URL,
+  HERMES_RESTRICTED_TOOLSETS,
   HERMES_VOICE_PROMPT,
   HERMES_VOICE_TOOLSETS,
   hermesCommandsSnippet,
@@ -126,21 +127,26 @@ test("config.yaml: valid YAML with the real values filled in", () => {
   for (const field of ["{spokenAt}", "{heardAs}", "{speaker.score}", "<<<{command}>>>"]) {
     expect(HERMES_VOICE_PROMPT).toContain(field);
   }
-  // The bare MCP server name (mcp-hearloom would pull in every enabled MCP server), nothing that
-  // runs code or schedules it, and no clarify (it would wait in the webhook session).
-  expect(route.toolsets).toEqual(["hearloom", "web"]);
-  for (const risky of [
-    "terminal",
-    "browser",
-    "file",
-    "cronjob",
-    "code_execution",
+  // Full access by default (the owner's choice): the Telegram chat's toolsets, including the
+  // terminal and reminders, but never clarify or computer_use (they wait in the webhook run for an
+  // answer that can't arrive) and no composite bundle (which would bring clarify back).
+  for (const full of ["terminal", "browser", "file", "cronjob", "memory", "web"]) {
+    expect(route.toolsets).toContain(full);
+  }
+  for (const never of [
     "clarify",
+    "computer_use",
+    "hermes-telegram",
     "hermes-webhook",
     "mcp-hearloom",
   ]) {
-    expect(route.toolsets).not.toContain(risky);
+    expect(route.toolsets).not.toContain(never);
   }
+  // No MCP server named, so the run gets every enabled one, Hearloom included, like the chat.
+  expect(route.toolsets).not.toContain("hearloom");
+  // The restricted alternative is mentioned next to it, and names Hearloom by its bare name.
+  expect(yaml).toContain('Restricted: ["hearloom", "web"]');
+  expect(HERMES_RESTRICTED_TOOLSETS).toEqual(["hearloom", "web"]);
 });
 
 test("config.yaml: placeholder without a secret on screen; odd values stay valid YAML", () => {

@@ -13,13 +13,35 @@ export const HEARLOOM_SKILL_URL =
 export const AGENT_SECURITY_DOCS =
   "https://github.com/wynn-dev/hearloom/blob/main/docs/agent.md#security";
 /**
- * What a voice command may use: the Hearloom MCP server and web search. An MCP server is listed by its
- * bare name: with `mcp-hearloom`, Hermes would add every other enabled MCP server too. Not Hermes's
- * `hermes-webhook` set: its `clarify` tool would wait in the webhook session for an answer that arrives
- * in the Telegram chat instead. No terminal, browser, file or cronjob tools (a cron job picks its own
- * toolsets, so `cronjob` would let a voice command reach the terminal).
+ * What a voice command may use: full access, the owner's choice. These are the toolsets of Hermes's
+ * default Telegram chat (`hermes-telegram`), listed one by one to leave out the two that wait for an
+ * answer a webhook run can't get: `clarify`, and `computer_use` (Hermes asks to approve every action,
+ * and `/approve` in Telegram doesn't reach the webhook run, so each one waits out the timeout and is
+ * denied). No MCP server is named, so, like the chat, the run gets every enabled MCP server,
+ * Hearloom included.
  */
-export const HERMES_VOICE_TOOLSETS = ["hearloom", "web"];
+export const HERMES_VOICE_TOOLSETS = [
+  "web",
+  "browser",
+  "terminal",
+  "file",
+  "code_execution",
+  "vision",
+  "image_gen",
+  "tts",
+  "skills",
+  "todo",
+  "memory",
+  "session_search",
+  "connections",
+  "delegation",
+  "cronjob",
+];
+/**
+ * The restricted alternative: only the Hearloom MCP server (by its bare name; `mcp-hearloom` would
+ * add every enabled MCP server) and web search.
+ */
+export const HERMES_RESTRICTED_TOOLSETS = ["hearloom", "web"];
 /**
  * The route's prompt. Only this (after the skill) reaches the model, not the payload, so it carries
  * what the skill uses to judge confidence. Hermes fills `{a.b}` from the JSON body.
@@ -95,6 +117,19 @@ export function hermesRouteOf(webhookUrl: string): { route: string; port: number
 /** A YAML double-quoted scalar (JSON strings are valid YAML). */
 const yamlString = (s: string) => JSON.stringify(s);
 
+/** A YAML flow sequence of strings, wrapped every 6 items onto lines starting with `indent`. */
+function flowList(items: string[], indent = ""): string {
+  const lines: string[] = [];
+  for (let i = 0; i < items.length; i += 6)
+    lines.push(
+      items
+        .slice(i, i + 6)
+        .map(yamlString)
+        .join(", "),
+    );
+  return `[${lines.join(`,\n${indent} `)}]`;
+}
+
 export const TOKEN_PLACEHOLDER = "<paste the token from step 1>";
 export const SECRET_PLACEHOLDER = "<your webhook secret>";
 
@@ -136,7 +171,8 @@ platforms:
           prompt: ${yamlString(HERMES_VOICE_PROMPT)}
           deliver: telegram          # no chat_id: your home channel
           mirror_to_session: true    # so you can answer "yes, do it" in Telegram
-          toolsets: [${HERMES_VOICE_TOOLSETS.map(yamlString).join(", ")}]
+          # Full access: the Telegram chat's tools minus clarify and computer_use. Restricted: ${flowList(HERMES_RESTRICTED_TOOLSETS)}
+          toolsets: ${flowList(HERMES_VOICE_TOOLSETS, "                    ")}
 `;
 }
 

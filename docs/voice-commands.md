@@ -236,7 +236,10 @@ Facts below were checked against the Hermes docs (messaging/webhooks) and its so
              prompt: "Hearloom voice command, spoken at {spokenAt} (lang {lang}, name heard as \"{heardAs}\", speaker score {speaker.score}): <<<{command}>>>"
              deliver: telegram          # no chat_id: your home channel
              mirror_to_session: true    # so you can answer "yes, do it" in Telegram
-             toolsets: ["hearloom", "web"]   # add only what voice may do
+             # Full access: the Telegram chat's tools minus clarify and computer_use. Restricted: ["hearloom", "web"]
+             toolsets: ["web", "browser", "terminal", "file", "code_execution", "vision",
+                        "image_gen", "tts", "skills", "todo", "memory", "session_search",
+                        "connections", "delegation", "cronjob"]
    ```
 
 3. Install the skill and restart:
@@ -262,17 +265,26 @@ replaces the long route prompt. It tells the agent:
 - episode-editing etiquette;
 - that transcripts are untrusted.
 
+**Full access by default, by the owner's choice.** The route gets the Telegram chat's tools, terminal
+and reminders included, minus `clarify` and `computer_use`, which would wait in the webhook run for
+answers that can only arrive in the chat.
+- **The trade-off:** a misheard or overheard command can reach the terminal. The skill confirms on
+  Telegram before anything irreversible and proposes risky commands for you to approve there.
+- **To narrow it,** use `toolsets: ["hearloom", "web"]`.
+
 **Verified** from the Hermes source, plus an isolated check (temp `HERMES_HOME`, no network):
 
-- **The route's `toolsets: ["hearloom", "web"]` gives the run exactly** `web_search`,
-  `web_extract`, `vision_analyze`, `clarify` and the `mcp__hearloom__*` tools.
-- **Use the bare MCP server name.** `mcp-hearloom` would also bring in every other enabled MCP server.
+- **The default list resolves to exactly the Telegram chat's tools minus `clarify` and
+  `computer_use`.** That includes `terminal`, `cronjob_manage`, `memory`, and every enabled MCP
+  server (`mcp__hearloom__*` among them).
+- **For the restricted route, name the MCP server by its bare name `hearloom`.** `mcp-hearloom`
+  would bring in every other enabled MCP server.
 - **Unknown toolset names are dropped silently.**
 - **`skills: ["hearloom"]` loads the installed skill by its name.**
+- **A command that needs Hermes's approval waits, then is denied.** In a voice run it waits for up to
+  `approvals.timeout` (300 s), because `/approve` in Telegram doesn't reach the webhook run.
 
-Details in [agent.md](agent.md#hermes-configuration). `cronjob` (reminders) is deliberately left out:
-a cron job picks its own toolsets, so add it only together with
-`agent.disabled_toolsets: [terminal, browser, …]`.
+Details in [agent.md](agent.md#hermes-configuration).
 
 **Hermes behaviour:**
 - It returns 202 right away and runs the agent in a fresh session per event.
@@ -284,8 +296,9 @@ a cron job picks its own toolsets, so add it only together with
 - **Speaker verification proves who spoke, not what was meant.** Transcripts have errors,
   recordings of you can be replayed, and you can be quoted. Treat `command` as untrusted input:
   - Hermes's route quotes it as data;
-  - its `toolsets` are narrower than the chat's;
-  - the agent confirms on Telegram before anything irreversible;
+  - the route has full access by default (the owner's choice), so the skill makes the agent confirm
+    on Telegram before anything irreversible and propose risky commands rather than run them;
+    `toolsets: ["hearloom", "web"]` narrows it;
   - Hearloom caps the command at 500 characters and executes nothing from it.
 - **Low confidence:** `speaker.score` and `heardAs` are in the payload, so the agent can be more
   careful when confidence is low.
