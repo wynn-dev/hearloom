@@ -109,6 +109,22 @@ livePipeline.onEpisodeEnded((userId, episodeId) => {
     })
     .catch((err) => console.error("[agent] episode.ended failed", err));
 });
+// Long episodes (a lecture, an evening of TV) also report progress, if the agent wants that.
+livePipeline.onEpisodeCheckpoint((userId, episodeId, at) => {
+  void getEpisode(db, userId, episodeId)
+    .then((ep) => {
+      if (!ep || ep.endedAt) return;
+      emitAgentEvent(userId, {
+        type: "episode.checkpoint",
+        episodeId,
+        kind: ep.kind,
+        title: ep.title,
+        startedAt: ep.startedAt.toISOString(),
+        at: new Date(at).toISOString(),
+      });
+    })
+    .catch((err) => console.error("[agent] episode.checkpoint failed", err));
+});
 await relayChanges(sql);
 console.log(`[hearloom] listening on http://${env.HOST}:${env.PORT} (public: ${env.PUBLIC_URL})`);
 

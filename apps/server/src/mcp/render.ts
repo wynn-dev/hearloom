@@ -123,7 +123,10 @@ export function speakerName(u: {
   personName: string | null;
   isWearer: boolean | null;
   speakerKey: string | null;
+  /** A voice from a TV or radio (see episodes/store.ts mediaVoices). */
+  media?: boolean;
 }): string {
   if (u.isWearer) return "Me";
-  return u.personName ?? u.speakerKey ?? "Someone";
+  const name = u.personName ?? u.speakerKey ?? "Someone";
+  return u.media ? `${name} (media)` : name;
 }

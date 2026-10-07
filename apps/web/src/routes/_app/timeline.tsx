@@ -135,6 +135,19 @@ function DayView({ tz }: { tz: string }) {
     );
     const byId = new Map(eps.map((e, i) => [e.id, i]));
     return {
+      soundOf: (id) => {
+        const ep = eps[byId.get(id) ?? -1];
+        if (!ep) return undefined;
+        const end = ep.endedAt?.getTime() ?? Number.POSITIVE_INFINITY;
+        const heard = new Map<string, number>();
+        for (const s of data?.soundEvents ?? []) {
+          const ms =
+            Math.min(end, s.endAt.getTime()) -
+            Math.max(ep.startedAt.getTime(), s.startAt.getTime());
+          if (ms > 0) heard.set(s.label, (heard.get(s.label) ?? 0) + ms);
+        }
+        return [...heard].sort((a, b) => b[1] - a[1])[0]?.[0];
+      },
       episode: (id) => eps[byId.get(id) ?? -1],
       previous: (id) => eps[(byId.get(id) ?? 0) - 1],
       folded: (id) => {

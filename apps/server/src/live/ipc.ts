@@ -13,6 +13,7 @@ export type ChildMessage =
   | { t: "invalidate"; userId: string; keys: Array<"timeline" | "status"> }
   | { t: "activity"; userId: string; activity: Activity | null }
   | { t: "episode_ended"; userId: string; episodeId: string }
+  | { t: "episode_checkpoint"; userId: string; episodeId: string; at: number }
   | { t: "block_closed"; userId: string; blockId: string }
   | { t: "enrolled"; requestId: string; ok: true; sampleSeconds: number }
   | { t: "enrolled"; requestId: string; ok: false; error: string };

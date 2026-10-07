@@ -549,7 +549,12 @@ export class StreamProcessor {
         .returning({ id: schema.soundEvents.id });
       if (!final && row) this.openSoundRows.set(key, row.id);
     }
-    if (final) this.openSoundRows.delete(key);
+    if (final) {
+      this.openSoundRows.delete(key);
+      void this.deps.episodes
+        .soundEnded(this.stream.userId, ev.startAt, ev.endAt)
+        .catch((err) => this.deps.log(`sound episode: ${err}`));
+    }
     this.deps.invalidate(this.stream.userId, ["timeline"]);
   }
 

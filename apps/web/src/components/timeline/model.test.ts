@@ -33,6 +33,7 @@ const utterance = (id: string, at: string): Timeline["utterances"][number] => ({
   text: id,
   lang: "en",
   source: "live",
+  mediaVoice: false,
 });
 
 test("episodes after the last row only get a gap divider when there is one", () => {

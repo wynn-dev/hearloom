@@ -10,6 +10,7 @@ const { db, client } = createDb(process.env.DATABASE_URL, { max: 2 });
 const userId = `test-${crypto.randomUUID()}`;
 const activity: (Activity | null)[] = [];
 const ended: string[] = [];
+const checkpoints: number[] = [];
 const tracker = (selfKnown = true) =>
   new EpisodeTracker(
     db,
@@ -17,6 +18,7 @@ const tracker = (selfKnown = true) =>
       activity: (_u, a) => activity.push(a),
       ended: (_u, id) => ended.push(id),
       changed: () => {},
+      checkpoint: (_u, _id, at) => checkpoints.push(at),
     },
     async () => selfKnown,
   );
@@ -211,6 +213,96 @@ test("a restart ends episodes left open at their last speech", async () => {
   expect(ended).toContain(ep!.id);
   const [row] = await db.select().from(schema.episodes).where(eq(schema.episodes.id, ep!.id));
   expect(row!.endedAt!.getTime()).toBe(t0 + 4_000);
+});
+
+test("a long episode reports a checkpoint every 15 minutes", async () => {
+  const t = tracker();
+  const t0 = Date.UTC(2026, 8, 5, 9, 0);
+  checkpoints.length = 0;
+  const chain = crypto.randomUUID();
+  await t.chainStarted(userId, chain, t0);
+  for (const s of turns(t0, t0 + 40 * MINUTE, ["prof"])) t.speech(userId, s);
+  for (let m = 1; m <= 40; m++) await t.tick(t0 + m * MINUTE + 30_000);
+  expect(checkpoints).toEqual([t0 + 15 * MINUTE, t0 + 30 * MINUTE]);
+  await t.chainEnded(userId, chain, t0, t0 + 40 * MINUTE);
+});
+
+test("a long sound state without speech becomes a sound episode around existing ones", async () => {
+  const t = tracker();
+  const t0 = Date.UTC(2026, 8, 6, 18, 0);
+  // A conversation in the middle of an hour of music.
+  await db.insert(schema.episodes).values({
+    userId,
+    startedAt: new Date(t0 + 20 * MINUTE),
+    endedAt: new Date(t0 + 25 * MINUTE),
+    kind: "conversation",
+  });
+  ended.length = 0;
+  await t.soundEnded(userId, t0, t0 + 60 * MINUTE);
+  const rows = await episodesBetween(t0, t0 + 60 * MINUTE);
+  expect(
+    rows.map((r) => [
+      r.kind,
+      (r.startedAt.getTime() - t0) / MINUTE,
+      (r.endedAt!.getTime() - t0) / MINUTE,
+    ]),
+  ).toEqual([
+    ["sound", 0, 20],
+    ["conversation", 20, 25],
+    ["sound", 25, 60],
+  ]);
+  expect(ended).toHaveLength(2);
+  // Short states, or what's left of them, don't count.
+  await t.soundEnded(userId, t0 + 2 * 3600_000, t0 + 2 * 3600_000 + 10 * MINUTE);
+  expect(await episodesBetween(t0 + 2 * 3600_000, t0 + 3 * 3600_000)).toHaveLength(0);
+});
+
+test("speech from backlog makes room in a sound episode made before it was transcribed", async () => {
+  const t = tracker();
+  const t0 = Date.UTC(2026, 8, 9, 18, 0);
+  await t.soundEnded(userId, t0, t0 + 60 * MINUTE);
+  const [chain] = await db
+    .insert(schema.chains)
+    .values({
+      userId,
+      startedAt: new Date(t0 + 20 * MINUTE),
+      endedAt: new Date(t0 + 30 * MINUTE),
+      status: "closed",
+    })
+    .returning();
+  await db.insert(schema.utterances).values(
+    turns(t0 + 20 * MINUTE, t0 + 30 * MINUTE, ["me", "sam"]).map((s, i) => ({
+      userId,
+      startAt: new Date(s.startAt),
+      endAt: new Date(s.endAt),
+      speakerKey: s.speaker === "me" ? null : s.speaker,
+      isWearer: s.isWearer,
+      text: `bar ${i}`,
+      source: "live" as const,
+      provider: "test",
+    })),
+  );
+  await t.segmentChain(userId, chain!.id);
+  const rows = await episodesBetween(t0, t0 + 60 * MINUTE);
+  expect(rows.map((r) => [r.kind, (r.startedAt.getTime() - t0) / MINUTE])).toEqual([
+    ["sound", 0],
+    ["conversation", 20],
+    ["sound", 30],
+  ]);
+  expect(rows[0]!.endedAt!.getTime()).toBe(t0 + 20 * MINUTE);
+  expect(rows[2]!.endedAt!.getTime()).toBe(t0 + 60 * MINUTE);
+});
+
+test("a live chain cuts back a sound episode that runs into it", async () => {
+  const t = tracker();
+  const t0 = Date.UTC(2026, 8, 10, 18, 0);
+  await t.soundEnded(userId, t0, t0 + 30 * MINUTE);
+  const chain = crypto.randomUUID();
+  await t.chainStarted(userId, chain, t0 + 29 * MINUTE + 30_000);
+  const rows = await episodesBetween(t0, t0 + 31 * MINUTE);
+  expect(rows.map((r) => r.kind)).toEqual(["sound", "unknown"]);
+  expect(rows[0]!.endedAt!.getTime()).toBe(t0 + 29 * MINUTE + 30_000);
+  await t.chainEnded(userId, chain, t0 + 29 * MINUTE + 30_000, t0 + 30 * MINUTE);
 });
 
 test("uncovered parts of a range", () => {

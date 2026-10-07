@@ -229,7 +229,14 @@ export const chains = pgTable(
   (t) => [index().on(t.userId, t.startedAt)],
 );
 
-export type EpisodeKind = "conversation" | "talk" | "media" | "ambient" | "solo" | "unknown";
+export type EpisodeKind =
+  | "conversation"
+  | "talk"
+  | "media"
+  | "ambient"
+  | "solo"
+  | "sound"
+  | "unknown";
 export type EditSource = "rule" | "agent" | "user";
 
 /**
@@ -436,7 +443,7 @@ export const apiTokens = pgTable(
     /** First characters of the token, for recognizing it in the console. */
     prefix: text().notNull(),
     tokenHash: text().notNull(),
-    scopes: text().array().$type<Array<"read" | "notify">>().notNull(),
+    scopes: text().array().$type<Array<"read" | "notify" | "write">>().notNull(),
     lastUsedAt: ts(),
     revokedAt: ts(),
     createdAt: createdAt(),

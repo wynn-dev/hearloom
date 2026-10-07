@@ -48,6 +48,7 @@ const episodes = new EpisodeTracker(
     activity: (userId, activity) => send({ t: "activity", userId, activity }),
     ended: (userId, episodeId) => send({ t: "episode_ended", userId, episodeId }),
     changed: (userId) => send({ t: "invalidate", userId, keys: ["timeline"] }),
+    checkpoint: (userId, episodeId, at) => send({ t: "episode_checkpoint", userId, episodeId, at }),
   },
   async (userId) => (await speakers?.hasSelf(userId)) ?? false,
 );

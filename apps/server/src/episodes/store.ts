@@ -38,6 +38,49 @@ export async function episodesAt(
   return out;
 }
 
+/** A voice that spoke at least this long in a media episode of a chain is a media voice there… */
+const MEDIA_VOICE_MS = 20_000;
+/** …if at least this share of its speech in the chain was in media episodes. */
+const MEDIA_VOICE_SHARE = 0.5;
+
+/**
+ * Voices from a TV or radio, per chain ("<chainId>:<speakerKey>"): unnamed voices that speak in
+ * the chain's media episodes, mostly. A voice ever recognized as the user or an enrolled person in
+ * the chain never is. Speaker keys are per chain, so when the TV goes on during a conversation over
+ * it, its lines can be marked too.
+ */
+export async function mediaVoices(
+  db: Db,
+  userId: string,
+  chainIds: string[],
+): Promise<Set<string>> {
+  if (chainIds.length === 0) return new Set();
+  const u = schema.utterances;
+  const ids = sql.join(
+    [...new Set(chainIds)].map((id) => sql`${id}::uuid`),
+    sql`, `,
+  );
+  const ms = sql`extract(epoch from (${u.endAt} - ${u.startAt})) * 1000`;
+  const rows = (await db.execute(sql`
+    select ${b.chainId} as chain, ${u.speakerKey} as key
+    from ${u}
+    join ${b} on ${b.id} = ${u.blockId}
+    left join lateral (
+      select ${e.kind} as kind from ${e}
+      where ${e.userId} = ${u.userId} and ${e.startedAt} <= ${u.startAt}
+        and (${e.endedAt} is null or ${e.endedAt} > ${u.startAt})
+      order by ${e.startedAt} desc limit 1
+    ) ep on true
+    where ${u.userId} = ${userId} and ${b.chainId} in (${ids})
+      and ${u.supersededAt} is null and ${u.speakerKey} is not null
+    group by ${b.chainId}, ${u.speakerKey}
+    having not bool_or(${u.isWearer} is true or ${u.personId} is not null)
+      and coalesce(sum(${ms}) filter (where ep.kind = 'media'), 0) >= ${MEDIA_VOICE_MS}
+      and coalesce(sum(${ms}) filter (where ep.kind = 'media'), 0) >= ${MEDIA_VOICE_SHARE} * sum(${ms})
+  `)) as unknown as { chain: string; key: string }[];
+  return new Set(rows.map((r) => `${r.chain}:${r.key}`));
+}
+
 /** Episodes overlapping [from, to), oldest first. */
 export function episodesIn(
   db: Db,

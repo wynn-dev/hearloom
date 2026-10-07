@@ -7,6 +7,7 @@ import {
   episodesAt,
   episodesIn,
   episodesRefinedBy,
+  mediaVoices,
   mergeEpisodes,
   refinedIds,
   splitEpisode,
@@ -154,4 +155,48 @@ test("the episode a moment falls in", async () => {
   expect(found.get(at(600).getTime())?.id).toBe(b.id);
   expect(found.has(at(499).getTime())).toBe(false);
   await db.delete(schema.episodes).where(eq(schema.episodes.id, b.id));
+});
+
+test("voices that speak in a media episode are media voices of their chain", async () => {
+  await episode(400, 430, "media");
+  await episode(430, 450, "conversation");
+  const [chain] = await db
+    .insert(schema.chains)
+    .values({ userId, startedAt: at(400), endedAt: at(450), status: "closed" })
+    .returning();
+  const [block] = await db
+    .insert(schema.blocks)
+    .values({ userId, chainId: chain!.id, startedAt: at(400), endedAt: at(450), status: "closed" })
+    .returning();
+  const line = (min: number, key: string | null, isWearer: boolean | null = null) => ({
+    userId,
+    blockId: block!.id,
+    startAt: at(min),
+    endAt: new Date(at(min).getTime() + 15_000),
+    speakerKey: key,
+    isWearer,
+    text: "x",
+    source: "live" as const,
+    provider: "test",
+  });
+  await db.insert(schema.utterances).values([
+    line(401, "S4"),
+    line(402, "S4"),
+    line(405, "S7"), // 15 s on TV: not enough
+    line(431, "S4"), // the TV voice goes on during the conversation
+    line(432, "S1"),
+    line(433, null, true),
+    // The user, not recognized in some lines while the TV was on: never a media voice.
+    line(406, "S2"),
+    line(407, "S2"),
+    line(434, "S2", true),
+    // Someone who mostly talked in the conversation, and a bit over the TV.
+    line(408, "S3"),
+    line(409, "S3"),
+    line(435, "S3"),
+    line(436, "S3"),
+    line(437, "S3"),
+  ]);
+  expect([...(await mediaVoices(db, userId, [chain!.id]))]).toEqual([`${chain!.id}:S4`]);
+  expect((await mediaVoices(db, userId, [])).size).toBe(0);
 });
