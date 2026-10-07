@@ -89,29 +89,34 @@ export default function Timeline() {
         ? d.chunks.map((c) => ({ kind: "chunk" as const, at: c.startAt, c }))
         : []),
     ].sort((a, b) => b.at.getTime() - a.at.getTime());
-    // Newest first: one section per episode, and per hour for what happened outside episodes.
+    // Newest first: a section per episode, and per hour for runs of what happened outside episodes
+    // (a new section whenever that changes, so everything stays in time order).
     const episodeAt = (at: Date) =>
       d.episodes.find((e) => e.startedAt <= at && (e.endedAt === null || at < e.endedAt));
-    const out = new Map<string, Section>();
+    const out: Section[] = [];
     for (const it of items) {
       const ep = episodeAt(it.at);
-      let key: string;
+      let group: string;
       let title: string;
       if (ep) {
-        key = `e:${ep.id}`;
+        group = `e:${ep.id}`;
         title = episodeTitle(ep);
       } else {
         const h = new Date(it.at);
         h.setMinutes(0, 0, 0);
         title = hhmm(h);
-        key = `h:${title}`;
+        group = `h:${title}`;
       }
-      const section = out.get(key) ?? { key, title, episode: ep, hidden: 0, data: [] };
-      out.set(key, section);
-      if (ep && folded(ep)) section.hidden++;
+      let section = out[out.length - 1];
+      if (!section?.key.startsWith(`${group}#`)) {
+        section = { key: `${group}#${out.length}`, title, episode: ep, hidden: 0, data: [] };
+        out.push(section);
+      }
+      // Folding hides what was said and heard, not bookmarks or device events.
+      if (ep && folded(ep) && (it.kind === "utterance" || it.kind === "sound")) section.hidden++;
       else section.data.push(it);
     }
-    return [...out.values()];
+    return out;
   }, [q.data, foldOverride]);
 
   const toggleFold = (e: Episode) =>

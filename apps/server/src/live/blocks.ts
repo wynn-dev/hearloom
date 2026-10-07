@@ -41,7 +41,8 @@ interface Touched {
 }
 
 interface TouchedChain extends Touched {
-  /** The chain's end (it only grows). */
+  /** The chain's range (it only grows). */
+  startAt: number;
   endAt: number;
   clusters: SpeakerClusters;
 }
@@ -56,10 +57,10 @@ export interface BlockEvents {
   /** The user's live chain started (at its first utterance's start). */
   chainStarted(userId: string, chainId: string, at: number): void;
   /**
-   * `live`: the user's current chain ended at `endAt` (vs. one rebuilt from uploaded backlog, or
-   * left open by a crashed pipeline).
+   * `live`: the user's current chain [startAt, endAt] ended (vs. one rebuilt from uploaded
+   * backlog, or left open by a crashed pipeline). Reported before the next chain starts.
    */
-  chainEnded(userId: string, chainId: string, live: boolean, endAt: number): void;
+  chainEnded(userId: string, chainId: string, live: boolean, endAt: number, startAt: number): void;
   /** A block is complete and can be refined. */
   blockClosed(userId: string, blockId: string): void;
 }
@@ -106,10 +107,16 @@ export class BlockTracker {
         endedAt: sql`coalesce((select max(${blocks.endedAt}) from ${blocks} where ${blocks.chainId} = ${chains.id}), ${chains.startedAt})`,
       })
       .where(isNull(chains.endedAt))
-      .returning({ id: chains.id, userId: chains.userId, endedAt: chains.endedAt });
+      .returning({
+        id: chains.id,
+        userId: chains.userId,
+        startedAt: chains.startedAt,
+        endedAt: chains.endedAt,
+      });
     for (const r of closedBlocks) this.events.blockClosed(r.userId, r.id);
     for (const r of closedChains) {
-      this.events.chainEnded(r.userId, r.id, false, r.endedAt?.getTime() ?? 0);
+      const end = r.endedAt?.getTime() ?? r.startedAt.getTime();
+      this.events.chainEnded(r.userId, r.id, false, end, r.startedAt.getTime());
     }
     return closedChains.length;
   }
@@ -251,7 +258,7 @@ export class BlockTracker {
     for (const [id, t] of this.touchedChains) {
       if (!quiet(t)) continue;
       this.touchedChains.delete(id);
-      this.events.chainEnded(t.userId, id, false, t.endAt);
+      this.events.chainEnded(t.userId, id, false, t.endAt, t.startAt);
     }
   }
 
@@ -261,6 +268,8 @@ export class BlockTracker {
 
   private async close(userId: string, cur: Chain): Promise<void> {
     if (this.open.get(userId) === cur) this.open.delete(userId);
+    // Right away: speech may start the next chain while the rows below are being written.
+    this.events.chainEnded(userId, cur.id, true, cur.lastEndAt, cur.startedAt);
     await this.closeBlock(userId, cur.block, false);
     const c = schema.chains;
     await this.db
@@ -274,7 +283,6 @@ export class BlockTracker {
       .where(eq(c.id, cur.id));
     // Only now: refining the last block finishes the chain, which must have ended by then.
     this.events.blockClosed(userId, cur.block.id);
-    this.events.chainEnded(userId, cur.id, true, cur.lastEndAt);
   }
 
   /** Highest speaker key number (S<n>) used in a chain. */
@@ -367,7 +375,7 @@ export class BlockTracker {
         status: sql`case when ${c.status} = 'refined' then 'closed' else ${c.status} end`,
       })
       .where(eq(c.id, chainId))
-      .returning({ endedAt: c.endedAt });
+      .returning({ startedAt: c.startedAt, endedAt: c.endedAt });
 
     const now = Date.now();
     this.touchedBlocks.set(blockId, { userId, at: now });
@@ -377,11 +385,13 @@ export class BlockTracker {
     const t = this.touchedChains.get(chainId) ?? {
       userId,
       at: 0,
+      startAt: 0,
       endAt: 0,
       // New keys continue after the chain's existing ones.
       clusters: new SpeakerClusters(this.clusterThreshold, (await this.lastKey(chainId)) + 1),
     };
     t.at = now;
+    t.startAt = chain?.startedAt.getTime() ?? startAt;
     t.endAt = chain?.endedAt?.getTime() ?? endAt;
     this.touchedChains.set(chainId, t);
     return { chainId, blockId, clusters: t.clusters };

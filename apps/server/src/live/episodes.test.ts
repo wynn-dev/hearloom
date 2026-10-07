@@ -55,7 +55,8 @@ function turns(from: number, to: number, speakers: string[]): SpeechSpan[] {
 test("a live chain: dinner talk, then the TV takes over, then silence", async () => {
   const t = tracker();
   const t0 = Date.UTC(2026, 8, 1, 19, 0);
-  await t.chainStarted(userId, t0);
+  const chain = crypto.randomUUID();
+  await t.chainStarted(userId, chain, t0);
   const speech = [
     ...turns(t0, t0 + 12 * MINUTE, ["me", "sam"]),
     ...turns(t0 + 12 * MINUTE, t0 + 30 * MINUTE, ["a", "b", "c", "d"]),
@@ -66,7 +67,7 @@ test("a live chain: dinner talk, then the TV takes over, then silence", async ()
   }
   // Step through the minutes as they complete.
   for (let m = 1; m <= 30; m++) await t.tick(t0 + m * MINUTE + 30_000);
-  await t.chainEnded(userId, t0 + 30 * MINUTE);
+  await t.chainEnded(userId, chain, t0, t0 + 30 * MINUTE);
 
   const rows = await episodesBetween(t0, t0 + 31 * MINUTE);
   expect(rows.map((r) => r.kind)).toEqual(["conversation", "media"]);
@@ -83,7 +84,8 @@ test("a live chain: dinner talk, then the TV takes over, then silence", async ()
 test("a kind the user set on the open episode isn't re-labelled", async () => {
   const t = tracker();
   const t0 = Date.UTC(2026, 8, 2, 9, 0);
-  await t.chainStarted(userId, t0);
+  const chain = crypto.randomUUID();
+  await t.chainStarted(userId, chain, t0);
   const [open] = await episodesBetween(t0, t0 + 1);
   await db
     .update(schema.episodes)
@@ -96,7 +98,7 @@ test("a kind the user set on the open episode isn't re-labelled", async () => {
   for (const s of turns(t0, t0 + 10 * MINUTE, ["me", "sam"])) t.speech(userId, s);
   for (let m = 1; m <= 10; m++) await t.tick(t0 + m * MINUTE + 30_000);
   expect(t.current(userId)?.kind).toBe("talk");
-  await t.chainEnded(userId, t0 + 10 * MINUTE);
+  await t.chainEnded(userId, chain, t0, t0 + 10 * MINUTE);
   const rows = await episodesBetween(t0, t0 + 11 * MINUTE);
   expect(rows).toHaveLength(1);
   expect(rows[0]).toMatchObject({ kind: "talk", kindSource: "user" });
@@ -152,6 +154,41 @@ test("backlog chains are segmented from stored speech, around episodes someone e
   );
   expect(rows[1]!.endedAt!.getTime()).toBe(t0 + 30 * MINUTE);
   expect(ended).toHaveLength(2);
+
+  // More backlog for the chain, segmented again: the same episodes (ids), nothing re-announced.
+  ended.length = 0;
+  await t.segmentChain(userId, chain!.id);
+  expect((await episodesBetween(t0, t1)).map((r) => r.id)).toEqual(rows.map((r) => r.id));
+  expect(ended).toHaveLength(0);
+});
+
+test("a late end of the previous chain doesn't end the next one", async () => {
+  const t = tracker();
+  const t0 = Date.UTC(2026, 8, 7, 9, 0);
+  const [c1, c2] = [crypto.randomUUID(), crypto.randomUUID()];
+  await t.chainStarted(userId, c1, t0);
+  for (const s of turns(t0, t0 + 2 * MINUTE, ["me", "sam"])) t.speech(userId, s);
+  // The next chain is reported before the first one's end (shouldn't happen, but mustn't hurt).
+  await t.chainStarted(userId, c2, t0 + 5 * MINUTE);
+  await t.chainEnded(userId, c1, t0, t0 + 2 * MINUTE);
+  expect(t.current(userId)?.since).toBe(t0 + 5 * MINUTE);
+  const rows = await episodesBetween(t0, t0 + 6 * MINUTE);
+  // Ended at its last speech, then (when its end arrives) grown to the chain's end.
+  expect(rows.map((r) => r.endedAt?.getTime() ?? null)).toEqual([t0 + 2 * MINUTE, null]);
+  await t.chainEnded(userId, c2, t0 + 5 * MINUTE, t0 + 6 * MINUTE);
+});
+
+test("speech that backlog added before a live chain's first episode is covered when it ends", async () => {
+  const t = tracker();
+  const t0 = Date.UTC(2026, 8, 8, 9, 0);
+  const chain = crypto.randomUUID();
+  await t.chainStarted(userId, chain, t0);
+  // Backlog moved the chain's start a minute earlier.
+  await t.chainEnded(userId, chain, t0 - MINUTE, t0 + 3 * MINUTE);
+  const rows = await episodesBetween(t0 - 2 * MINUTE, t0 + 4 * MINUTE);
+  expect(rows).toHaveLength(1);
+  expect(rows[0]!.startedAt.getTime()).toBe(t0 - MINUTE);
+  expect(rows[0]!.endedAt!.getTime()).toBe(t0 + 3 * MINUTE);
 });
 
 test("a restart ends episodes left open at their last speech", async () => {
@@ -168,7 +205,9 @@ test("a restart ends episodes left open at their last speech", async () => {
     source: "live",
     provider: "test",
   });
+  ended.length = 0;
   expect(await tracker().closeOrphans()).toBeGreaterThanOrEqual(1);
+  expect(ended).toContain(ep!.id);
   const [row] = await db.select().from(schema.episodes).where(eq(schema.episodes.id, ep!.id));
   expect(row!.endedAt!.getTime()).toBe(t0 + 4_000);
 });

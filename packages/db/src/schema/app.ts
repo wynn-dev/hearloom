@@ -252,6 +252,8 @@ export const episodes = pgTable(
     boundarySource: text().$type<EditSource>().notNull().default("rule"),
     title: text(),
     summary: text(),
+    /** Who last set the title or summary (agents don't overwrite the user's). */
+    textSource: text().$type<EditSource>().notNull().default("rule"),
     createdAt: createdAt(),
     updatedAt: ts()
       .notNull()

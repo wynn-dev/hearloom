@@ -26,6 +26,7 @@ CREATE TABLE "episodes" (
 	"boundary_source" text DEFAULT 'rule' NOT NULL,
 	"title" text,
 	"summary" text,
+	"text_source" text DEFAULT 'rule' NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
 );
@@ -35,7 +36,8 @@ ALTER TABLE "context_samples" ADD CONSTRAINT "context_samples_user_id_user_id_fk
 ALTER TABLE "episodes" ADD CONSTRAINT "episodes_user_id_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "chains_user_id_started_at_index" ON "chains" USING btree ("user_id","started_at");--> statement-breakpoint
 CREATE INDEX "episodes_user_id_started_at_index" ON "episodes" USING btree ("user_id","started_at");--> statement-breakpoint
-CREATE INDEX "episodes_user_id_updated_at_index" ON "episodes" USING btree ("user_id","updated_at");--> statement-breakpoint
+CREATE INDEX "episodes_user_id_updated_at_index" ON "episodes" USING btree ("user_id","updated_at");
+--> statement-breakpoint
 -- Conversations become chains (internal) and episodes (what users see), with the same ids. Their
 -- kind is unknown: they were never classified.
 INSERT INTO "chains" ("id", "user_id", "started_at", "ended_at", "status", "created_at", "updated_at")

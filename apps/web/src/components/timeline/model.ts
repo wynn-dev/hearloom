@@ -110,8 +110,11 @@ export function foldedByDefault(ep: Episode): boolean {
   return ep.kind === "media" || ep.kind === "ambient";
 }
 
+/** Rows a folded episode hides: what was said and heard (not bookmarks, audio or devices). */
+const foldable = (row: Row) => row.kind === "utterance" || row.kind === "sound";
+
 /**
- * Merge all timeline layers into one time-ordered list with episode headers and gaps. Rows of a
+ * Merge all timeline layers into one time-ordered list with episode headers and gaps. Lines of a
  * folded episode are left out (its header says how many).
  */
 export function buildEntries(
@@ -183,7 +186,7 @@ export function buildEntries(
   const hidden = new Map<string, number>();
   for (const row of rows) {
     const ep = row.ep ? byId.get(row.ep) : undefined;
-    if (ep && folded(ep)) hidden.set(ep.id, (hidden.get(ep.id) ?? 0) + 1);
+    if (ep && folded(ep) && foldable(row)) hidden.set(ep.id, (hidden.get(ep.id) ?? 0) + 1);
   }
   const shown = new Set<string>();
   const entries: Entry[] = [];
@@ -224,7 +227,7 @@ export function buildEntries(
     if (ep && row.ep !== currentEp) pushEpisode(ep, shown.has(ep.id) ? `:${row.key}` : "");
     currentEp = row.ep;
     lastEnd = Math.max(lastEnd ?? row.end, row.end);
-    if (ep && folded(ep)) continue;
+    if (ep && folded(ep) && foldable(row)) continue;
     entries.push(row);
   }
   for (; epIndex < episodes.length; epIndex++) {

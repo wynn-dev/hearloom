@@ -690,14 +690,14 @@ async function refineNow(deps: RefineDeps, blockId: string): Promise<RefineResul
 export async function finishChain(
   deps: RefineDeps,
   chainId: string,
-): Promise<{ finished: boolean; message: string }> {
+): Promise<{ finished: boolean; message: string; renamed: number }> {
   const { db } = deps;
   const [row] = await db.select().from(schema.chains).where(eq(schema.chains.id, chainId));
-  if (!row?.endedAt) return { finished: false, message: "chain still open" };
-  if (row.status === "refined") return { finished: false, message: "already finished" };
+  if (!row?.endedAt) return { finished: false, message: "chain still open", renamed: 0 };
+  if (row.status === "refined") return { finished: false, message: "already finished", renamed: 0 };
   const chain = await db.select().from(schema.blocks).where(eq(schema.blocks.chainId, chainId));
   if (chain.length === 0 || chain.some((b) => b.status !== "refined")) {
-    return { finished: false, message: "blocks still to refine" };
+    return { finished: false, message: "blocks still to refine", renamed: 0 };
   }
   const ids = chain.map((b) => b.id);
   const heard = await db
@@ -750,5 +750,6 @@ export async function finishChain(
   return {
     finished: true,
     message: `chain refined (${chain.length} blocks${renames.size ? `, ${renames.size} keys merged` : ""})`,
+    renamed: renames.size,
   };
 }

@@ -258,7 +258,7 @@ function WebhookCard() {
             <div className="flex flex-wrap gap-4">
               {(
                 [
-                  ["episodeRefined", "Episode refined (speakers final)"],
+                  ["episodeRefined", "Episode refined (speakers identified)"],
                   ["bookmark", "Bookmark"],
                 ] as const
               ).map(([key, label]) => (

@@ -4,7 +4,7 @@ import { emitAgentEvent } from "./agent/webhooks";
 import { getSession } from "./auth";
 import { db, sql } from "./db";
 import { env } from "./env";
-import { getEpisode } from "./episodes/store";
+import { getEpisode, refinedIds } from "./episodes/store";
 import { relayChanges } from "./events";
 import { app } from "./http/app";
 import type { IngestSocketData } from "./ingest/phones";
@@ -95,6 +95,17 @@ livePipeline.onEpisodeEnded((userId, episodeId) => {
         title: ep.title,
         startedAt: ep.startedAt.toISOString(),
         endedAt: ep.endedAt.toISOString(),
+      });
+      // Its blocks may all be refined already (the worker only reports when it refines one).
+      return refinedIds(db, userId, [ep]).then((refined) => {
+        if (refined.has(episodeId)) {
+          emitAgentEvent(userId, {
+            type: "episode.refined",
+            episodeId,
+            kind: ep.kind,
+            again: false,
+          });
+        }
       });
     })
     .catch((err) => console.error("[agent] episode.ended failed", err));

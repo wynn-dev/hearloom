@@ -7,7 +7,7 @@ import { z } from "zod";
 import { type Scope, verifyToken } from "../agent/tokens";
 import { db } from "../db";
 import { env } from "../env";
-import { episodesIn, getEpisode, refinedIds } from "../episodes/store";
+import { episodesAt, episodesIn, getEpisode, refinedIds } from "../episodes/store";
 import { chunkUrl } from "../http/media";
 import { liveState } from "../live/state";
 import { notify } from "../notify/gateway";
@@ -179,20 +179,15 @@ function buildServer(userId: string, scopes: Scope[]): McpServer {
         .orderBy(desc(sql`ts_rank(${utterances.search}, ${tsq})`), desc(utterances.startAt))
         .limit(limit);
       if (rows.length === 0) return text("No matches.");
-      const times = rows.map((r) => r.startAt.getTime());
-      const eps = await episodesIn(
+      const at = await episodesAt(
         db,
         userId,
-        new Date(Math.min(...times)),
-        new Date(Math.max(...times) + 1),
-        5000,
+        rows.map((r) => r.startAt),
       );
-      const episodeAt = (t: Date) =>
-        eps.find((e) => e.startedAt <= t && (e.endedAt === null || t < e.endedAt));
       return text(
         rows
           .map((r) => {
-            const e = episodeAt(r.startAt);
+            const e = at.get(r.startAt.getTime());
             const where = e ? `${EPISODE_KIND_LABEL[e.kind].toLowerCase()} ${e.id}` : "-";
             return `${day(r.startAt, tz)} ${clock(r.startAt, tz)} ${speakerName(r)}: ${r.text}  (episode ${where})`;
           })
@@ -261,20 +256,24 @@ function buildServer(userId: string, scopes: Scope[]): McpServer {
         .filter((e) => !kinds?.length || kinds.includes(e.kind))
         .slice(0, limit);
       if (eps.length === 0) return text("No episodes in this range.");
-      const first = eps[0]!.startedAt;
-      const last = new Date(Math.max(...eps.map((e) => (e.endedAt ?? new Date()).getTime())) + 1);
-      const utts = await loadUtterances(
-        userId,
-        and(gte(utterances.startAt, first), lt(utterances.startAt, last)),
-        20_000,
-      );
       const refined = await refinedIds(db, userId, eps);
+      // Each episode's own lines (a range-wide load would run out before the last episodes).
+      const perEpisode = await Promise.all(
+        eps.map((e) =>
+          loadUtterances(
+            userId,
+            and(
+              gte(utterances.startAt, e.startedAt),
+              lt(utterances.startAt, e.endedAt ?? new Date()),
+            ),
+            5000,
+          ),
+        ),
+      );
       return text(
         eps
-          .map((e) => {
-            const mine = utts.filter(
-              (u) => u.startAt >= e.startedAt && (e.endedAt === null || u.startAt < e.endedAt),
-            );
+          .map((e, i) => {
+            const mine = perEpisode[i]!;
             const speakers = [...new Set(mine.map(speakerName))];
             const state = !e.endedAt
               ? "ongoing"

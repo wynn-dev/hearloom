@@ -54,7 +54,7 @@ test("rows belong to the episode they start in; folded episodes hide their rows"
     episodes: [episode("talk", "10:00", "10:30"), episode("tv", "10:30", "11:00", "media")],
     utterances: [utterance("u1", "10:15"), utterance("u2", "10:29"), utterance("u3", "10:31")],
     soundEvents: [],
-    bookmarks: [],
+    bookmarks: [{ id: "b1", at: t("10:40"), note: null, source: "button" }],
     deviceEvents: [],
     chunks: [],
   };
@@ -65,8 +65,10 @@ test("rows belong to the episode they start in; folded episodes hide their rows"
     "utterance:talk",
     "episode:tv",
     "utterance:tv",
+    "bookmark:tv",
   ]);
+  // Folding hides what was said, not the user's bookmark.
   const folded = buildEntries(data, defaultFilters, foldedByDefault);
-  expect(folded.map((e) => e.key)).toEqual(["e:talk", "u:u1", "u:u2", "e:tv"]);
+  expect(folded.map((e) => e.key)).toEqual(["e:talk", "u:u1", "u:u2", "e:tv", "b:b1"]);
   expect(folded[3]).toMatchObject({ kind: "episode", hidden: 1 });
 });

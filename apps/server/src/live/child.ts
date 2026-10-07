@@ -61,10 +61,11 @@ const deps: LiveDeps = {
   blocks: new BlockTracker(
     db,
     {
-      chainStarted: (userId, _chainId, at) => void episodes.chainStarted(userId, at).catch(fail),
-      chainEnded: (userId, chainId, live, endAt) => {
+      chainStarted: (userId, chainId, at) =>
+        void episodes.chainStarted(userId, chainId, at).catch(fail),
+      chainEnded: (userId, chainId, live, endAt, startAt) => {
         const done = live
-          ? episodes.chainEnded(userId, endAt)
+          ? episodes.chainEnded(userId, chainId, startAt, endAt)
           : episodes.segmentChain(userId, chainId);
         void done.catch(fail);
         send({ t: "invalidate", userId, keys: ["timeline"] });
@@ -192,6 +193,8 @@ setInterval(() => {
 async function shutdown() {
   await Promise.all([...processors.values()].map((p) => p.dispose()));
   await deps.blocks.closeAll();
+  // The episodes of the chains just closed are still being written.
+  await episodes.idle();
   await client.end({ timeout: 3 });
   process.exit(0);
 }

@@ -34,7 +34,9 @@ Output is compact text for LLMs:
 
 Set a URL and secret in the console → **Agent**. Hearloom POSTs JSON events:
 `episode.ended` (with its kind; per kind on/off — by default conversations, talks and unclassified
-speech, not media, ambient or solo), `episode.refined` (off by default), `bookmark` (and `test`).
+speech, not media, ambient or solo), `episode.refined` (off by default; same kinds; sent when an
+ended episode's speakers are refined, and again with `again: true` if a later pass merges speaker
+labels across its stretch of speech), `bookmark` (and `test`).
 Bodies contain ids, kinds and times only; the agent reads content over MCP.
 
 Headers: `X-Hearloom-Event`, `X-Hearloom-Timestamp`, and

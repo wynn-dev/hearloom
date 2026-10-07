@@ -11,7 +11,13 @@ export type AgentEvent =
       startedAt: string;
       endedAt: string;
     }
-  | { type: "episode.refined"; episodeId: string }
+  | {
+      type: "episode.refined";
+      episodeId: string;
+      kind: EpisodeKind;
+      /** Sent again when a later pass merges speaker labels across the episode's chain. */
+      again: boolean;
+    }
   | { type: "bookmark"; at: string; source: string; note: string | null }
   | { type: "test"; message: string };
 
@@ -22,7 +28,7 @@ function enabled(settings: Settings, event: AgentEvent): boolean {
     case "episode.ended":
       return events.episodeEnded[event.kind];
     case "episode.refined":
-      return events.episodeRefined;
+      return events.episodeRefined && events.episodeEnded[event.kind];
     case "bookmark":
       return events.bookmark;
     case "test":

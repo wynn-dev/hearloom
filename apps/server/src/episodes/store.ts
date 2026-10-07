@@ -6,12 +6,37 @@
 import type { Db } from "@hearloom/db";
 import { schema } from "@hearloom/db";
 import { type EditSource, type KnownEpisodeKind, mayEdit } from "@hearloom/shared";
-import { and, asc, eq, gt, inArray, isNull, lt, ne, or } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
 
 export type EpisodeRow = typeof schema.episodes.$inferSelect;
 const { episodes: e, blocks: b } = schema;
 
 export class EpisodeEditError extends Error {}
+
+/** The episode each of these times falls in (one indexed lookup per time). */
+export async function episodesAt(
+  db: Db,
+  userId: string,
+  times: Date[],
+): Promise<Map<number, { id: string; kind: EpisodeRow["kind"] }>> {
+  const out = new Map<number, { id: string; kind: EpisodeRow["kind"] }>();
+  if (times.length === 0) return out;
+  const list = sql.join(
+    times.map((t) => sql`${t.toISOString()}::timestamptz`),
+    sql`, `,
+  );
+  const rows = (await db.execute(sql`
+    select t.at, ep.id, ep.kind
+    from unnest(array[${list}]) as t(at)
+    cross join lateral (
+      select ${e.id} as id, ${e.kind} as kind from ${e}
+      where ${e.userId} = ${userId} and ${e.startedAt} <= t.at
+        and (${e.endedAt} is null or ${e.endedAt} > t.at)
+      order by ${e.startedAt} desc limit 1
+    ) ep`)) as unknown as { at: Date | string; id: string; kind: EpisodeRow["kind"] }[];
+  for (const r of rows) out.set(new Date(r.at).getTime(), { id: r.id, kind: r.kind });
+  return out;
+}
 
 /** Episodes overlapping [from, to), oldest first. */
 export function episodesIn(
@@ -66,20 +91,45 @@ export async function refinedIds(db: Db, userId: string, eps: EpisodeRow[]): Pro
   return out;
 }
 
+/** The ended, refined episodes overlapping [from, to) (`episode.refined` candidates). */
+async function refinedIn(
+  db: Db,
+  userId: string,
+  from: Date,
+  to: Date,
+): Promise<{ id: string; kind: EpisodeRow["kind"] }[]> {
+  // An episode starting exactly where the range ends doesn't overlap it.
+  const eps = (await episodesIn(db, userId, from, to)).filter(
+    (x) => x.endedAt !== null && x.startedAt < to,
+  );
+  const refined = await refinedIds(db, userId, eps);
+  return eps.filter((x) => refined.has(x.id)).map((x) => ({ id: x.id, kind: x.kind }));
+}
+
 /** After a block was refined: the ended episodes it overlaps that are now fully refined. */
 export async function episodesRefinedBy(
   db: Db,
   blockId: string,
-): Promise<{ userId: string; ids: string[] } | null> {
+): Promise<{ userId: string; episodes: { id: string; kind: EpisodeRow["kind"] }[] } | null> {
   const [block] = await db.select().from(b).where(eq(b.id, blockId));
   if (!block?.endedAt) return null;
-  const eps = (await episodesIn(db, block.userId, block.startedAt, block.endedAt)).filter(
-    (x) => x.endedAt !== null,
-  );
-  // A block ending exactly where an episode starts doesn't overlap it.
-  const overlapping = eps.filter((x) => x.startedAt < block.endedAt!);
-  const refined = await refinedIds(db, block.userId, overlapping);
-  return { userId: block.userId, ids: [...refined] };
+  return {
+    userId: block.userId,
+    episodes: await refinedIn(db, block.userId, block.startedAt, block.endedAt),
+  };
+}
+
+/** The refined episodes of a chain (after its speaker keys were consolidated). */
+export async function refinedEpisodesOfChain(
+  db: Db,
+  chainId: string,
+): Promise<{ userId: string; episodes: { id: string; kind: EpisodeRow["kind"] }[] } | null> {
+  const [chain] = await db.select().from(schema.chains).where(eq(schema.chains.id, chainId));
+  if (!chain?.endedAt) return null;
+  return {
+    userId: chain.userId,
+    episodes: await refinedIn(db, chain.userId, chain.startedAt, chain.endedAt),
+  };
 }
 
 export interface EpisodePatch {
@@ -88,7 +138,14 @@ export interface EpisodePatch {
   kind?: KnownEpisodeKind;
 }
 
-/** Rename, describe or re-kind an episode. Returns the updated row. */
+/** Sources an edit by `by` may override. */
+const overridable = (by: EditSource): EditSource[] =>
+  (["rule", "agent", "user"] as const).filter((s) => mayEdit(by, s));
+
+/**
+ * Rename, describe or re-kind an episode. Returns the updated row. What the user set can't be
+ * changed by an agent (the check is part of the update, so a concurrent edit can't slip past).
+ */
 export async function updateEpisode(
   db: Db,
   userId: string,
@@ -99,18 +156,33 @@ export async function updateEpisode(
   const cur = await getEpisode(db, userId, id);
   if (!cur) throw new EpisodeEditError("episode not found");
   const set: Partial<typeof e.$inferInsert> = {};
+  const text = patch.title !== undefined || patch.summary !== undefined;
   if (patch.title !== undefined) set.title = patch.title?.trim().slice(0, 200) || null;
   if (patch.summary !== undefined) set.summary = patch.summary?.trim().slice(0, 4000) || null;
+  if (text) set.textSource = by;
   if (patch.kind !== undefined) {
-    if (!mayEdit(by, cur.kindSource)) {
-      throw new EpisodeEditError(`the kind was set by the ${cur.kindSource}; it can't be changed`);
-    }
     set.kind = patch.kind;
     set.kindSource = by;
   }
   if (Object.keys(set).length === 0) return cur;
-  const [row] = await db.update(e).set(set).where(eq(e.id, id)).returning();
-  return row!;
+  const allowed = overridable(by);
+  const [row] = await db
+    .update(e)
+    .set(set)
+    .where(
+      and(
+        eq(e.id, id),
+        eq(e.userId, userId),
+        text ? inArray(e.textSource, allowed) : undefined,
+        patch.kind !== undefined ? inArray(e.kindSource, allowed) : undefined,
+      ),
+    )
+    .returning();
+  if (!row) {
+    const what = text && !mayEdit(by, cur.textSource) ? "title and summary were" : "kind was";
+    throw new EpisodeEditError(`its ${what} set by the user; they can't be changed`);
+  }
+  return row;
 }
 
 /** Split an ended episode at `at` (strictly inside it). Returns the two parts. */
@@ -148,6 +220,7 @@ export async function splitEpisode(
         endedAt: cur.endedAt,
         kind: cur.kind,
         kindSource: cur.kindSource,
+        textSource: cur.textSource,
         boundarySource: by,
       })
       .returning();
@@ -202,20 +275,22 @@ export async function mergeEpisodes(
       a.endedAt.getTime() - a.startedAt.getTime() >= z.endedAt.getTime() - z.startedAt.getTime()
         ? a
         : z;
-    // Same kind: keep whoever decided it with more authority. Different kinds: the longer one's
-    // kind, now chosen by whoever merged.
-    const kindSource =
-      a.kind === z.kind ? (mayEdit(a.kindSource, z.kindSource) ? a.kindSource : z.kindSource) : by;
+    // The kind decided with more authority wins (then the longer part's); merging doesn't make
+    // it the merger's decision. Titles and summaries likewise.
+    const kindFrom =
+      a.kindSource !== z.kindSource ? (mayEdit(a.kindSource, z.kindSource) ? a : z) : longer;
+    const textFrom = mayEdit(a.textSource, z.textSource) ? a : z;
     await tx.delete(e).where(eq(e.id, z.id));
     const [row] = await tx
       .update(e)
       .set({
         endedAt: z.endedAt,
-        kind: longer.kind,
-        kindSource,
+        kind: kindFrom.kind,
+        kindSource: kindFrom.kindSource,
         boundarySource: by,
-        title: a.title ?? z.title,
+        title: textFrom.title ?? a.title ?? z.title,
         summary: a.summary && z.summary ? `${a.summary}\n\n${z.summary}` : (a.summary ?? z.summary),
+        textSource: textFrom.textSource,
       })
       .where(eq(e.id, a.id))
       .returning();

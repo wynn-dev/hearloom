@@ -11,7 +11,7 @@ const ends = new Map<string, number>();
 const tracker = () =>
   new BlockTracker(db, {
     chainStarted: (_u, id) => events.push(`started:${id}`),
-    chainEnded: (_u, id, live, endAt) => {
+    chainEnded: (_u, id, live, endAt, _startAt) => {
       events.push(`ended:${id}:${live ? "live" : "backlog"}`);
       ends.set(id, endAt);
     },

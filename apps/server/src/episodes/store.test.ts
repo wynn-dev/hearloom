@@ -3,6 +3,7 @@ import { createDb, schema } from "@hearloom/db";
 import { eq } from "drizzle-orm";
 import {
   EpisodeEditError,
+  episodesAt,
   episodesIn,
   episodesRefinedBy,
   mergeEpisodes,
@@ -53,9 +54,14 @@ test("an agent can set the kind, the user can override it, the agent can't take 
   await expect(updateEpisode(db, userId, e.id, { kind: "media" }, "agent")).rejects.toThrow(
     EpisodeEditError,
   );
-  // Titles and summaries aren't locked; an empty title clears it.
+  // The agent may title it until the user does; an empty title clears it.
   const titled = await updateEpisode(db, userId, e.id, { title: "  ", summary: "Notes" }, "agent");
-  expect(titled).toMatchObject({ title: null, summary: "Notes" });
+  expect(titled).toMatchObject({ title: null, summary: "Notes", textSource: "agent" });
+  await updateEpisode(db, userId, e.id, { title: "Dinner with Mom" }, "user");
+  await expect(
+    updateEpisode(db, userId, e.id, { title: "Chat about groceries" }, "agent"),
+  ).rejects.toThrow("title and summary");
+  await expect(updateEpisode(db, userId, e.id, { summary: null }, "agent")).rejects.toThrow();
 });
 
 test("split an ended episode in two; open episodes and times outside it are refused", async () => {
@@ -84,12 +90,21 @@ test("merge two neighbouring episodes; the longer one's kind wins", async () => 
   expect(merged).toMatchObject({
     id: a.id,
     kind: "media",
-    kindSource: "user",
+    kindSource: "rule",
     title: "Call mum",
+    textSource: "user",
     boundarySource: "user",
   });
   expect(merged.endedAt).toEqual(at(135));
   expect(await episodesIn(db, userId, at(100), at(140))).toHaveLength(1);
+});
+
+test("merging keeps the kind someone decided over the rules' longer one", async () => {
+  const a = await episode(150, 180, "media");
+  const b = await episode(181, 185, "conversation");
+  await updateEpisode(db, userId, b.id, { kind: "talk" }, "user");
+  const merged = await mergeEpisodes(db, userId, [a.id, b.id], "agent");
+  expect(merged).toMatchObject({ kind: "talk", kindSource: "user", boundarySource: "agent" });
 });
 
 test("only neighbours merge", async () => {
@@ -122,7 +137,20 @@ test("an ended episode is refined once every block it overlaps is", async () => 
   const b2 = await block(310, 322);
   expect((await refinedIds(db, userId, [e])).has(e.id)).toBe(false);
   await db.update(schema.blocks).set({ status: "refined" }).where(eq(schema.blocks.id, b1.id));
-  expect((await episodesRefinedBy(db, b1.id))?.ids).toEqual([]);
+  expect((await episodesRefinedBy(db, b1.id))?.episodes).toEqual([]);
   await db.update(schema.blocks).set({ status: "refined" }).where(eq(schema.blocks.id, b2.id));
-  expect((await episodesRefinedBy(db, b2.id))?.ids).toEqual([e.id]);
+  expect((await episodesRefinedBy(db, b2.id))?.episodes).toEqual([
+    { id: e.id, kind: "conversation" },
+  ]);
+});
+
+test("the episode a moment falls in", async () => {
+  const a = await episode(500, 510);
+  const b = await episode(510, null, "media");
+  const found = await episodesAt(db, userId, [at(505), at(510), at(600), at(499)]);
+  expect(found.get(at(505).getTime())).toEqual({ id: a.id, kind: "conversation" });
+  expect(found.get(at(510).getTime())).toEqual({ id: b.id, kind: "media" });
+  expect(found.get(at(600).getTime())?.id).toBe(b.id);
+  expect(found.has(at(499).getTime())).toBe(false);
+  await db.delete(schema.episodes).where(eq(schema.episodes.id, b.id));
 });
