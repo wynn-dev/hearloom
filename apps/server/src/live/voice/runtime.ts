@@ -1,6 +1,6 @@
 import type { Db } from "@hearloom/db";
 import { schema } from "@hearloom/db";
-import { SPEAKER_MODEL_ID, type SpeakerEmbedder, toFloat32 } from "@hearloom/inference";
+import { type SpeakerEmbedder, toFloat32 } from "@hearloom/inference";
 import { resolveSettings, wakeTerms } from "@hearloom/shared";
 import { and, desc, eq, isNotNull, ne } from "drizzle-orm";
 import { loadStreamAudio } from "../../audio/load";
@@ -38,7 +38,7 @@ export class VoiceRuntime {
       },
       isMediaVoice: async (userId, chainId, key) =>
         (await mediaVoices(deps.db, userId, [chainId])).has(`${chainId}:${key}`),
-      learn: (userId, personId, audio) => this.learn(userId, personId, audio),
+      embed: async (audio) => this.embed(audio),
       detected: (detection) => deps.send({ t: "voice_command", detection }),
       taught: (userId, result) => deps.send({ t: "teach_heard", userId, result }),
       log: deps.log,
@@ -86,22 +86,13 @@ export class VoiceRuntime {
     };
   }
 
-  /** Store a voiceprint of the user's own voice. */
-  private async learn(userId: string, personId: string, audio: Float32Array): Promise<string> {
+  /**
+   * A voiceprint embedding of the user's own voice. The host stores it together with the sample
+   * row that can remove it, so a timeout or restart can't leave a voiceprint nothing links to.
+   */
+  private embed(audio: Float32Array): number[] {
     if (!this.deps.embedder) throw new Error("speaker model not installed");
-    const [row] = await this.deps.db
-      .insert(schema.voiceprints)
-      .values({
-        userId,
-        personId,
-        model: SPEAKER_MODEL_ID,
-        embedding: Array.from(this.deps.embedder.embed(audio)),
-        sampleSeconds: audio.length / 16000,
-        source: "enrollment",
-      })
-      .returning({ id: schema.voiceprints.id });
-    this.deps.speakers?.invalidate(userId);
-    return row!.id;
+    return Array.from(this.deps.embedder.embed(audio));
   }
 
   /** Handle a voice message from the host; false if it isn't one. */
@@ -133,7 +124,7 @@ export class VoiceRuntime {
               wouldMatch: false,
               speakerScore: null,
               seconds: 0,
-              voiceprintId: null,
+              embedding: null,
               wouldTrigger: false,
               error: String(err?.message ?? err),
             },
@@ -142,12 +133,12 @@ export class VoiceRuntime {
         return true;
       case "learn_voice":
         void this.learnSpan(msg).then(
-          ({ voiceprintId, seconds }) =>
+          ({ embedding, seconds }) =>
             this.deps.send({
               t: "learned",
               requestId: msg.requestId,
               ok: true,
-              voiceprintId,
+              embedding,
               seconds,
             }),
           (err) =>
@@ -174,7 +165,7 @@ export class VoiceRuntime {
 
   private async learnSpan(
     msg: Extract<HostMessage, { t: "learn_voice" }>,
-  ): Promise<{ voiceprintId: string; seconds: number }> {
+  ): Promise<{ embedding: number[]; seconds: number }> {
     const pieces: Float32Array[] = [];
     for (const r of msg.ranges) {
       const a = await loadStreamAudio(this.deps.db, msg.streamId, r.startAt, r.endAt);
@@ -192,12 +183,9 @@ export class VoiceRuntime {
     // The user vouched for it, but it must still sound like them (not a partner, not the TV): as
     // much as a command must to be sent.
     const { minScore } = await this.config(msg.userId);
-    const refused = logLearnVerdict(
-      await speakers.compare(msg.userId, embedder.embed(audio)),
-      minScore,
-    );
+    const embedding = embedder.embed(audio);
+    const refused = logLearnVerdict(await speakers.compare(msg.userId, embedding), minScore);
     if (refused) throw new Error(refused);
-    const voiceprintId = await this.learn(msg.userId, msg.personId, audio);
-    return { voiceprintId, seconds: audio.length / 16000 };
+    return { embedding: Array.from(embedding), seconds: audio.length / 16000 };
   }
 }

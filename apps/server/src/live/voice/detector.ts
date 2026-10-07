@@ -5,7 +5,7 @@ import {
   DEFAULT_LIMITS,
   type HeardUtterance,
 } from "./assembler";
-import type { IgnoreReason, TeachPrompt, TeachResult, VoiceConfig, VoiceDetection } from "./types";
+import type { IgnoreReason, TeachHeard, TeachPrompt, VoiceConfig, VoiceDetection } from "./types";
 
 /** Default own-voice threshold before the user's samples say otherwise. */
 export const DEFAULT_MIN_SCORE = 0.65;
@@ -46,10 +46,10 @@ export interface DetectorDeps {
   score(userId: string, audio: Float32Array): Promise<VoiceScore | null>;
   /** Is this chain's speaker a TV/radio voice? */
   isMediaVoice(userId: string, chainId: string, speakerKey: string): Promise<boolean>;
-  /** Learn a voiceprint for the user's own person from audio; returns its id. */
-  learn(userId: string, personId: string, audio: Float32Array): Promise<string>;
+  /** A voiceprint embedding of the audio (stored by the host, with the sample it came from). */
+  embed(audio: Float32Array): Promise<number[]>;
   detected(d: VoiceDetection): void;
-  taught(userId: string, r: TeachResult): void;
+  taught(userId: string, r: TeachHeard): void;
   log(message: string): void;
   now?(): number;
 }
@@ -356,14 +356,14 @@ export class VoiceDetector {
     prompt: TeachPrompt,
     text: string,
     audio: Float32Array | null,
-    source: TeachResult["source"],
+    source: TeachHeard["source"],
   ): Promise<void> {
     const cfg = await this.deps.config(userId);
     const align = alignTeach(text, prompt.phrase, cfg.wake);
     const wake = matchWake(text, cfg.wake);
     let ok = prompt.kind === "test" ? wake !== null : align.ok;
     let speakerScore: number | null = null;
-    let voiceprintId: string | null = null;
+    let embedding: number[] | null = null;
     let error: string | undefined;
     const seconds = (audio?.length ?? 0) / 16_000;
     if (ok) {
@@ -376,7 +376,7 @@ export class VoiceDetector {
         error = refused;
       } else if (prompt.kind === "sample" && audio && audio.length >= MIN_PRINT_SAMPLES) {
         try {
-          voiceprintId = await this.deps.learn(userId, prompt.personId, audio);
+          embedding = await this.deps.embed(audio);
         } catch (err) {
           this.deps.log(`voice teach: ${err}`);
         }
@@ -395,7 +395,7 @@ export class VoiceDetector {
       wouldMatch: wake !== null,
       speakerScore,
       seconds,
-      voiceprintId,
+      embedding,
       wouldTrigger: wake !== null && speakerScore !== null && speakerScore >= cfg.minScore,
       ...(error ? { error } : {}),
     });

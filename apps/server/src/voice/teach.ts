@@ -4,10 +4,10 @@ import { and, count, eq } from "drizzle-orm";
 import { db } from "../db";
 import { livePipeline } from "../live/host";
 import { TEACH_GRACE_MS } from "../live/voice/detector";
-import type { TeachPrompt, TeachResult } from "../live/voice/types";
+import type { TeachHeard, TeachPrompt, TeachResult } from "../live/voice/types";
 import { invalidate } from "../realtime";
 import { getSettings, updateSettings } from "../settings";
-import { ensureSelfPerson } from "./profile";
+import { ensureSelfPerson, insertVoiceprint } from "./profile";
 
 const { voiceSamples } = schema;
 
@@ -43,6 +43,17 @@ interface Session {
 const sessions = new Map<string, Session>();
 /** When each user's last session stopped (ms), for the grace window. */
 const stoppedAt = new Map<string, number>();
+/**
+ * A stop is remembered this long. Longer than the grace window: a detection arrives only after
+ * its command ends (up to 30 s of speech, then a pause), and is judged by when it started.
+ */
+const STOP_KEEP_MS = TEACH_GRACE_MS + 60_000;
+
+/** Forget stops too old to matter (the map only ever holds recent ones). */
+function pruneStops(): void {
+  const cutoff = Date.now() - STOP_KEEP_MS;
+  for (const [userId, at] of stoppedAt) if (at < cutoff) stoppedAt.delete(userId);
+}
 
 export class TeachError extends Error {}
 
@@ -60,6 +71,7 @@ function touch(userId: string, s: Session): void {
  */
 export function isTeaching(userId: string, spokenAt: number): boolean {
   if (sessions.has(userId)) return true;
+  pruneStops();
   const stopped = stoppedAt.get(userId);
   return stopped !== undefined && spokenAt < stopped + TEACH_GRACE_MS;
 }
@@ -133,6 +145,7 @@ export function stopTeach(userId: string, sessionId?: string): void {
   clearTimeout(s.idle);
   clearTimeout(s.hardStop);
   sessions.delete(userId);
+  pruneStops();
   stoppedAt.set(userId, Date.now());
   livePipeline.teach(userId, null);
   invalidate(userId, ["voice"]);
@@ -189,25 +202,37 @@ export function uploadSample(userId: string, sessionId: string, pcm: Int16Array)
     throw new TeachError("the live pipeline is not running");
 }
 
-/** The live pipeline heard something during a teaching session. */
-export async function onTeachHeard(userId: string, r: TeachResult): Promise<void> {
+/**
+ * The live pipeline heard something during a teaching session. A sample for the current phrase is
+ * stored with its voiceprint (if long enough) in one transaction; anything else learns nothing.
+ */
+export async function onTeachHeard(userId: string, heard: TeachHeard): Promise<void> {
   const s = sessions.get(userId);
-  if (!s || s.prompt.sessionId !== r.sessionId) return;
+  if (!s || s.prompt.sessionId !== heard.sessionId) return;
+  const { embedding, ...rest } = heard;
+  const r: TeachResult = { ...rest, voiceprintId: null };
   s.results = [r, ...s.results].slice(0, KEEP_RESULTS);
   if (r.source === "browser") s.uploadingSince = null;
   // Only progress keeps the session alive (not the TV, not other people).
   if (r.ok || r.source === "browser") touch(userId, s);
   if (r.kind === "sample" && r.ok && r.index === s.prompt.index) {
-    await db.insert(voiceSamples).values({
-      userId,
-      source: r.source,
-      phrase: r.phrase,
-      text: r.text,
-      heardAs: r.heardAs,
-      nameScore: r.nameScore,
-      speakerScore: r.speakerScore,
-      seconds: r.seconds,
-      voiceprintId: r.voiceprintId,
+    const { personId } = s.prompt;
+    r.voiceprintId = await db.transaction(async (tx) => {
+      const voiceprintId = embedding
+        ? await insertVoiceprint(tx, { userId, personId, embedding, seconds: r.seconds })
+        : null;
+      await tx.insert(voiceSamples).values({
+        userId,
+        source: r.source,
+        phrase: r.phrase,
+        text: r.text,
+        heardAs: r.heardAs,
+        nameScore: r.nameScore,
+        speakerScore: r.speakerScore,
+        seconds: r.seconds,
+        voiceprintId,
+      });
+      return voiceprintId;
     });
     await learnAlias(userId, r.heardAs);
     s.taken++;
@@ -235,6 +260,11 @@ async function learnAlias(userId: string, heardAs: string | null): Promise<void>
   const times = seen.filter((r) => r.heardAs && compactName(r.heardAs) === key).length;
   if (!aliasWorthLearning(heardAs, voice, times)) return;
   await updateSettings(userId, { voice: { aliases: [...voice.aliases, heardAs].slice(-20) } });
+}
+
+/** Tests: how many stops are remembered for the grace window. */
+export function rememberedStops(): number {
+  return stoppedAt.size;
 }
 
 /** Tests: forget all sessions. */

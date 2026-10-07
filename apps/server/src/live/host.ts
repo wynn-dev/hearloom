@@ -5,11 +5,11 @@ import type { StreamMeta } from "../ingest/stream-writer";
 import { invalidate } from "../realtime";
 import type { ChildMessage, HostMessage } from "./ipc";
 import { resetActivity, setActivity } from "./state";
-import type { TeachPrompt, TeachResult, VoiceDetection } from "./voice/types";
+import type { TeachHeard, TeachPrompt, VoiceDetection } from "./voice/types";
 
 type BlockClosedHandler = (userId: string, blockId: string) => void;
 type VoiceCommandHandler = (detection: VoiceDetection) => void;
-type TeachHeardHandler = (userId: string, result: TeachResult) => void;
+type TeachHeardHandler = (userId: string, result: TeachHeard) => void;
 
 /**
  * Supervises the live pipeline child process: forwards stored frames, applies state updates,
@@ -87,18 +87,19 @@ export class LivePipelineHost {
     }));
   }
 
-  /** Learn the user's own voice from stored audio (a confirmed voice command). */
+  /**
+   * Embed the user's own voice from stored audio (a confirmed voice command), if it sounds like
+   * them. Nothing is stored: the caller stores the voiceprint with its sample row.
+   */
   learnVoice(
     userId: string,
-    personId: string,
     streamId: string,
     ranges: { startAt: number; endAt: number }[],
-  ): Promise<{ voiceprintId: string; seconds: number }> {
+  ): Promise<{ embedding: number[]; seconds: number }> {
     return this.request((requestId) => ({
       t: "learn_voice",
       requestId,
       userId,
-      personId,
       streamId,
       ranges,
     }));
@@ -226,7 +227,7 @@ export class LivePipelineHost {
         const p = this.pending.get(msg.requestId);
         this.pending.delete(msg.requestId);
         if (!p) return;
-        if (msg.ok) p.resolve({ voiceprintId: msg.voiceprintId, seconds: msg.seconds } as never);
+        if (msg.ok) p.resolve({ embedding: msg.embedding, seconds: msg.seconds } as never);
         else p.reject(new Error(msg.error));
         return;
       }

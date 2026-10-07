@@ -78,3 +78,12 @@ export interface TeachResult {
   /** The sample couldn't be processed (e.g. transcription failed). */
   error?: string;
 }
+
+/**
+ * A teaching result as the live pipeline reports it: with the voice embedding to learn, if any.
+ * The host stores the voiceprint together with the sample row (one transaction), so a voiceprint
+ * never exists without the sample that can remove it.
+ */
+export interface TeachHeard extends Omit<TeachResult, "voiceprintId"> {
+  embedding: number[] | null;
+}
