@@ -24,7 +24,8 @@ export async function createToken(userId: string, name: string) {
 export async function verifyToken(
   header: string | null,
 ): Promise<{ userId: string; id: string } | null> {
-  const token = header?.match(/^Bearer\s+(hl_[A-Za-z0-9_-]{20,})$/)?.[1];
+  // The auth scheme is case-insensitive (RFC 7235).
+  const token = header?.match(/^bearer\s+(hl_[A-Za-z0-9_-]{20,})$/i)?.[1];
   if (!token) return null;
   const [row] = await db
     .select()
