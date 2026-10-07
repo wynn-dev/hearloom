@@ -36,8 +36,17 @@ import {
   speakerName,
 } from "./render";
 
-const { utterances, people, soundEvents, episodes, bookmarks, audioChunks, wearables, blocks } =
-  schema;
+const {
+  utterances,
+  people,
+  soundEvents,
+  episodes,
+  bookmarks,
+  audioChunks,
+  wearables,
+  blocks,
+  notifications,
+} = schema;
 /** Lines per get_episode page. */
 const PAGE_LINES = 400;
 
@@ -119,6 +128,15 @@ function describeOutcome(
   }
   if (n.status === "failed") return `not delivered (${n.statusReason ?? "unknown error"}).`;
   return `${n.status}.`;
+}
+
+/** How the user responded to a notification. */
+function describeResponse(n: { feedback: string | null; replyText: string | null }): string {
+  const parts = [
+    n.feedback === "useful" ? "useful" : n.feedback === "not_useful" ? "not useful" : null,
+    n.replyText ? `replied ${JSON.stringify(n.replyText)}` : null,
+  ].filter(Boolean);
+  return parts.length ? parts.join(", ") : "opened";
 }
 
 /** Build an MCP server scoped to one user and the token's scopes. */
@@ -453,7 +471,7 @@ function buildServer(userId: string, scopes: Scope[]): McpServer {
     "changes_since",
     {
       description:
-        "What is new since a cursor (ISO time): episodes that started, ended or changed, and bookmarks. Returns a new cursor. Cheap; use it in scheduled checks to decide whether to wake up.",
+        "What is new since a cursor (ISO time): episodes that started, ended or changed, bookmarks, and how the user responded to your notifications (opened, useful / not useful, replies). Returns a new cursor. Cheap; use it in scheduled checks to decide whether to wake up.",
       inputSchema: { cursor: iso },
       annotations: readOnly,
     },
@@ -471,6 +489,18 @@ function buildServer(userId: string, scopes: Scope[]): McpServer {
         .select()
         .from(bookmarks)
         .where(and(eq(bookmarks.userId, userId), gte(bookmarks.createdAt, since)));
+      const responses = await db
+        .select()
+        .from(notifications)
+        .where(
+          and(
+            eq(notifications.userId, userId),
+            eq(notifications.source, "agent"),
+            gte(notifications.respondedAt, since),
+          ),
+        )
+        .orderBy(asc(notifications.respondedAt))
+        .limit(100);
       return text(
         [
           `cursor: ${now.toISOString()}`,
@@ -481,6 +511,11 @@ function buildServer(userId: string, scopes: Scope[]): McpServer {
           ),
           `bookmarks: ${marks.length}`,
           ...marks.map((b) => `  ${clock(b.at, tz)}${b.note ? ` ${b.note}` : ""}`),
+          `notification responses: ${responses.length}`,
+          ...responses.map(
+            (n) =>
+              `  ${n.id} ${clock(n.respondedAt!, tz, false)} "${n.title}": ${describeResponse(n)}`,
+          ),
         ].join("\n"),
       );
     },
