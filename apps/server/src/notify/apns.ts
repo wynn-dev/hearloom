@@ -14,8 +14,8 @@ export interface ApnsNotification {
   id: string;
   title: string;
   body: string;
-  category: "HL_NUDGE" | "HL_SYSTEM";
-  threadId?: string | null;
+  /** Notification category registered by the app (apps/mobile/src/lib/push.ts). */
+  category: "HL_SYSTEM";
   deepLink?: string | null;
   interruptionLevel: "passive" | "active" | "time-sensitive";
   collapseKey?: string | null;
@@ -44,7 +44,7 @@ export function buildApnsPayload(n: ApnsNotification): Record<string, unknown> {
     aps: {
       alert: { title: n.title, body },
       ...(n.interruptionLevel === "passive" ? {} : { sound: "default" }),
-      "thread-id": n.threadId ?? n.category,
+      "thread-id": n.category,
       category: n.category,
       "interruption-level": n.interruptionLevel,
     },

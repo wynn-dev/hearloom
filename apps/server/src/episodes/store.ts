@@ -134,47 +134,6 @@ export async function refinedIds(db: Db, userId: string, eps: EpisodeRow[]): Pro
   return out;
 }
 
-/** The ended, refined episodes overlapping [from, to) (`episode.refined` candidates). */
-async function refinedIn(
-  db: Db,
-  userId: string,
-  from: Date,
-  to: Date,
-): Promise<{ id: string; kind: EpisodeRow["kind"] }[]> {
-  // An episode starting exactly where the range ends doesn't overlap it.
-  const eps = (await episodesIn(db, userId, from, to)).filter(
-    (x) => x.endedAt !== null && x.startedAt < to,
-  );
-  const refined = await refinedIds(db, userId, eps);
-  return eps.filter((x) => refined.has(x.id)).map((x) => ({ id: x.id, kind: x.kind }));
-}
-
-/** After a block was refined: the ended episodes it overlaps that are now fully refined. */
-export async function episodesRefinedBy(
-  db: Db,
-  blockId: string,
-): Promise<{ userId: string; episodes: { id: string; kind: EpisodeRow["kind"] }[] } | null> {
-  const [block] = await db.select().from(b).where(eq(b.id, blockId));
-  if (!block?.endedAt) return null;
-  return {
-    userId: block.userId,
-    episodes: await refinedIn(db, block.userId, block.startedAt, block.endedAt),
-  };
-}
-
-/** The refined episodes of a chain (after its speaker keys were consolidated). */
-export async function refinedEpisodesOfChain(
-  db: Db,
-  chainId: string,
-): Promise<{ userId: string; episodes: { id: string; kind: EpisodeRow["kind"] }[] } | null> {
-  const [chain] = await db.select().from(schema.chains).where(eq(schema.chains.id, chainId));
-  if (!chain?.endedAt) return null;
-  return {
-    userId: chain.userId,
-    episodes: await refinedIn(db, chain.userId, chain.startedAt, chain.endedAt),
-  };
-}
-
 export interface EpisodePatch {
   title?: string | null;
   summary?: string | null;

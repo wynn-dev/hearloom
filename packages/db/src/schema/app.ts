@@ -367,7 +367,7 @@ export const bookmarks = pgTable(
   (t) => [index().on(t.userId, t.at)],
 );
 
-/** Every notification Hearloom sends (system alerts, rules, and later the agent). */
+/** Every notification Hearloom sends: system alerts (older rows may come from the agent). */
 export const notifications = pgTable(
   "notifications",
   {
@@ -389,14 +389,9 @@ export const notifications = pgTable(
       .notNull()
       .default("pending"),
     statusReason: text(),
-    metadata: jsonb().$type<Record<string, unknown>>().notNull().default({}),
     sentAt: ts(),
     deliveredAt: ts(),
     openedAt: ts(),
-    feedback: text().$type<"useful" | "not_useful">(),
-    replyText: text(),
-    /** Last time the user opened, rated or replied to it (the agent reads these via changes_since). */
-    respondedAt: ts(),
     createdAt: createdAt(),
   },
   (t) => [index().on(t.userId, t.createdAt)],
@@ -432,7 +427,7 @@ export const userSettings = pgTable("user_settings", {
     .$onUpdate(() => new Date()),
 });
 
-/** Tokens for agents (e.g. a Hermes agent over MCP). Only a SHA-256 hash is stored. */
+/** Tokens for the user's agent (e.g. Hermes over MCP): full access. Only a SHA-256 hash is stored. */
 export const apiTokens = pgTable(
   "api_tokens",
   {
@@ -442,7 +437,6 @@ export const apiTokens = pgTable(
     /** First characters of the token, for recognizing it in the console. */
     prefix: text().notNull(),
     tokenHash: text().notNull(),
-    scopes: text().array().$type<Array<"read" | "notify" | "write">>().notNull(),
     lastUsedAt: ts(),
     revokedAt: ts(),
     createdAt: createdAt(),

@@ -3,7 +3,6 @@ import { schema } from "@hearloom/db";
 import { implement, ORPCError } from "@orpc/server";
 import { and, asc, count, desc, eq, gte, isNull, lt, lte, max, or, sql } from "drizzle-orm";
 import { createToken } from "../agent/tokens";
-import { emitAgentEvent, sendAgentEvent } from "../agent/webhooks";
 import { type AuthSession, getSession } from "../auth";
 import { db } from "../db";
 import {
@@ -19,7 +18,7 @@ import {
 import { chunkUrl } from "../http/media";
 import { isPhoneOnline } from "../ingest/phones";
 import { livePipeline } from "../live/host";
-import { notify, recordFeedback } from "../notify/gateway";
+import { markOpened, notify } from "../notify/gateway";
 import { invalidate } from "../realtime";
 import { getSettings, updateSettings } from "../settings";
 
@@ -569,20 +568,18 @@ export const router = authed.router({
           id: r.id,
           name: r.name,
           prefix: r.prefix,
-          scopes: r.scopes,
           createdAt: r.createdAt,
           lastUsedAt: r.lastUsedAt,
         }));
       }),
       create: authed.agent.tokens.create.handler(async ({ context, input }) => {
-        const { token, row } = await createToken((context as Ctx).userId, input.name, input.scopes);
+        const { token, row } = await createToken((context as Ctx).userId, input.name);
         return {
           token,
           info: {
             id: row.id,
             name: row.name,
             prefix: row.prefix,
-            scopes: row.scopes,
             createdAt: row.createdAt,
             lastUsedAt: row.lastUsedAt,
           },
@@ -596,9 +593,6 @@ export const router = authed.router({
         return { ok: true as const };
       }),
     },
-    testWebhook: authed.agent.testWebhook.handler(({ context }) =>
-      sendAgentEvent((context as Ctx).userId, { type: "test", message: "Hello from Hearloom" }),
-    ),
   },
 
   bookmarks: {
@@ -609,12 +603,6 @@ export const router = authed.router({
         .values({ userId, at: input.at ?? new Date(), source: "web", note: input.note ?? null })
         .returning();
       invalidate(userId, ["timeline"]);
-      emitAgentEvent(userId, {
-        type: "bookmark",
-        at: row!.at.toISOString(),
-        source: "web",
-        note: row!.note,
-      });
       return { id: row!.id, at: row!.at, source: row!.source, note: row!.note };
     }),
   },
@@ -647,19 +635,15 @@ export const router = authed.router({
         sentAt: n.sentAt,
         deliveredAt: n.deliveredAt,
         openedAt: n.openedAt,
-        feedback: n.feedback,
-        replyText: n.replyText,
-        metadata: n.metadata,
       }));
     }),
-    feedback: authed.notifications.feedback.handler(async ({ context, input }) => {
-      await recordFeedback((context as Ctx).userId, input.id, input.action, input.replyText);
+    opened: authed.notifications.opened.handler(async ({ context, input }) => {
+      await markOpened((context as Ctx).userId, input.id);
       return { ok: true as const };
     }),
     sendTest: authed.notifications.sendTest.handler(async ({ context, input }) => {
       const row = await notify({
         userId: (context as Ctx).userId,
-        source: "system",
         category: "test",
         title: input.title ?? "Hearloom test",
         body: input.body ?? "If you can read this, notifications work.",

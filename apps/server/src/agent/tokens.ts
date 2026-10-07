@@ -2,9 +2,6 @@ import { schema } from "@hearloom/db";
 import { and, eq, isNull } from "drizzle-orm";
 import { db } from "../db";
 
-/** read: MCP read tools; notify: send_notification; write: edit episodes (titles, kinds…). */
-export type Scope = "read" | "notify" | "write";
-
 const hash = (token: string) => new Bun.CryptoHasher("sha256").update(token).digest("hex");
 
 /** New random token: `hl_` + 43 base64url chars (256 bits). */
@@ -13,19 +10,20 @@ export function generateToken(): string {
   return `hl_${Buffer.from(bytes).toString("base64url")}`;
 }
 
-export async function createToken(userId: string, name: string, scopes: Scope[]) {
+/** A full-access agent token: every MCP tool (reading, and editing episodes). */
+export async function createToken(userId: string, name: string) {
   const token = generateToken();
   const [row] = await db
     .insert(schema.apiTokens)
-    .values({ userId, name, prefix: token.slice(0, 10), tokenHash: hash(token), scopes })
+    .values({ userId, name, prefix: token.slice(0, 10), tokenHash: hash(token) })
     .returning();
   return { token, row: row! };
 }
 
-/** Resolve `Authorization: Bearer hl_…` to its user and scopes. */
+/** Resolve `Authorization: Bearer hl_…` to its user (null: missing, unknown or revoked). */
 export async function verifyToken(
   header: string | null,
-): Promise<{ userId: string; scopes: Scope[]; id: string } | null> {
+): Promise<{ userId: string; id: string } | null> {
   const token = header?.match(/^Bearer\s+(hl_[A-Za-z0-9_-]{20,})$/)?.[1];
   if (!token) return null;
   const [row] = await db
@@ -41,5 +39,5 @@ export async function verifyToken(
       .where(eq(schema.apiTokens.id, row.id))
       .then(undefined, (err) => console.warn("[agent] token touch failed", err));
   }
-  return { userId: row.userId, scopes: row.scopes, id: row.id };
+  return { userId: row.userId, id: row.id };
 }

@@ -4,10 +4,8 @@ import { env } from "../env";
 import type { StreamMeta } from "../ingest/stream-writer";
 import { invalidate } from "../realtime";
 import type { ChildMessage, HostMessage } from "./ipc";
-import { resetConversationState, setActivity } from "./state";
+import { resetActivity, setActivity } from "./state";
 
-type EpisodeEndedHandler = (userId: string, episodeId: string) => void;
-type CheckpointHandler = (userId: string, episodeId: string, at: number) => void;
 type BlockClosedHandler = (userId: string, blockId: string) => void;
 
 /**
@@ -20,8 +18,6 @@ export class LivePipelineHost {
   private ready = false;
   private backoffMs = 1000;
   private stopped = false;
-  private readonly onEnded = new Set<EpisodeEndedHandler>();
-  private readonly onCheckpoint = new Set<CheckpointHandler>();
   private readonly onBlock = new Set<BlockClosedHandler>();
   private pending = new Map<string, { resolve: (s: number) => void; reject: (e: Error) => void }>();
 
@@ -31,16 +27,6 @@ export class LivePipelineHost {
       return;
     }
     this.spawn();
-  }
-
-  /** An episode ended (live, or rebuilt from backlog). */
-  onEpisodeEnded(fn: EpisodeEndedHandler): void {
-    this.onEnded.add(fn);
-  }
-
-  /** A long episode is still going on (every 15 minutes). */
-  onEpisodeCheckpoint(fn: CheckpointHandler): void {
-    this.onCheckpoint.add(fn);
   }
 
   /** A block of speech is complete (refine it). */
@@ -124,7 +110,7 @@ export class LivePipelineHost {
       onExit: (_proc, code) => {
         this.child = null;
         this.ready = false;
-        resetConversationState();
+        resetActivity();
         for (const p of this.pending.values()) p.reject(new Error("live pipeline restarted"));
         this.pending.clear();
         if (this.stopped) return;
@@ -160,12 +146,6 @@ export class LivePipelineHost {
         if (p) msg.ok ? p.resolve(msg.sampleSeconds) : p.reject(new Error(msg.error));
         return;
       }
-      case "episode_ended":
-        for (const fn of this.onEnded) fn(msg.userId, msg.episodeId);
-        return;
-      case "episode_checkpoint":
-        for (const fn of this.onCheckpoint) fn(msg.userId, msg.episodeId, msg.at);
-        return;
       case "block_closed":
         for (const fn of this.onBlock) fn(msg.userId, msg.blockId);
         return;

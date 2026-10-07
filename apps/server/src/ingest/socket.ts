@@ -11,13 +11,12 @@ import {
   type WearableInfo,
 } from "@hearloom/shared";
 import type { ServerWebSocket } from "bun";
-import { and, desc, eq } from "drizzle-orm";
-import { emitAgentEvent } from "../agent/webhooks";
+import { and, eq } from "drizzle-orm";
 import { db } from "../db";
 import { env } from "../env";
 import { updateLiveState } from "../live/state";
 import { onBattery, onPhoneSocket, onWearableConnection } from "../notify/alerts";
-import { onSocketAck, recordFeedback } from "../notify/gateway";
+import { onSocketAck } from "../notify/gateway";
 import { invalidate } from "../realtime";
 import { getSettings, phoneConfig } from "../settings";
 import { type IngestSocketData, registerPhoneSocket, unregisterPhoneSocket } from "./phones";
@@ -25,7 +24,7 @@ import { dbChunkSink } from "./sink";
 import { SeqGapError, type StreamMeta, StreamWriter } from "./stream-writer";
 
 type Ws = ServerWebSocket<IngestSocketData>;
-const { captureStreams, deviceEvents, phones, wearables, bookmarks, notifications } = schema;
+const { captureStreams, deviceEvents, phones, wearables, bookmarks } = schema;
 
 export const SPOOL_DIR = join(env.DATA_DIR, "spool");
 
@@ -287,6 +286,8 @@ async function onControl(ws: Ws, msg: ClientMessage): Promise<void> {
       return;
     }
     case "event": {
+      // Older app builds still send the removed "acknowledge notification" button action.
+      if (msg.kind === "ack_nudge") return;
       const wearableId = await wearableIdFor(userId, msg.peripheralId);
       if (msg.kind === "battery" && typeof msg.value === "number" && wearableId) {
         // The pendant reports battery every ~5 s; only record changes.
@@ -313,33 +314,12 @@ async function onControl(ws: Ws, msg: ClientMessage): Promise<void> {
         void onBattery(userId, msg.peripheralId, 100, true);
       } else if (msg.kind === "bookmark") {
         await db.insert(bookmarks).values({ userId, at: new Date(msg.at), source: "button" });
-        emitAgentEvent(userId, {
-          type: "bookmark",
-          at: new Date(msg.at).toISOString(),
-          source: "button",
-          note: null,
-        });
       } else if (msg.kind === "muted" || msg.kind === "unmuted") {
         updateLiveState(userId, { muted: msg.kind === "muted" });
-      } else if (msg.kind === "ack_nudge") {
-        await acknowledgeLatestNudge(userId);
       }
       invalidate(userId, ["status", "timeline"]);
       return;
     }
-  }
-}
-
-/** Pendant long-press: mark the most recent nudge (last 30 min) as opened. */
-async function acknowledgeLatestNudge(userId: string): Promise<void> {
-  const [latest] = await db
-    .select({ id: notifications.id, sentAt: notifications.sentAt })
-    .from(notifications)
-    .where(and(eq(notifications.userId, userId), eq(notifications.source, "agent")))
-    .orderBy(desc(notifications.createdAt))
-    .limit(1);
-  if (latest?.sentAt && Date.now() - latest.sentAt.getTime() < 30 * 60_000) {
-    await recordFeedback(userId, latest.id, "opened");
   }
 }
 

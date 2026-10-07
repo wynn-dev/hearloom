@@ -58,7 +58,6 @@ export async function onWearableConnection(
     if (!(await hasOpenStream(userId, phoneId))) return;
     await notify({
       userId,
-      source: "system",
       category: "capture",
       title: "Pendant disconnected",
       body: `Hearloom hasn't heard your pendant for ${alerts.disconnectedAfterMin} minutes. Check that it's charged and nearby.`,
@@ -80,7 +79,6 @@ export async function onPhoneSocket(
     if (isPhoneOnline(phoneId) || !(await hasOpenStream(userId, phoneId))) return;
     await notify({
       userId,
-      source: "system",
       category: "capture",
       title: "Hearloom can't reach your phone",
       body: "Recording may have stopped. Open Hearloom to resume — audio captured offline will upload automatically.",
@@ -106,7 +104,6 @@ export async function onBattery(
     lowBatteryAlerted.add(key);
     await notify({
       userId,
-      source: "system",
       category: "battery",
       title: `Pendant battery at ${level}%`,
       body: "Charge it soon to keep recording.",

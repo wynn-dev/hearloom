@@ -1,11 +1,10 @@
 import { readFileSync } from "node:fs";
 import { schema } from "@hearloom/db";
-import type { HapticPattern, NotificationSource } from "@hearloom/shared";
-import { and, eq, gte, inArray, ne, sql } from "drizzle-orm";
+import type { HapticPattern } from "@hearloom/shared";
+import { and, eq } from "drizzle-orm";
 import { db } from "../db";
 import { env } from "../env";
 import { isPhoneOnline, sendToPhone } from "../ingest/phones";
-import { liveState } from "../live/state";
 import { invalidate } from "../realtime";
 import { getSettings } from "../settings";
 import { ApnsClient, type ApnsNotification } from "./apns";
@@ -14,9 +13,9 @@ import { decide, type InterruptionLevel } from "./policy";
 const { notifications, notificationDeliveries, phones } = schema;
 type NotificationRow = typeof notifications.$inferSelect;
 
+/** A system alert (capture health, the test button). */
 export interface NotifyInput {
   userId: string;
-  source: NotificationSource;
   category: string;
   title: string;
   body: string;
@@ -25,7 +24,6 @@ export interface NotifyInput {
   collapseKey?: string;
   /** Buzz the pendant. Defaults to true for time-sensitive; never for notifications delivered silently. */
   haptic?: boolean;
-  metadata?: Record<string, unknown>;
 }
 
 const SOCKET_ACK_TIMEOUT_MS = 4000;
@@ -76,22 +74,13 @@ function waitForAck(notificationId: string, phoneId: string): Promise<boolean> {
 export async function notify(input: NotifyInput): Promise<NotificationRow> {
   const settings = await getSettings(input.userId);
   const requested = input.interruptionLevel ?? "active";
-  const decision = decide({
-    settings,
-    source: input.source,
-    level: requested,
-    now: new Date(),
-    ...(input.source === "system"
-      ? { sentLastHour: 0, audibleLastHour: 0 }
-      : await sentInLastHour(input.userId)),
-    inConversation: liveState(input.userId).inConversation,
-  });
+  const decision = decide(settings, requested, new Date());
   const level = decision.action === "send" ? decision.level : requested;
   const [row] = await db
     .insert(notifications)
     .values({
       userId: input.userId,
-      source: input.source,
+      source: "system",
       category: input.category,
       title: input.title.slice(0, 200),
       body: input.body.slice(0, 4000),
@@ -102,7 +91,6 @@ export async function notify(input: NotifyInput): Promise<NotificationRow> {
       haptic: level !== "passive" && (input.haptic ?? level === "time-sensitive"),
       status: decision.action === "refuse" ? "suppressed" : "pending",
       statusReason: decision.action === "refuse" ? decision.reason : decision.quietedBy,
-      metadata: input.metadata ?? {},
     })
     .returning();
   if (!row) throw new Error("failed to create notification");
@@ -110,27 +98,6 @@ export async function notify(input: NotifyInput): Promise<NotificationRow> {
     decision.action === "refuse" ? row : await deliver(row, settings.notifications.pendantHaptic);
   invalidate(row.userId, ["notifications"]);
   return result;
-}
-
-/** Non-system notifications sent in the last hour, and how many of them made a sound. */
-async function sentInLastHour(
-  userId: string,
-): Promise<{ sentLastHour: number; audibleLastHour: number }> {
-  const [r] = await db
-    .select({
-      sentLastHour: sql<number>`count(*)::int`,
-      audibleLastHour: sql<number>`(count(*) filter (where ${notifications.interruptionLevel} = 'active'))::int`,
-    })
-    .from(notifications)
-    .where(
-      and(
-        eq(notifications.userId, userId),
-        ne(notifications.source, "system"),
-        inArray(notifications.status, ["sent", "delivered"]),
-        gte(notifications.sentAt, new Date(Date.now() - 3600_000)),
-      ),
-    );
-  return r ?? { sentLastHour: 0, audibleLastHour: 0 };
 }
 
 async function setStatus(
@@ -182,7 +149,7 @@ async function deliver(row: NotificationRow, pendantHaptic: boolean): Promise<No
     id: row.id,
     title: row.title,
     body: row.body,
-    category: row.source === "system" ? "HL_SYSTEM" : "HL_NUDGE",
+    category: "HL_SYSTEM",
     deepLink: row.deepLink,
     interruptionLevel: row.interruptionLevel,
     collapseKey: row.collapseKey,
@@ -261,23 +228,11 @@ async function deliver(row: NotificationRow, pendantHaptic: boolean): Promise<No
   return setStatus(row.id, { status: "failed", statusReason: "all_channels_failed" });
 }
 
-/** Record the user's response to a notification; the agent reads these via changes_since. */
-export async function recordFeedback(
-  userId: string,
-  id: string,
-  action: "opened" | "useful" | "not_useful" | "reply",
-  replyText?: string,
-): Promise<void> {
-  const now = new Date();
-  const patch: Partial<typeof notifications.$inferInsert> =
-    action === "opened"
-      ? { openedAt: now, respondedAt: now }
-      : action === "reply"
-        ? { replyText: replyText ?? "", openedAt: now, respondedAt: now }
-        : { feedback: action, respondedAt: now };
+/** The user opened a notification (tapped it on the phone). */
+export async function markOpened(userId: string, id: string): Promise<void> {
   await db
     .update(notifications)
-    .set(patch)
+    .set({ openedAt: new Date() })
     .where(and(eq(notifications.id, id), eq(notifications.userId, userId)));
   invalidate(userId, ["notifications"]);
 }

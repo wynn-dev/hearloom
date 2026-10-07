@@ -27,20 +27,16 @@ export interface Activity {
 export interface EpisodeEvents {
   /** The user's current episode started, changed kind, or ended (null). */
   activity(userId: string, activity: Activity | null): void;
-  /** An episode ended: live, or rebuilt from backlog. */
-  ended(userId: string, episodeId: string): void;
+  /** An episode ended: live, or rebuilt from backlog (only tests listen today). */
+  ended?(userId: string, episodeId: string): void;
   /** Episodes changed: refresh what clients show. */
   changed(userId: string): void;
-  /** An open episode has been going on for another CHECKPOINT_MS (long talks, TV evenings). */
-  checkpoint(userId: string, episodeId: string, at: number): void;
 }
 
 /** Utterances are final a little after they're spoken: classify a minute once it's this old. */
 const LAG_MS = 20_000;
 /** Speech and context kept per user for classifying the open episode. */
 const KEEP_MS = 10 * MINUTE;
-/** A long open episode reports progress this often (`episode.checkpoint`). */
-export const CHECKPOINT_MS = 15 * MINUTE;
 /** A sound state (music, traffic…) this long without speech becomes a `sound` episode. */
 export const SOUND_EPISODE_MS = 15 * MINUTE;
 
@@ -56,8 +52,6 @@ interface Open {
   segmenter: Segmenter;
   /** Last minute boundary classified. */
   lastStep: number;
-  /** Checkpoints reported so far. */
-  checkpoints: number;
 }
 
 interface UserState {
@@ -118,7 +112,7 @@ export class EpisodeTracker {
       })
       .where(isNull(e.endedAt))
       .returning({ id: e.id, userId: e.userId });
-    for (const r of rows) this.events.ended(r.userId, r.id);
+    for (const r of rows) this.events.ended?.(r.userId, r.id);
     return rows.length;
   }
 
@@ -169,7 +163,6 @@ export class EpisodeTracker {
         kindLocked: false,
         segmenter: new Segmenter(at),
         lastStep: Math.floor(at / MINUTE) * MINUTE,
-        checkpoints: 0,
       };
       this.events.activity(userId, this.current(userId));
       this.events.changed(userId);
@@ -265,7 +258,7 @@ export class EpisodeTracker {
         created.push(...rows.map((r) => r.id));
       }
     }
-    for (const id of created) this.events.ended(userId, id);
+    for (const id of created) this.events.ended?.(userId, id);
     this.events.changed(userId);
   }
 
@@ -340,11 +333,6 @@ export class EpisodeTracker {
       await this.step(userId, u, m);
       if (!u.open) return;
       u.open.lastStep = m;
-      const due = Math.floor((m - u.open.startedAt) / CHECKPOINT_MS);
-      if (due > u.open.checkpoints) {
-        u.open.checkpoints = due;
-        this.events.checkpoint(userId, u.open.id, m);
-      }
     }
   }
 
@@ -391,7 +379,6 @@ export class EpisodeTracker {
       kindLocked: false,
       segmenter: open.segmenter,
       lastStep: open.lastStep,
-      checkpoints: 0,
     };
     this.events.activity(userId, this.current(userId));
     this.events.changed(userId);
@@ -406,7 +393,7 @@ export class EpisodeTracker {
       .update(schema.episodes)
       .set({ endedAt: new Date(Math.max(at, open.startedAt)) })
       .where(eq(schema.episodes.id, open.id));
-    this.events.ended(userId, open.id);
+    this.events.ended?.(userId, open.id);
     if (idle) this.events.activity(userId, null);
     this.events.changed(userId);
   }
@@ -494,7 +481,7 @@ export class EpisodeTracker {
           })),
         )
         .returning({ id: e.id });
-      for (const row of rows) this.events.ended(userId, row.id);
+      for (const row of rows) this.events.ended?.(userId, row.id);
       this.events.changed(userId);
     });
   }
@@ -597,7 +584,7 @@ export class EpisodeTracker {
           );
         return fresh;
       });
-      for (const id of created) this.events.ended(userId, id);
+      for (const id of created) this.events.ended?.(userId, id);
       this.events.changed(userId);
     });
   }

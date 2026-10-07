@@ -1,10 +1,8 @@
 import type { RealtimeEvent } from "@hearloom/api";
 import type { ServerWebSocket } from "bun";
-import { emitAgentEvent } from "./agent/webhooks";
 import { getSession } from "./auth";
 import { db, sql } from "./db";
 import { env } from "./env";
-import { getEpisode, refinedIds } from "./episodes/store";
 import { relayChanges } from "./events";
 import { app } from "./http/app";
 import type { IngestSocketData } from "./ingest/phones";
@@ -81,49 +79,6 @@ setFrameListener((meta, frames) => livePipeline.push(meta, frames));
 livePipeline.onBlockClosed((_userId, blockId) => {
   if (env.REFINE === "on")
     void enqueueRefine(blockId).catch((err) => console.error("[jobs] enqueue failed", err));
-});
-// Tell the agent what just happened (filtered by kind in its settings).
-livePipeline.onEpisodeEnded((userId, episodeId) => {
-  void getEpisode(db, userId, episodeId)
-    .then((ep) => {
-      if (!ep?.endedAt) return;
-      emitAgentEvent(userId, {
-        type: "episode.ended",
-        episodeId,
-        kind: ep.kind,
-        title: ep.title,
-        startedAt: ep.startedAt.toISOString(),
-        endedAt: ep.endedAt.toISOString(),
-      });
-      // Its blocks may all be refined already (the worker only reports when it refines one).
-      return refinedIds(db, userId, [ep]).then((refined) => {
-        if (refined.has(episodeId)) {
-          emitAgentEvent(userId, {
-            type: "episode.refined",
-            episodeId,
-            kind: ep.kind,
-            again: false,
-          });
-        }
-      });
-    })
-    .catch((err) => console.error("[agent] episode.ended failed", err));
-});
-// Long episodes (a lecture, an evening of TV) also report progress, if the agent wants that.
-livePipeline.onEpisodeCheckpoint((userId, episodeId, at) => {
-  void getEpisode(db, userId, episodeId)
-    .then((ep) => {
-      if (!ep || ep.endedAt) return;
-      emitAgentEvent(userId, {
-        type: "episode.checkpoint",
-        episodeId,
-        kind: ep.kind,
-        title: ep.title,
-        startedAt: ep.startedAt.toISOString(),
-        at: new Date(at).toISOString(),
-      });
-    })
-    .catch((err) => console.error("[agent] episode.checkpoint failed", err));
 });
 await relayChanges(sql);
 console.log(`[hearloom] listening on http://${env.HOST}:${env.PORT} (public: ${env.PUBLIC_URL})`);

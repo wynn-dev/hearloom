@@ -132,6 +132,7 @@ export const timelineSchema = z.object({
 
 export const notificationSchema = z.object({
   id: z.uuid(),
+  /** `agent`: older rows, from before agent notifications were removed. */
   source: z.enum(["system", "agent"]),
   category: z.string(),
   title: z.string(),
@@ -144,9 +145,6 @@ export const notificationSchema = z.object({
   sentAt: z.date().nullable(),
   deliveredAt: z.date().nullable(),
   openedAt: z.date().nullable(),
-  feedback: z.enum(["useful", "not_useful"]).nullable(),
-  replyText: z.string().nullable(),
-  metadata: z.record(z.string(), z.unknown()),
 });
 
 export const personSchema = z.object({
@@ -162,7 +160,6 @@ export const apiTokenSchema = z.object({
   id: z.uuid(),
   name: z.string(),
   prefix: z.string(),
-  scopes: z.array(z.enum(["read", "notify", "write"])),
   createdAt: z.date(),
   lastUsedAt: z.date().nullable(),
 });
@@ -272,21 +269,12 @@ export const contract = {
   agent: {
     tokens: {
       list: oc.output(z.array(apiTokenSchema)),
-      /** Returns the token once; only its hash is stored. */
+      /** A full-access token, returned once; only its hash is stored. */
       create: oc
-        .input(
-          z.object({
-            name: z.string().trim().min(1).max(80),
-            scopes: z.array(z.enum(["read", "notify", "write"])).min(1),
-          }),
-        )
+        .input(z.object({ name: z.string().trim().min(1).max(80) }))
         .output(z.object({ token: z.string(), info: apiTokenSchema })),
       revoke: oc.input(z.object({ id: z.uuid() })).output(ok),
     },
-    /** Send a test event to the configured webhook. */
-    testWebhook: oc.output(
-      z.object({ ok: z.boolean(), status: z.number(), error: z.string().nullable() }),
-    ),
   },
   bookmarks: {
     create: oc
@@ -302,15 +290,8 @@ export const contract = {
         }),
       )
       .output(z.array(notificationSchema)),
-    feedback: oc
-      .input(
-        z.object({
-          id: z.uuid(),
-          action: z.enum(["opened", "useful", "not_useful", "reply"]),
-          replyText: z.string().max(2000).optional(),
-        }),
-      )
-      .output(ok),
+    /** The user tapped a notification on the phone. */
+    opened: oc.input(z.object({ id: z.uuid() })).output(ok),
     sendTest: oc
       .input(
         z.object({

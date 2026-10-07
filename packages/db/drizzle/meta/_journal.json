@@ -50,6 +50,13 @@
       "when": 1791380441916,
       "tag": "0006_notifications_simplify",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1791382584241,
+      "tag": "0007_agent_debloat",
+      "breakpoints": true
     }
   ]
 }
