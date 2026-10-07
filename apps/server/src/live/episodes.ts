@@ -156,6 +156,7 @@ export class EpisodeTracker {
         );
         await this.end(userId, u, Math.min(last, at), false);
       }
+      await this.trimSound(userId, at, Number.POSITIVE_INFINITY);
       const [row] = await this.db
         .insert(schema.episodes)
         .values({ userId, startedAt: new Date(at) })
@@ -411,6 +412,51 @@ export class EpisodeTracker {
   }
 
   /**
+   * Make room for speech in [from, to): rule-made sound episodes overlapping it keep only their
+   * parts outside it that are still long enough (the first such part keeps the id).
+   */
+  private async trimSound(userId: string, from: number, to: number): Promise<void> {
+    const e = schema.episodes;
+    const sounds = await this.db
+      .select()
+      .from(e)
+      .where(
+        and(
+          eq(e.userId, userId),
+          eq(e.kind, "sound"),
+          eq(e.kindSource, "rule"),
+          eq(e.boundarySource, "rule"),
+          eq(e.textSource, "rule"),
+          Number.isFinite(to) ? lt(e.startedAt, new Date(to)) : undefined,
+          gt(e.endedAt, new Date(from)),
+        ),
+      );
+    for (const s of sounds) {
+      const parts = [
+        [s.startedAt.getTime(), Math.min(from, s.endedAt!.getTime())],
+        [Math.max(to, s.startedAt.getTime()), s.endedAt!.getTime()],
+      ].filter(([a, b]) => b! - a! >= SOUND_EPISODE_MS) as [number, number][];
+      const [keep, ...more] = parts;
+      if (!keep) {
+        await this.db.delete(e).where(eq(e.id, s.id));
+        continue;
+      }
+      await this.db
+        .update(e)
+        .set({ startedAt: new Date(keep[0]), endedAt: new Date(keep[1]) })
+        .where(eq(e.id, s.id));
+      for (const [a, b] of more) {
+        await this.db.insert(e).values({
+          userId,
+          startedAt: new Date(a),
+          endedAt: new Date(b),
+          kind: "sound",
+        });
+      }
+    }
+  }
+
+  /**
    * A long sound state ended (music, a commute…): the parts of [from, to] no episode covers, if
    * long enough, become `sound` episodes.
    */
@@ -473,6 +519,8 @@ export class EpisodeTracker {
       const self = await this.selfKnown(userId);
       const openId = this.users.get(userId)?.open?.id;
       const e = schema.episodes;
+      // Speech wins over a sound episode made before it was transcribed (backlog).
+      await this.trimSound(userId, from, to);
 
       const created = await this.db.transaction(async (tx) => {
         // Locked: an edit landing meanwhile waits, then sees the result.

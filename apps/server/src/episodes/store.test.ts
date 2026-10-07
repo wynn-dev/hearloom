@@ -185,6 +185,16 @@ test("voices that speak in a media episode are media voices of their chain", asy
     line(431, "S4"), // the TV voice goes on during the conversation
     line(432, "S1"),
     line(433, null, true),
+    // The user, not recognized in some lines while the TV was on: never a media voice.
+    line(406, "S2"),
+    line(407, "S2"),
+    line(434, "S2", true),
+    // Someone who mostly talked in the conversation, and a bit over the TV.
+    line(408, "S3"),
+    line(409, "S3"),
+    line(435, "S3"),
+    line(436, "S3"),
+    line(437, "S3"),
   ]);
   expect([...(await mediaVoices(db, userId, [chain!.id]))]).toEqual([`${chain!.id}:S4`]);
   expect((await mediaVoices(db, userId, [])).size).toBe(0);

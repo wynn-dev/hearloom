@@ -435,7 +435,8 @@ export const router = authed.router({
           text: u.text,
           lang: u.lang,
           source: u.source,
-          mediaVoice: !!chainId && media.has(`${chainId}:${u.speakerKey}`),
+          mediaVoice:
+            !u.isWearer && !u.personId && !!chainId && media.has(`${chainId}:${u.speakerKey}`),
         })),
         soundEvents: soundRows.map((s) => ({
           id: s.id,
