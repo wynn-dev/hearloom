@@ -383,12 +383,9 @@ export const notifications = pgTable(
       .notNull()
       .default("active"),
     collapseKey: text(),
-    threadId: text(),
-    deliverWhen: text().$type<"now" | "after_conversation">().notNull().default("now"),
-    scheduledFor: ts(),
     haptic: boolean().notNull().default(false),
     status: text()
-      .$type<"pending" | "held" | "sent" | "delivered" | "failed" | "suppressed">()
+      .$type<"pending" | "sent" | "delivered" | "failed" | "suppressed">()
       .notNull()
       .default("pending"),
     statusReason: text(),
@@ -396,11 +393,13 @@ export const notifications = pgTable(
     sentAt: ts(),
     deliveredAt: ts(),
     openedAt: ts(),
-    feedback: text().$type<"useful" | "not_useful" | "snoozed">(),
+    feedback: text().$type<"useful" | "not_useful">(),
     replyText: text(),
+    /** Last time the user opened, rated or replied to it (the agent reads these via changes_since). */
+    respondedAt: ts(),
     createdAt: createdAt(),
   },
-  (t) => [index().on(t.userId, t.createdAt), index().on(t.status, t.scheduledFor)],
+  (t) => [index().on(t.userId, t.createdAt)],
 );
 
 export const notificationDeliveries = pgTable(
