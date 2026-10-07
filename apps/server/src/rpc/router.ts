@@ -4,8 +4,10 @@ import { voiceRenameReset } from "@hearloom/shared";
 import { implement, ORPCError } from "@orpc/server";
 import { and, asc, count, desc, eq, gte, isNull, lt, lte, max, or, sql } from "drizzle-orm";
 import { createToken } from "../agent/tokens";
+import { generateWebhookSecret } from "../agent/webhooks";
 import { type AuthSession, getSession } from "../auth";
 import { db } from "../db";
+import { env } from "../env";
 import {
   EpisodeEditError,
   type EpisodeRow,
@@ -187,6 +189,12 @@ async function teachCall(fn: () => unknown): Promise<void> {
     if (err instanceof TeachError) throw new ORPCError("BAD_REQUEST", { message: err.message });
     throw err;
   }
+}
+
+/** `PUBLIC_URL` (how phones, browsers and agents reach this server) and the MCP endpoint under it. */
+export function agentConfig(publicUrl: string) {
+  const base = publicUrl.replace(/\/+$/, "");
+  return { publicUrl: base, mcpUrl: `${base}/mcp` };
 }
 
 export const router = authed.router({
@@ -624,6 +632,14 @@ export const router = authed.router({
         return { ok: true as const };
       }),
     },
+    config: authed.agent.config.handler(() => agentConfig(env.PUBLIC_URL)),
+    generateWebhookSecret: authed.agent.generateWebhookSecret.handler(async ({ context }) => {
+      const secret = generateWebhookSecret();
+      const settings = await updateSettings((context as Ctx).userId, {
+        agent: { webhookSecret: secret },
+      });
+      return { secret, settings };
+    }),
   },
 
   voice: {

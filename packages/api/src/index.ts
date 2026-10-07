@@ -341,6 +341,13 @@ export const contract = {
         .output(z.object({ token: z.string(), info: apiTokenSchema })),
       revoke: oc.input(z.object({ id: z.uuid() })).output(ok),
     },
+    /** What an agent needs to reach this server: `PUBLIC_URL` and the MCP endpoint under it. */
+    config: oc.output(z.object({ publicUrl: z.string(), mcpUrl: z.string() })),
+    /**
+     * Generate a new webhook secret (`whsec_` + base64 of 32 random bytes) and save it as
+     * `agent.webhookSecret`. It replaces the old one, so the agent's copy must be updated.
+     */
+    generateWebhookSecret: oc.output(z.object({ secret: z.string(), settings: settingsSchema })),
   },
   voice: {
     status: oc.output(voiceStatusSchema),
