@@ -7,7 +7,9 @@
  * Runs as the bun test preload (apps/server/bunfig.toml) and, because bun only reads bunfig.toml
  * from the current directory, also as the first import of every test file that uses a database.
  */
-const LOCAL = new Set(["localhost", "127.0.0.1", "[::1]"]);
+import { createDb } from "@hearloom/db";
+
+const LOCAL = new Set(["localhost", "127.0.0.1", "::1"]);
 
 function refuse(why: string): never {
   console.error(
@@ -20,14 +22,18 @@ function refuse(why: string): never {
 const url = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL;
 if (url) {
   if (!process.env.TEST_DATABASE_URL) {
-    let host: string;
+    // Ask the driver which hosts it would use (no connection is made): parsing the URL separately
+    // can disagree with it (PGHOST, host lists, "@" in credentials).
+    let hosts: string[];
     try {
-      // postgres.js falls back to PGHOST for an empty host.
-      host = new URL(url).hostname || process.env.PGHOST || "localhost";
+      hosts = createDb(url, { max: 1 }).client.options.host;
     } catch {
-      refuse("DATABASE_URL is not a URL this check understands");
+      refuse("DATABASE_URL could not be parsed");
     }
-    if (!LOCAL.has(host)) refuse(`DATABASE_URL points at ${host}`);
+    const remote = hosts.filter((h) => !LOCAL.has(h));
+    if (hosts.length === 0 || remote.length > 0) {
+      refuse(`DATABASE_URL points at ${remote.join(", ") || "no host"}`);
+    }
   }
   process.env.DATABASE_URL = url;
 }
