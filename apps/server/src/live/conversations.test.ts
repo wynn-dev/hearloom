@@ -1,9 +1,10 @@
+import "../test-db";
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createDb, schema } from "@hearloom/db";
 import { asc, eq } from "drizzle-orm";
 import { CONVERSATION_GAP_MS, ConversationTracker } from "./conversations";
 
-// Runs against DATABASE_URL with a throwaway user (rows cascade on delete).
+// Runs against the test database (see test-db.ts) with a throwaway user (rows cascade on delete).
 const { db, client } = createDb(process.env.DATABASE_URL, { max: 2 });
 const userId = `test-${crypto.randomUUID()}`;
 const events: string[] = [];
