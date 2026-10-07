@@ -162,6 +162,7 @@ final class OmiBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
   // MARK: commands (call on `queue`)
 
   func setTarget(_ id: UUID?) {
+    if id != targetId { notReadyCount = 0 } // a new pendant starts without backoff
     targetId = id
     if id == nil {
       if let p = peripheral { central.cancelPeripheralConnection(p) }
@@ -324,7 +325,9 @@ final class OmiBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
 
   func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
     Log.info("ble: disconnected (\(error?.localizedDescription ?? "clean"))")
-    connectionLost(peripheral, error: error)
+    // Already handled if Bluetooth went away first (centralManagerDidUpdateState).
+    if announcedReady || discovering { connectionLost(peripheral, error: error) }
+    guard central.state == .poweredOn else { return } // poweredOn reconnects via connectTarget
     if targetId == peripheral.identifier {
       state = .connecting
       central.connect(peripheral, options: nil)
