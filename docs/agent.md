@@ -68,6 +68,29 @@ mcp_servers:
       Authorization: "Bearer ${HEARLOOM_MCP_TOKEN}"
 ```
 
+For voice commands, also turn on Hermes's webhook platform (`WEBHOOK_ENABLED=true` and
+`TELEGRAM_HOME_CHANNEL` in `~/.hermes/.env`) and add a route for them:
+
+```yaml
+platforms:
+  webhook:
+    enabled: true
+    extra:
+      port: 8644
+      routes:
+        hearloom-voice:
+          events: ["voice.command"]
+          secret: "<same as Hearloom → Agent → Webhook>"
+          prompt: "Voice command from the user's pendant (speech-to-text): <<<{command}>>> …"
+          deliver: telegram          # no chat_id → home channel
+          mirror_to_session: true
+          toolsets: ["hermes-webhook", "mcp-hearloom"]
+```
+
+Then set the console's webhook URL to `http://<hermes-host>:8644/webhooks/hearloom-voice` and press
+**Voice → Send test command**. The full prompt and the reasoning behind each field are in
+[voice-commands.md](voice-commands.md#hermes-setup).
+
 ## Security
 
 Transcripts are **untrusted input** — anyone near the pendant (or a TV) can say "ignore previous
