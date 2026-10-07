@@ -1,3 +1,4 @@
+import "../test-db";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createDb, schema } from "@hearloom/db";
 import { SPEAKER_MODEL_ID } from "@hearloom/inference";
@@ -9,6 +10,8 @@ import {
   type ClusterFacts,
   consolidate,
   finishChain,
+  type Line,
+  mergeLines,
   type RefineDeps,
   refineBlock,
   windows,
@@ -18,6 +21,91 @@ test("long blocks are refined in windows", () => {
   const at = (h: number) => new Date(Date.UTC(2026, 9, 6, 0, 0) + h * 3600_000);
   const rows = [0, 1, 2.5, 3.5, 4, 7.2].map((h) => ({ startAt: at(h), endAt: at(h + 0.1) }));
   expect(windows(rows, 3 * 3600_000).map((w) => w.length)).toEqual([3, 2, 1]);
+});
+
+describe("mergeLines", () => {
+  const line = (
+    startAt: number,
+    endAt: number,
+    text: string,
+    speaker: string | null,
+    lang = "en",
+  ): Line => ({
+    startAt,
+    endAt,
+    text,
+    lang,
+    speaker,
+    confidence: 0.9,
+    model: "rt",
+  });
+
+  test("joins one speaker's fragments, not other speakers' or across long pauses", () => {
+    const out = mergeLines([
+      line(0, 2000, "Um,", "a"),
+      line(2500, 4000, "so.", "a"),
+      line(4200, 5000, "Recursion.", "a"),
+      line(5500, 6000, "Yes.", "b"),
+      line(6200, 7000, "Right.", "a"),
+      line(9000, 10_000, "Later.", "a"), // 2 s pause
+    ]);
+    expect(out.map((l) => [l.text, l.speaker, l.startAt, l.endAt])).toEqual([
+      ["Um, so. Recursion.", "a", 0, 5000],
+      ["Yes.", "b", 5500, 6000],
+      ["Right.", "a", 6200, 7000],
+      ["Later.", "a", 9000, 10_000],
+    ]);
+  });
+
+  test("short lines without a speaker join a neighbor; longer ones and other languages stay", () => {
+    const out = mergeLines([
+      line(0, 300, "Um,", null),
+      line(500, 3000, "well, the options.", "a"),
+      line(3500, 3700, "Yes.", null),
+      line(4000, 6000, "It did.", null), // no speaker, not short: may be someone else
+      line(6500, 7000, "You're right.", null),
+      line(7500, 9000, "Ja, dat klopt.", "a", "nl"),
+      line(9500, 11_000, "Okay.", "a"),
+    ]);
+    expect(out.map((l) => l.text)).toEqual([
+      "Um, well, the options. Yes.",
+      "It did.",
+      "You're right.",
+      "Ja, dat klopt.",
+      "Okay.",
+    ]);
+    expect(out[0]!.speaker).toBe("a");
+  });
+
+  test("lines whose own voice checks disagree stay apart", () => {
+    const alice = { personId: "alice", isSelf: false };
+    const bob = { personId: "bob", isSelf: false };
+    const out = mergeLines([
+      { ...line(0, 2000, "a1", "a"), own: alice },
+      { ...line(2500, 4000, "a2", "a"), own: alice },
+      { ...line(4500, 6000, "b1", "a"), own: bob },
+      { ...line(6500, 8000, "c1", "a"), own: null },
+      { ...line(8500, 8800, "Um,", null) },
+      { ...line(9000, 11_000, "c2", "a"), own: null },
+    ]);
+    expect(out.map((l) => [l.text, l.own?.personId ?? l.own])).toEqual([
+      ["a1 a2", "alice"],
+      ["b1", "bob"],
+      ["c1 Um, c2", null],
+    ]);
+  });
+
+  test("stops at the length cap and keeps a text-weighted confidence", () => {
+    const words = Array.from({ length: 40 }, (_, i) => line(i * 1000, i * 1000 + 900, "w", "a"));
+    const out = mergeLines(words);
+    expect(out.every((l) => l.endAt - l.startAt <= 30_000)).toBe(true);
+    expect(out).toHaveLength(2);
+    const [m] = mergeLines([
+      { ...line(0, 1000, "aaa", "a"), confidence: 1 },
+      { ...line(1000, 2000, "b", "a"), confidence: 0 },
+    ]);
+    expect(m!.confidence).toBeCloseTo(0.75);
+  });
 });
 
 test("timeline lines are ordered by time across days, with day headers", () => {
@@ -352,6 +440,19 @@ describe("refining the blocks of a chain", () => {
     expect(await refineBlock(deps(), blockA)).toMatchObject({ refined: true, replaced: 4 });
   });
 
+  test("a block the diarizer finds no speech in keeps its live rows and is refined", async () => {
+    const { blockA } = await chain();
+    const r = await refineBlock({ ...deps(), diarizer: { diarize: async () => [] } }, blockA);
+    expect(r).toMatchObject({ refined: true, replaced: 0 });
+    const rows = await current(blockA);
+    expect(rows.map((u) => [u.source, u.speakerKey])).toEqual([
+      ["live", "S1"],
+      ["live", "S2"],
+      ["live", "S1"],
+      ["live", "S2"],
+    ]);
+  });
+
   test("without voice embeddings, the shared context alone carries keys and names over", async () => {
     const { blockA, blockB } = await chain();
     await refineBlock(deps(), blockA);
@@ -360,5 +461,128 @@ describe("refining the blocks of a chain", () => {
     expect(rowsB.map((u) => u.speakerKey)).toEqual(["S2", "S1", "S7"]);
     // Alice was named in block A; her key carries the name into block B.
     expect(rowsB.map((u) => u.personId)).toEqual([null, aliceId, null]);
+  });
+
+  test("speech only in the previous block's context leaves the block's live rows", async () => {
+    const { blockA, blockB } = await chain();
+    await refineBlock(deps(), blockA);
+    const silentFrom = t0 + 10 * MIN;
+    const r = await refineBlock(
+      {
+        ...deps(),
+        loadPieces: async (stream, from, to) => {
+          const pieces = await deps().loadPieces!(stream, from, to);
+          for (const p of pieces) {
+            for (let i = 0; i < p.samples.length; i++) {
+              if (p.startAt + i / 16 >= silentFrom) p.samples[i] = 0;
+            }
+          }
+          return pieces;
+        },
+      },
+      blockB,
+    );
+    expect(r).toMatchObject({ refined: true, replaced: 0 });
+    const rows = await current(blockB);
+    expect(rows.map((u) => [u.source, u.speakerKey])).toEqual([
+      ["live", "S5"],
+      ["live", "S6"],
+      ["live", "S7"],
+    ]);
+  });
+
+  test("one speaker's fragments are joined, but not two voices the diarizer lumped together", async () => {
+    // Runs last: Bob's voiceprint (voice 2) would name voice 2 in the tests above.
+    const [bob] = await db
+      .insert(schema.people)
+      .values({ userId, name: "Bob" })
+      .returning({ id: schema.people.id });
+    await db.insert(schema.voiceprints).values({
+      userId,
+      personId: bob!.id,
+      model: SPEAKER_MODEL_ID,
+      embedding: Array.from(voice(2)),
+      sampleSeconds: 10,
+      source: "enrollment",
+    });
+    /** One block, refined with every line in a single diarizer cluster. */
+    const refineOneCluster = async (
+      lines: { from: number; to: number; voice: number; text: string }[],
+    ) => {
+      const from = lines[0]!.from;
+      const to = lines[lines.length - 1]!.to;
+      const [conv] = await db
+        .insert(schema.chains)
+        .values({ userId, startedAt: new Date(from), endedAt: new Date(to), status: "closed" })
+        .returning({ id: schema.chains.id });
+      const [block] = await db
+        .insert(schema.blocks)
+        .values({
+          userId,
+          chainId: conv!.id,
+          startedAt: new Date(from),
+          endedAt: new Date(to),
+          status: "closed",
+        })
+        .returning({ id: schema.blocks.id });
+      await db.insert(schema.utterances).values(
+        lines.map((l) => ({
+          userId,
+          blockId: block!.id,
+          streamId,
+          startAt: new Date(l.from),
+          endAt: new Date(l.to),
+          speakerKey: "S1",
+          text: l.text,
+          source: "live" as const,
+          provider: "test",
+        })),
+      );
+      const r = await refineBlock(
+        {
+          ...deps(),
+          diarizer: {
+            diarize: async (samples) => [
+              { speaker: "spk0", start: 0, end: samples.length / 16000 },
+            ],
+          },
+          loadPieces: async (_stream, a, b) => {
+            const samples = new Float32Array(Math.round((b - a) * 16));
+            for (let i = 0; i < samples.length; i++) {
+              const ms = a + i / 16;
+              const l = lines.find((x) => ms >= x.from && ms < x.to);
+              samples[i] = l ? 0.1 * (l.voice + 1) : 0;
+            }
+            return [{ startAt: a, samples }];
+          },
+        },
+        block!.id,
+      );
+      expect(r).toMatchObject({ refined: true, replaced: lines.length });
+      return (await current(block!.id)).map((u) => [u.text, u.personId]);
+    };
+
+    const t1 = t0 + 120 * MIN;
+    expect(
+      await refineOneCluster([
+        { from: t1, to: t1 + 2000, voice: 0, text: "a1" },
+        { from: t1 + 2500, to: t1 + 4500, voice: 0, text: "a2" },
+        { from: t1 + 5000, to: t1 + 7000, voice: 2, text: "b1" },
+      ]),
+    ).toEqual([
+      ["a1 a2", aliceId],
+      ["b1", bob!.id],
+    ]);
+
+    // A named cluster: lines its own check confirms and lines too short to check join alike.
+    const t2 = t0 + 130 * MIN;
+    expect(
+      await refineOneCluster([
+        { from: t2, to: t2 + 2000, voice: 0, text: "I think" },
+        { from: t2 + 2300, to: t2 + 2700, voice: 0, text: "um," },
+        { from: t2 + 3000, to: t2 + 5000, voice: 0, text: "recursion" },
+        { from: t2 + 5200, to: t2 + 5600, voice: 0, text: "is neat." },
+      ]),
+    ).toEqual([["I think um, recursion is neat.", aliceId]]);
   });
 });

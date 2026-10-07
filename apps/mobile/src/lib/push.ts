@@ -21,7 +21,6 @@ export async function registerCategories(): Promise<void> {
       buttonTitle: "Not useful",
       options: { opensAppToForeground: false },
     },
-    { identifier: "snoozed", buttonTitle: "Snooze", options: { opensAppToForeground: false } },
     {
       identifier: "reply",
       buttonTitle: "Reply",
@@ -74,13 +73,12 @@ export function notificationData(n: Notifications.Notification): HearloomNotific
 
 /** Map a notification action to server feedback. */
 export function feedbackFor(response: Notifications.NotificationResponse): {
-  action: "opened" | "useful" | "not_useful" | "snoozed" | "reply";
+  action: "opened" | "useful" | "not_useful" | "reply";
   replyText?: string;
 } {
   switch (response.actionIdentifier) {
     case "useful":
     case "not_useful":
-    case "snoozed":
       return { action: response.actionIdentifier };
     case "reply":
       return { action: "reply", replyText: response.userText ?? "" };

@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { settingsSchema } from "@hearloom/shared";
-import { decide, inQuietHours, nextLocalTime, type PolicyInput } from "./policy";
+import {
+  decide,
+  HARD_LIMIT_PER_HOUR,
+  inQuietHours,
+  type PolicyDecision,
+  type PolicyInput,
+  type QuietReason,
+} from "./policy";
 
 const settings = settingsSchema.parse({ timezone: "Europe/Amsterdam" });
 // 2026-10-05 is CEST (UTC+2).
@@ -9,12 +16,19 @@ const at = (local: string) => new Date(`2026-10-05T${local}:00+02:00`);
 const base = (over: Partial<PolicyInput> = {}): PolicyInput => ({
   settings,
   source: "agent",
-  interruptionLevel: "active",
-  deliverWhen: "now",
+  level: "active",
   now: at("12:00"),
   sentLastHour: 0,
+  audibleLastHour: 0,
   inConversation: false,
   ...over,
+});
+
+const sent: PolicyDecision = { action: "send", level: "active", quietedBy: null };
+const silent = (quietedBy: QuietReason): PolicyDecision => ({
+  action: "send",
+  level: "passive",
+  quietedBy,
 });
 
 describe("notification policy", () => {
@@ -25,43 +39,61 @@ describe("notification policy", () => {
     expect(inQuietHours(at("12:00"), settings)).toBe(false);
   });
 
-  test("holds until quiet hours end", () => {
-    const d = decide(base({ now: at("23:15") }));
-    expect(d).toEqual({
-      action: "hold",
-      until: nextLocalTime(at("23:15"), "Europe/Amsterdam", "07:30"),
-      reason: "quiet_hours",
-    });
-    if (d.action === "hold") expect(d.until?.toISOString()).toBe("2026-10-06T05:30:00.000Z");
+  test("sends right away when nothing is in the way", () => {
+    expect(decide(base())).toEqual(sent);
   });
 
-  test("time-sensitive breaks through quiet hours", () => {
-    expect(decide(base({ now: at("23:15"), interruptionLevel: "time-sensitive" }))).toEqual({
+  test("quiet hours deliver silently, even when the agent asks for time-sensitive", () => {
+    expect(decide(base({ now: at("23:15") }))).toEqual(silent("quiet_hours"));
+    expect(decide(base({ now: at("23:15"), level: "time-sensitive" }))).toEqual(
+      silent("quiet_hours"),
+    );
+  });
+
+  test("system alerts are quiet at night unless time-sensitive (the test button)", () => {
+    expect(decide(base({ source: "system", now: at("23:15") }))).toEqual(silent("quiet_hours"));
+    expect(decide(base({ source: "system", now: at("23:15"), level: "time-sensitive" }))).toEqual({
       action: "send",
+      level: "time-sensitive",
+      quietedBy: null,
     });
   });
 
-  test("rate limit applies to agent/rule but not system", () => {
-    expect(decide(base({ sentLastHour: 4 }))).toEqual({
-      action: "suppress",
-      reason: "rate_limited",
+  test("a conversation makes it silent; time-sensitive still rings", () => {
+    expect(decide(base({ inConversation: true }))).toEqual(silent("in_conversation"));
+    expect(decide(base({ inConversation: true, level: "time-sensitive" }))).toEqual({
+      action: "send",
+      level: "time-sensitive",
+      quietedBy: null,
     });
-    expect(decide(base({ sentLastHour: 4, source: "system" }))).toEqual({ action: "send" });
   });
 
-  test("defers until the conversation ends", () => {
-    expect(decide(base({ deliverWhen: "after_conversation", inConversation: true }))).toEqual({
-      action: "hold",
-      until: null,
-      reason: "in_conversation",
-    });
-    expect(decide(base({ deliverWhen: "after_conversation" }))).toEqual({ action: "send" });
+  test("past the hourly limit with sound it is silent; system alerts are exempt", () => {
+    expect(decide(base({ audibleLastHour: 4, sentLastHour: 4 }))).toEqual(silent("hourly_limit"));
+    expect(decide(base({ source: "system", audibleLastHour: 4 }))).toEqual(sent);
   });
 
-  test("disabled sources are suppressed", () => {
+  test("passive stays passive without a reason", () => {
+    expect(decide(base({ level: "passive", inConversation: true }))).toEqual({
+      action: "send",
+      level: "passive",
+      quietedBy: null,
+    });
+  });
+
+  test("the hard limit refuses agent notifications but never system alerts", () => {
+    const n = HARD_LIMIT_PER_HOUR;
+    expect(decide(base({ sentLastHour: n, level: "time-sensitive" }))).toEqual({
+      action: "refuse",
+      reason: "hard_limit",
+    });
+    expect(decide(base({ sentLastHour: n, source: "system" }))).toEqual(sent);
+  });
+
+  test("disabled sources are refused", () => {
     const off = settingsSchema.parse({ notifications: { sources: { agent: false } } });
     expect(decide(base({ settings: off }))).toEqual({
-      action: "suppress",
+      action: "refuse",
       reason: "source_disabled",
     });
   });

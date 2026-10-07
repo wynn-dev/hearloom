@@ -1,23 +1,34 @@
 import type { NotificationSource, Settings } from "@hearloom/shared";
 
 export type InterruptionLevel = "passive" | "active" | "time-sensitive";
-export type DeliverWhen = "now" | "after_conversation";
+
+/*
+ * Hearloom never holds a notification for a better moment: the agent picks the moment (it can read
+ * get_current_context), and a held message goes stale. Policy may only lower the volume, delivering
+ * silently, or refuse outright past a hard ceiling.
+ */
+
+/** Non-system notifications past this many in any rolling hour are refused (runaway or prompt-injected agent). */
+export const HARD_LIMIT_PER_HOUR = 30;
+
+export type QuietReason = "quiet_hours" | "in_conversation" | "hourly_limit";
 
 export interface PolicyInput {
   settings: Settings;
   source: NotificationSource;
-  interruptionLevel: InterruptionLevel;
-  deliverWhen: DeliverWhen;
+  /** The level the sender asked for. */
+  level: InterruptionLevel;
   now: Date;
   /** Non-system notifications sent in the last hour. */
   sentLastHour: number;
+  /** Of those, how many were sent at the `active` level (with sound). */
+  audibleLastHour: number;
   inConversation: boolean;
 }
 
 export type PolicyDecision =
-  | { action: "send" }
-  | { action: "hold"; until: Date | null; reason: "quiet_hours" | "in_conversation" }
-  | { action: "suppress"; reason: "source_disabled" | "rate_limited" };
+  | { action: "send"; level: InterruptionLevel; quietedBy: QuietReason | null }
+  | { action: "refuse"; reason: "source_disabled" | "hard_limit" };
 
 /** Minutes since local midnight in `timeZone`. */
 export function localMinutes(now: Date, timeZone: string): number {
@@ -48,32 +59,27 @@ export function inQuietHours(now: Date, settings: Settings): boolean {
   return start < end ? cur >= start && cur < end : cur >= start || cur < end;
 }
 
-/** The next moment local time equals `hhmm` (minute precision). */
-export function nextLocalTime(now: Date, timeZone: string, hhmm: string): Date {
-  const cur = localMinutes(now, timeZone);
-  let delta = (toMinutes(hhmm) - cur + 1440) % 1440;
-  if (delta === 0) delta = 1440;
-  const base = new Date(now);
-  base.setUTCSeconds(0, 0);
-  return new Date(base.getTime() + delta * 60_000);
+function quietReason(input: PolicyInput): QuietReason | null {
+  const { settings, source, level } = input;
+  if (level === "passive") return null;
+  // Nothing from the agent breaks quiet hours. Only a time-sensitive system alert (the test button) does.
+  if (inQuietHours(input.now, settings) && !(source === "system" && level === "time-sensitive")) {
+    return "quiet_hours";
+  }
+  // Outside quiet hours, system alerts and time-sensitive notifications always ring.
+  if (source === "system" || level === "time-sensitive") return null;
+  if (input.inConversation) return "in_conversation";
+  if (input.audibleLastHour >= settings.notifications.maxPerHour) return "hourly_limit";
+  return null;
 }
 
 export function decide(input: PolicyInput): PolicyDecision {
-  const { settings, source } = input;
-  if (!settings.notifications.sources[source])
-    return { action: "suppress", reason: "source_disabled" };
-  if (source !== "system" && input.sentLastHour >= settings.notifications.maxPerHour) {
-    return { action: "suppress", reason: "rate_limited" };
+  if (!input.settings.notifications.sources[input.source]) {
+    return { action: "refuse", reason: "source_disabled" };
   }
-  if (input.interruptionLevel !== "time-sensitive" && inQuietHours(input.now, settings)) {
-    return {
-      action: "hold",
-      until: nextLocalTime(input.now, settings.timezone, settings.quietHours.end),
-      reason: "quiet_hours",
-    };
+  if (input.source !== "system" && input.sentLastHour >= HARD_LIMIT_PER_HOUR) {
+    return { action: "refuse", reason: "hard_limit" };
   }
-  if (input.deliverWhen === "after_conversation" && input.inConversation) {
-    return { action: "hold", until: null, reason: "in_conversation" };
-  }
-  return { action: "send" };
+  const quietedBy = quietReason(input);
+  return { action: "send", level: quietedBy ? "passive" : input.level, quietedBy };
 }

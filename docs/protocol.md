@@ -85,15 +85,19 @@ resulting semantic events (`bookmark`, `muted`, …).
 
 ## 3. Notifications
 
-Every notification (system alerts, rules, later the agent) goes through one gateway
+Every notification (system alerts and the agent) goes through one gateway
 (`apps/server/src/notify`):
 
-1. **Policy** — source toggles, hourly cap (non-system), quiet hours in the user's timezone (unless
-   `time-sensitive`), and "hold until the current conversation ends".
-2. **Delivery** — over the live ingest socket when the phone is connected (fast, and the only way to buzz
-   the pendant); if the phone doesn't `notify_ack` within 4 s, fall back to APNs.
+1. **Policy** — never delays: source toggles and a hard ceiling (30 agent notifications an hour) refuse;
+   quiet hours in the user's timezone, an ongoing conversation and the hourly limit with sound only make
+   it `passive` (silent). See `docs/agent.md`.
+2. **Delivery** — one copy per phone. APNs first (it reaches a suspended app); a pendant buzz goes
+   separately as a `haptic` message on the live socket, the only way to reach the pendant. When APNs
+   isn't configured or fails, the notification goes over the live socket instead (`notify`, buzz
+   included), and a `notify_ack` within 4 s marks it delivered. Nothing is sent twice, so a late ack
+   can't cause a duplicate banner.
 3. **Audit** — every attempt is stored in `notification_deliveries`; feedback (useful / not useful /
-   snooze / reply) is stored on the notification.
+   reply) is stored on the notification.
 
-APNs categories: `HL_NUDGE` (actions: Useful, Not useful, Snooze, Reply) and `HL_SYSTEM`. Deep links are
+APNs categories: `HL_NUDGE` (actions: Useful, Not useful, Reply) and `HL_SYSTEM`. Deep links are
 in-app paths only.

@@ -39,7 +39,7 @@ function NotificationsPage() {
     <>
       <PageHeader
         title="Notifications"
-        description="Every nudge and alert, with what the delivery policy decided and why."
+        description="Every agent notification and alert, with how it was delivered and why."
       />
       <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_20rem]">
         <Card>
@@ -63,8 +63,8 @@ function NotificationsPage() {
             <LoadingRows rows={6} />
           ) : items.length === 0 ? (
             <EmptyState icon={<BellOff />} title="No notifications yet">
-              Alerts (pendant disconnected, low battery) and nudges will show up here. Send a test
-              to check delivery.
+              Alerts (pendant disconnected, low battery) and agent notifications will show up here.
+              Send a test to check delivery.
             </EmptyState>
           ) : (
             <>
@@ -93,8 +93,8 @@ function NotificationsPage() {
           <CardBody>
             <SendTestForm />
             <p className="mt-3 text-xs text-ink-3">
-              Tests are time-sensitive system notifications: they skip quiet hours but are still
-              recorded with their delivery result.
+              Tests are time-sensitive system notifications: they ring even during quiet hours and
+              are recorded with their delivery result.
             </p>
           </CardBody>
         </Card>

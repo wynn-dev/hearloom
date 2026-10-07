@@ -29,6 +29,10 @@ const IGNORE = new Set([
   "Narration, monologue",
   "Babbling",
   "Speech synthesizer",
+  // Speech-like voice classes the tagger gives to ordinary talking (a lecture came out as 91 "mantra"s).
+  "Mantra",
+  "Chant",
+  "Beatboxing",
   "Silence",
   "Sound effect",
   "Noise",

@@ -1,3 +1,4 @@
+import "../test-db";
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createDb, schema } from "@hearloom/db";
 import { eq } from "drizzle-orm";

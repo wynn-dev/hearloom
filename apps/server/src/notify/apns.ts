@@ -98,7 +98,8 @@ export class ApnsClient {
       authorization: `bearer ${jwt}`,
       "apns-topic": this.cfg.bundleId,
       "apns-push-type": "alert",
-      "apns-priority": n.interruptionLevel === "passive" ? "5" : "10",
+      // Always immediate: priority 5 lets iOS batch alerts for power, and a late notification is a stale one.
+      "apns-priority": "10",
       "apns-id": n.id,
       "content-type": "application/json",
     };

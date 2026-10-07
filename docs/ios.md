@@ -14,9 +14,10 @@ that don't use the UIScene lifecycle.
     upload and deleted only after the server acknowledges it.
   - `IngestClient` — the `/ingest` WebSocket (see `docs/protocol.md`), with backoff, network-change
     retries and keepalive pings.
-  - Pendant button actions (bookmark / mute / acknowledge nudge) run locally, so mute works offline.
-  - Notifications that arrive over the socket are shown with `LocalNotifier` (same categories and data as
-    APNs pushes), and can buzz the pendant.
+  - Pendant button actions (bookmark / mute / acknowledge notification) run locally, so mute works offline.
+  - Notifications arrive over APNs. When the server can't push (APNs not configured or failing) they come
+    over the socket and are shown with `LocalNotifier` (same categories and data as APNs pushes). The
+    pendant buzz always comes over the socket.
 - **React Native** is the UI: sign-in, pairing, status, timeline, inbox, settings. It talks to the server
   with the typed oRPC client and controls the native engine through `omi-capture`.
 

@@ -366,7 +366,7 @@ export const notifications = pgTable(
   {
     id: id(),
     userId: owner(),
-    source: text().$type<"system" | "rule" | "agent">().notNull(),
+    source: text().$type<"system" | "agent">().notNull(),
     category: text().notNull(),
     title: text().notNull(),
     body: text().notNull(),
