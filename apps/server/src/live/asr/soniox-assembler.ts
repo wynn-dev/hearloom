@@ -51,7 +51,9 @@ export class SessionClock {
 }
 
 /** Text with no letters or digits (also matches ""). */
-const PUNCTUATION_ONLY = /^[^\p{L}\p{N}]*$/u;
+const NO_WORDS = /^[^\p{L}\p{N}]*$/u;
+/** A token that only closes what came before it: "." "?" "," "—" closing quotes and brackets. */
+const CLOSING = /^\s*[.,!?;:…。，！？、)\]}"'”’»\-–—]+$/u;
 
 /**
  * Groups final Soniox tokens into utterances: a new utterance starts on the `<end>` endpoint
@@ -81,9 +83,21 @@ export class SonioxAssembler {
         continue;
       }
       if (/^<\w+>$/.test(t.text)) continue;
-      // Punctuation finalized after its sentence was already emitted: drop it rather than start
-      // the next utterance with it.
-      if (this.current.length === 0 && PUNCTUATION_ONLY.test(t.text)) continue;
+      if (CLOSING.test(t.text)) {
+        // Closing punctuation belongs to the words before it, whatever speaker or time Soniox gave
+        // it: it takes theirs, so it can't hide a split or stretch the line. If that line was
+        // already emitted, it's dropped rather than starting the next one.
+        const prev = this.current[this.current.length - 1];
+        if (prev) {
+          this.current.push({
+            ...t,
+            speaker: prev.speaker,
+            start_ms: prev.end_ms,
+            end_ms: prev.end_ms,
+          });
+        }
+        continue;
+      }
       if (this.splitsBefore(t)) {
         const u = this.emit();
         if (u) out.push(u);
@@ -96,8 +110,6 @@ export class SonioxAssembler {
   private splitsBefore(t: SonioxToken): boolean {
     const prev = this.current[this.current.length - 1];
     if (!prev) return false;
-    // Trailing punctuation belongs to the words before it, whatever speaker or time it carries.
-    if (PUNCTUATION_ONLY.test(t.text)) return false;
     if (t.speaker !== undefined && t.speaker !== prev.speaker) return true;
     if (t.start_ms === undefined || prev.end_ms === undefined) return false;
     const { clock } = this;
@@ -122,8 +134,8 @@ export class SonioxAssembler {
       .map((t) => t.text)
       .join("")
       .trim();
-    // Nothing but punctuation (a "." finalized after an endpoint): not worth a line of its own.
-    if (PUNCTUATION_ONLY.test(text)) return null;
+    // No words at all (e.g. a lone symbol): not worth a line of its own.
+    if (NO_WORDS.test(text)) return null;
     const first = toks[0]!;
     const last = toks[toks.length - 1]!;
     const langs = new Map<string, number>();

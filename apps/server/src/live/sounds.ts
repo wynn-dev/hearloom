@@ -33,7 +33,6 @@ const IGNORE = new Set([
   "Mantra",
   "Chant",
   "Beatboxing",
-  "Rapping",
   "Silence",
   "Sound effect",
   "Noise",
