@@ -57,6 +57,13 @@
       "when": 1791382584241,
       "tag": "0007_agent_debloat",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1791384920718,
+      "tag": "0008_voice_commands",
+      "breakpoints": true
     }
   ]
 }

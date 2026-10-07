@@ -1,5 +1,6 @@
 import { contract } from "@hearloom/api";
 import { schema } from "@hearloom/db";
+import { voiceRenameReset } from "@hearloom/shared";
 import { implement, ORPCError } from "@orpc/server";
 import { and, asc, count, desc, eq, gte, isNull, lt, lte, max, or, sql } from "drizzle-orm";
 import { createToken } from "../agent/tokens";
@@ -21,6 +22,16 @@ import { livePipeline } from "../live/host";
 import { markOpened, notify } from "../notify/gateway";
 import { invalidate } from "../realtime";
 import { getSettings, updateSettings } from "../settings";
+import { FeedbackError, listCommands, sendTestCommand, setFeedback } from "../voice/commands";
+import { voiceProfile } from "../voice/profile";
+import {
+  skipPhrase,
+  startTeach,
+  stopTeach,
+  TeachError,
+  teachState,
+  uploadSample,
+} from "../voice/teach";
 
 const {
   phones,
@@ -169,6 +180,15 @@ async function editEpisodes(userId: string, edit: () => Promise<unknown>): Promi
   invalidate(userId, ["timeline"]);
 }
 
+async function teachCall(fn: () => unknown): Promise<void> {
+  try {
+    await fn();
+  } catch (err) {
+    if (err instanceof TeachError) throw new ORPCError("BAD_REQUEST", { message: err.message });
+    throw err;
+  }
+}
+
 export const router = authed.router({
   me: {
     get: authed.me.get.handler(async ({ context }) => {
@@ -187,9 +207,20 @@ export const router = authed.router({
 
   settings: {
     get: authed.settings.get.handler(({ context }) => getSettings((context as Ctx).userId)),
-    update: authed.settings.update.handler(({ context, input }) =>
-      updateSettings((context as Ctx).userId, input),
-    ),
+    update: authed.settings.update.handler(async ({ context, input }) => {
+      const { userId } = context as Ctx;
+      // Voice commands only ever act on the user's own voice: it must be taught first.
+      if (input.voice?.mode && input.voice.mode !== "off") {
+        const profile = await voiceProfile(userId);
+        if (!profile.canEnable)
+          throw new ORPCError("BAD_REQUEST", {
+            message: "Teach Hearloom your voice first (Voice → Teach your voice)",
+          });
+      }
+      const next = await updateSettings(userId, voiceRenameReset(await getSettings(userId), input));
+      if (input.voice) livePipeline.voiceChanged(userId);
+      return next;
+    }),
   },
 
   phones: {
@@ -590,6 +621,88 @@ export const router = authed.router({
           .update(apiTokens)
           .set({ revokedAt: new Date() })
           .where(and(eq(apiTokens.id, input.id), eq(apiTokens.userId, (context as Ctx).userId)));
+        return { ok: true as const };
+      }),
+    },
+  },
+
+  voice: {
+    status: authed.voice.status.handler(async ({ context }) => {
+      const { userId } = context as Ctx;
+      const [profile, settings, live] = await Promise.all([
+        voiceProfile(userId),
+        getSettings(userId),
+        db
+          .select({ phoneId: captureStreams.phoneId })
+          .from(captureStreams)
+          .where(
+            and(
+              eq(captureStreams.userId, userId),
+              isNull(captureStreams.endedAt),
+              gte(captureStreams.lastFrameAt, new Date(Date.now() - LIVE_WINDOW_MS)),
+            ),
+          ),
+      ]);
+      return {
+        profile,
+        teach: teachState(userId),
+        pendantLive: live.some((s) => s.phoneId !== null && isPhoneOnline(s.phoneId)),
+        pipelineRunning: livePipeline.running,
+        webhookConfigured: settings.agent.webhookUrl !== "",
+      };
+    }),
+    commands: authed.voice.commands.handler(async ({ context, input }) => {
+      const rows = await listCommands((context as Ctx).userId, input.limit, input.before);
+      return rows.map((r) => ({
+        id: r.id,
+        spokenAt: r.spokenAt,
+        endedAt: r.endedAt,
+        wakeName: r.wakeName,
+        heardAs: r.heardAs,
+        nameScore: r.nameScore,
+        transcript: r.transcript,
+        command: r.command,
+        speakerScore: r.speakerScore,
+        status: r.status,
+        reason: r.reason,
+        attempts: r.attempts,
+        httpStatus: r.httpStatus,
+        latencyMs:
+          r.sentAt && r.status === "sent" ? r.sentAt.getTime() - r.endedAt.getTime() : null,
+        feedback: r.feedback,
+      }));
+    }),
+    feedback: authed.voice.feedback.handler(async ({ context, input }) => {
+      try {
+        return await setFeedback((context as Ctx).userId, input.id, input.feedback);
+      } catch (err) {
+        if (err instanceof FeedbackError)
+          throw new ORPCError("BAD_REQUEST", { message: err.message });
+        throw err;
+      }
+    }),
+    test: authed.voice.test.handler(async ({ context }) => {
+      const r = await sendTestCommand((context as Ctx).userId);
+      return { status: r.status, reason: r.reason, httpStatus: r.httpStatus };
+    }),
+    teach: {
+      start: authed.voice.teach.start.handler(async ({ context, input }) => {
+        const { userId, session } = context as Ctx;
+        await startTeach(userId, session.user.name, input.kind);
+        return { ok: true as const };
+      }),
+      stop: authed.voice.teach.stop.handler(({ context, input }) => {
+        stopTeach((context as Ctx).userId, input.sessionId);
+        return { ok: true as const };
+      }),
+      skip: authed.voice.teach.skip.handler(async ({ context }) => {
+        await teachCall(() => skipPhrase((context as Ctx).userId));
+        return { ok: true as const };
+      }),
+      upload: authed.voice.teach.upload.handler(async ({ context, input }) => {
+        const bytes = Buffer.from(input.pcm, "base64");
+        const pcm = new Int16Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.length / 2));
+        await teachCall(() => uploadSample((context as Ctx).userId, input.sessionId, pcm.slice()));
         return { ok: true as const };
       }),
     },

@@ -13,6 +13,8 @@ export interface WebhookResult {
   /** HTTP status; 0 when no request was made or it failed before a response. */
   status: number;
   error: string | null;
+  /** The start of the response body (only with `readBody`). */
+  body?: string;
 }
 
 /**
@@ -40,7 +42,7 @@ export function webhookSignature(
 export async function sendWebhook(
   userId: string,
   event: WebhookEvent,
-  opts: { timeoutMs?: number } = {},
+  opts: { timeoutMs?: number; readBody?: boolean } = {},
 ): Promise<WebhookResult> {
   const { agent } = await getSettings(userId);
   if (!agent.webhookUrl) return { ok: false, status: 0, error: "no webhook configured" };
@@ -59,12 +61,15 @@ export async function sendWebhook(
       method: "POST",
       headers,
       body,
-      // Don't follow redirects (could point anywhere) or relay response bodies to the caller.
+      // Don't follow redirects (could point anywhere).
       redirect: "manual",
       signal: AbortSignal.timeout(opts.timeoutMs ?? 10_000),
     });
-    await res.body?.cancel();
+    // Receivers may say more in the body (Hermes: {"status":"duplicate" | "ignored"}).
+    const text = opts.readBody ? (await res.text()).slice(0, 1024) : undefined;
+    if (!opts.readBody) await res.body?.cancel();
     return {
+      ...(text !== undefined ? { body: text } : {}),
       ok: res.ok,
       status: res.status,
       error: res.ok ? null : `HTTP ${res.status}${res.statusText ? ` ${res.statusText}` : ""}`,

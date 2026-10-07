@@ -54,6 +54,21 @@ export class SpeakerDirectory {
     return (await this.prints(userId)).some((p) => p.isSelf);
   }
 
+  /** Best similarity to the user's own voiceprints (null: none enrolled), and to anyone else's. */
+  async compare(
+    userId: string,
+    embedding: Float32Array,
+  ): Promise<{ self: number | null; other: number }> {
+    let self: number | null = null;
+    let other = 0;
+    for (const p of await this.prints(userId)) {
+      const score = cosine(embedding, p.embedding);
+      if (p.isSelf) self = Math.max(self ?? -1, score);
+      else other = Math.max(other, score);
+    }
+    return { self, other };
+  }
+
   async identify(userId: string, embedding: Float32Array): Promise<SpeakerMatch | null> {
     let best: SpeakerMatch | null = null;
     for (const p of await this.prints(userId)) {

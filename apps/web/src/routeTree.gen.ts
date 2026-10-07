@@ -19,6 +19,7 @@ import { Route as AppPeopleRouteImport } from './routes/_app/people'
 import { Route as AppSettingsRouteImport } from './routes/_app/settings'
 import { Route as AppTimelineRouteImport } from './routes/_app/timeline'
 import { Route as AppUsersRouteImport } from './routes/_app/users'
+import { Route as AppVoiceRouteImport } from './routes/_app/voice'
 
 const AppRoute = AppRouteImport.update({
   id: '/_app',
@@ -69,6 +70,11 @@ const AppUsersRoute = AppUsersRouteImport.update({
   path: '/users',
   getParentRoute: () => AppRoute,
 } as any)
+const AppVoiceRoute = AppVoiceRouteImport.update({
+  id: '/voice',
+  path: '/voice',
+  getParentRoute: () => AppRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof AppIndexRoute
@@ -80,6 +86,7 @@ export interface FileRoutesByFullPath {
   '/settings': typeof AppSettingsRoute
   '/timeline': typeof AppTimelineRoute
   '/users': typeof AppUsersRoute
+  '/voice': typeof AppVoiceRoute
 }
 export interface FileRoutesByTo {
   '/login': typeof LoginRoute
@@ -90,6 +97,7 @@ export interface FileRoutesByTo {
   '/settings': typeof AppSettingsRoute
   '/timeline': typeof AppTimelineRoute
   '/users': typeof AppUsersRoute
+  '/voice': typeof AppVoiceRoute
   '/': typeof AppIndexRoute
 }
 export interface FileRoutesById {
@@ -103,6 +111,7 @@ export interface FileRoutesById {
   '/_app/settings': typeof AppSettingsRoute
   '/_app/timeline': typeof AppTimelineRoute
   '/_app/users': typeof AppUsersRoute
+  '/_app/voice': typeof AppVoiceRoute
   '/_app/': typeof AppIndexRoute
 }
 export interface FileRouteTypes {
@@ -117,6 +126,7 @@ export interface FileRouteTypes {
     | '/settings'
     | '/timeline'
     | '/users'
+    | '/voice'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/login'
@@ -127,6 +137,7 @@ export interface FileRouteTypes {
     | '/settings'
     | '/timeline'
     | '/users'
+    | '/voice'
     | '/'
   id:
     | '__root__'
@@ -139,6 +150,7 @@ export interface FileRouteTypes {
     | '/_app/settings'
     | '/_app/timeline'
     | '/_app/users'
+    | '/_app/voice'
     | '/_app/'
   fileRoutesById: FileRoutesById
 }
@@ -219,6 +231,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppUsersRouteImport
       parentRoute: typeof AppRoute
     }
+    '/_app/voice': {
+      id: '/_app/voice'
+      path: '/voice'
+      fullPath: '/voice'
+      preLoaderRoute: typeof AppVoiceRouteImport
+      parentRoute: typeof AppRoute
+    }
   }
 }
 
@@ -230,6 +249,7 @@ interface AppRouteChildren {
   AppSettingsRoute: typeof AppSettingsRoute
   AppTimelineRoute: typeof AppTimelineRoute
   AppUsersRoute: typeof AppUsersRoute
+  AppVoiceRoute: typeof AppVoiceRoute
   AppIndexRoute: typeof AppIndexRoute
 }
 
@@ -241,6 +261,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppSettingsRoute: AppSettingsRoute,
   AppTimelineRoute: AppTimelineRoute,
   AppUsersRoute: AppUsersRoute,
+  AppVoiceRoute: AppVoiceRoute,
   AppIndexRoute: AppIndexRoute,
 }
 

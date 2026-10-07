@@ -2,7 +2,7 @@ import { schema } from "@hearloom/db";
 import { EPISODE_KIND_LABEL, episodeKindSchema } from "@hearloom/shared";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import { and, asc, desc, eq, gte, ilike, isNull, lt, lte, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, ilike, inArray, isNull, lt, lte, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { verifyToken } from "../agent/tokens";
 import { db } from "../db";
@@ -226,7 +226,7 @@ function buildServer(userId: string): McpServer {
     "get_timeline",
     {
       description:
-        "Everything heard in a time range (max 7 days): episode starts (── lines), speech with speakers, sound events [x], ongoing states {x} and bookmarks, in time order under a header per day. Compact one-line-per-event format.",
+        "Everything heard in a time range (max 7 days): episode starts (── lines), speech with speakers, sound events [x], ongoing states {x}, bookmarks and voice commands sent to you [→ Name], in time order under a header per day. Compact one-line-per-event format.",
       inputSchema: { from: iso, to: iso.optional() },
       annotations: readOnly,
     },
@@ -245,6 +245,21 @@ function buildServer(userId: string): McpServer {
         .where(
           and(eq(bookmarks.userId, userId), gte(bookmarks.at, r.from), lte(bookmarks.at, r.to)),
         );
+      // Commands the user addressed to the agent (not ignored detections).
+      const vc = schema.voiceCommands;
+      const commands = await db
+        .select()
+        .from(vc)
+        .where(
+          and(
+            eq(vc.userId, userId),
+            gte(vc.spokenAt, r.from),
+            lte(vc.spokenAt, r.to),
+            inArray(vc.status, ["sent", "failed", "expired", "pending"]),
+          ),
+        )
+        .orderBy(vc.spokenAt)
+        .limit(500);
       const eps = (await episodesIn(db, userId, r.from, r.to, 2000)).filter(
         (e) => e.startedAt >= r.from,
       );
@@ -252,7 +267,7 @@ function buildServer(userId: string): McpServer {
         utts.map((u) => ({ ...u, speaker: speakerName(u) })),
         sounds,
         tz,
-        { bookmarks: marks, dayHeaders: true, episodes: eps },
+        { bookmarks: marks, dayHeaders: true, episodes: eps, voiceCommands: commands },
       );
       return text(
         lines.length

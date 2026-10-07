@@ -21,6 +21,7 @@ import type { EpisodeTracker } from "./episodes";
 import { PcmHistory } from "./pcm";
 import { type SoundEvent, SoundEventSmoother } from "./sounds";
 import type { SpeakerDirectory } from "./speakers";
+import type { AudioSource, VoiceDetector } from "./voice/detector";
 
 export interface StreamInfo {
   id: string;
@@ -40,6 +41,10 @@ export interface LiveDeps {
   episodes: EpisodeTracker;
   /** null = no transcription. */
   soniox: { apiKey: string; model: string; asyncModel: string; languageHints: string[] } | null;
+  /** "Hey <agent>" voice commands and voice teaching (null = off). */
+  voice: VoiceDetector | null;
+  /** Words to bias recognition toward for this user (the agent's name), from a cache. */
+  terms(userId: string): string[];
   /** Ask the server to refresh clients' views for this user. */
   invalidate(userId: string, keys: Array<"timeline" | "status">): void;
   log(message: string): void;
@@ -138,6 +143,9 @@ export class StreamProcessor {
   private live: SonioxSession | null = null;
   private sonioxRetryAt = 0;
   private lastSpeechAt = 0;
+  /** Audio time of the end of the latest speech (voice commands wait while the user talks on). */
+  private lastSpeechAudioAt = 0;
+  private readonly voiceSource: AudioSource;
   /** Wall-clock spans of audio that arrived too late to stream (merged, recent only). */
   private backlogSpans: { from: number; to: number }[] = [];
   private backlog: BacklogBatch | null = null;
@@ -150,6 +158,11 @@ export class StreamProcessor {
     private readonly deps: LiveDeps,
   ) {
     this.decoder = new OpusDecoder(16000, 1, (16000 * stream.frameMs) / 1000);
+    this.voiceSource = {
+      streamId: stream.id,
+      audio: (from, to) => this.history.slice(from, to),
+      lastSpeechAt: () => this.lastSpeechAudioAt,
+    };
   }
 
   /** Process frames in order (calls are serialized). */
@@ -276,7 +289,10 @@ export class StreamProcessor {
 
     // Speech detection.
     const { segments, speaking } = this.vad!.accept(samples);
-    if (speaking) this.lastSpeechAt = Date.now();
+    if (speaking) {
+      this.lastSpeechAt = Date.now();
+      this.lastSpeechAudioAt = absAt + samples.length / 16;
+    }
     if (fresh && this.deps.soniox) {
       if (speaking && !this.live && Date.now() >= this.sonioxRetryAt) this.openSoniox(absAt);
       const session = this.live;
@@ -368,6 +384,7 @@ export class StreamProcessor {
           apiKey: cfg.apiKey,
           model: cfg.asyncModel,
           languageHints: cfg.languageHints,
+          terms: this.deps.terms(this.stream.userId),
         });
       } catch (err) {
         const wait =
@@ -393,7 +410,12 @@ export class StreamProcessor {
   private openSoniox(absAt: number): void {
     const cfg = this.deps.soniox!;
     const session = new SonioxSession(
-      { apiKey: cfg.apiKey, model: cfg.model, languageHints: cfg.languageHints },
+      {
+        apiKey: cfg.apiKey,
+        model: cfg.model,
+        languageHints: cfg.languageHints,
+        terms: this.deps.terms(this.stream.userId),
+      },
       (u) => {
         this.queue = this.queue
           .then(() => this.saveUtterance(u, this.history.slice(u.startAt, u.endAt), true))
@@ -465,6 +487,22 @@ export class StreamProcessor {
       model: u.model,
     });
     this.deps.invalidate(userId, ["timeline"]);
+    if (fresh && this.deps.voice) {
+      await this.deps.voice.heard(
+        userId,
+        {
+          streamId: this.stream.id,
+          text: u.text,
+          startAt: u.startAt,
+          endAt: u.endAt,
+          lang: u.lang,
+          speakerKey,
+          isSelf: isWearer,
+          chainId: placed.chainId,
+        },
+        this.voiceSource,
+      );
+    }
   }
 
   private async tag(samples: Float32Array): Promise<void> {

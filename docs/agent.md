@@ -54,7 +54,8 @@ Set a URL and secret in the console → **Agent** (for Hermes: a webhook route o
   base64 after `whsec_` for a `whsec_…` secret, and the secret's UTF-8 bytes otherwise. Sent only when a
   secret is set (Hermes requires one).
 
-No events are sent yet: the "hey <agent>" voice commands add the first one (`voice.command`).
+The only event is `voice.command`: "Hey Hermes, …" spoken to the pendant. See
+[voice-commands.md](voice-commands.md) for the payload and the Hermes route to set up.
 
 ## Hermes configuration
 
@@ -66,6 +67,29 @@ mcp_servers:
     headers:
       Authorization: "Bearer ${HEARLOOM_MCP_TOKEN}"
 ```
+
+For voice commands, also turn on Hermes's webhook platform (`WEBHOOK_ENABLED=true` and
+`TELEGRAM_HOME_CHANNEL` in `~/.hermes/.env`) and add a route for them:
+
+```yaml
+platforms:
+  webhook:
+    enabled: true
+    extra:
+      port: 8644
+      routes:
+        hearloom-voice:
+          events: ["voice.command"]
+          secret: "<same as Hearloom → Agent → Webhook>"
+          prompt: "Voice command from the user's pendant (speech-to-text): <<<{command}>>> …"
+          deliver: telegram          # no chat_id → home channel
+          mirror_to_session: true
+          toolsets: ["hermes-webhook", "mcp-hearloom"]
+```
+
+Then set the console's webhook URL to `http://<hermes-host>:8644/webhooks/hearloom-voice` and press
+**Voice → Send test command**. The full prompt and the reasoning behind each field are in
+[voice-commands.md](voice-commands.md#hermes-setup).
 
 ## Security
 

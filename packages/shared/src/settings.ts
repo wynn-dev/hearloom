@@ -60,6 +60,18 @@ export function isValidWebhookSecret(secret: string): boolean {
   return key.length > 0 && key.length % 4 === 0 && /^[A-Za-z0-9+/]+={0,2}$/.test(key);
 }
 
+/** "Hey <agent>" voice commands (see docs/voice-commands.md). */
+const wakeWord = z.string().trim().min(2).max(40);
+const voiceFields = {
+  /** shadow = detect and log, but don't send to the agent. */
+  mode: z.enum(["off", "shadow", "on"]),
+  names: z.array(wakeWord).min(1).max(3),
+  /** Spellings the recognizer produces for the name in the user's voice (learned, editable). */
+  aliases: z.array(wakeWord).max(20),
+  /** Spellings that caused false triggers: never matched loosely again. */
+  blocked: z.array(wakeWord).max(20),
+};
+
 export const settingsSchema = z.object({
   /** IANA zone used for quiet hours and day boundaries. Set from the phone on first login. */
   timezone: timeZoneSchema.default("UTC"),
@@ -95,6 +107,14 @@ export const settingsSchema = z.object({
       webhookSecret: agentFields.webhookSecret.default(""),
     })
     .prefault({}),
+  voice: z
+    .object({
+      mode: voiceFields.mode.default("off"),
+      names: voiceFields.names.default(["Hermes"]),
+      aliases: voiceFields.aliases.default([]),
+      blocked: voiceFields.blocked.default([]),
+    })
+    .prefault({}),
 });
 
 export type Settings = z.infer<typeof settingsSchema>;
@@ -117,6 +137,7 @@ export const settingsPatchSchema = z.object({
     })
     .partial()
     .optional(),
+  voice: z.object(voiceFields).partial().optional(),
 });
 export type SettingsPatch = z.infer<typeof settingsPatchSchema>;
 
@@ -150,6 +171,29 @@ function upgrade(stored: unknown): unknown {
   return { ...s, button, notifications };
 }
 
+/**
+ * Learned spellings belong to the agent's name: when a patch renames it, the aliases and blocked
+ * spellings start over (unless the patch sets them too).
+ */
+export function voiceRenameReset(current: Settings, patch: SettingsPatch): SettingsPatch {
+  const next = patch.voice?.names?.[0];
+  const key = (s: string) =>
+    s
+      .normalize("NFKD")
+      .replace(/\p{M}/gu, "")
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}]/gu, "");
+  if (next === undefined || key(next) === key(current.voice.names[0] ?? "")) return patch;
+  return {
+    ...patch,
+    voice: {
+      ...patch.voice,
+      aliases: patch.voice?.aliases ?? [],
+      blocked: patch.voice?.blocked ?? [],
+    },
+  };
+}
+
 export function mergeSettings(current: Settings, patch: SettingsPatch): Settings {
   return settingsSchema.parse({
     ...current,
@@ -159,5 +203,6 @@ export function mergeSettings(current: Settings, patch: SettingsPatch): Settings
     button: { ...current.button, ...patch.button },
     alerts: { ...current.alerts, ...patch.alerts },
     agent: { ...current.agent, ...patch.agent },
+    voice: { ...current.voice, ...patch.voice },
   });
 }

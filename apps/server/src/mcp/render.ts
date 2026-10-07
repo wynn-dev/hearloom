@@ -77,11 +77,25 @@ export const MEDIA_NOTE = "(media: voices from a TV, radio or recording, not peo
  * Interleave utterances, sound events and bookmarks chronologically. With `dayHeaders`, a
  * `## <day>` line starts every day (lines only carry the time of day).
  */
+/** A voice command the user sent (or that was held back) to the agent. */
+export interface RenderVoiceCommand {
+  id: string;
+  spokenAt: Date;
+  wakeName: string;
+  command: string;
+  status: string;
+}
+
 export function renderLines(
   utterances: RenderUtterance[],
   sounds: RenderSound[],
   tz: string,
-  opts: { bookmarks?: RenderMark[]; dayHeaders?: boolean; episodes?: RenderEpisode[] } = {},
+  opts: {
+    bookmarks?: RenderMark[];
+    dayHeaders?: boolean;
+    episodes?: RenderEpisode[];
+    voiceCommands?: RenderVoiceCommand[];
+  } = {},
 ): string[] {
   type Row = { at: number; line: string };
   const rows: Row[] = [
@@ -99,6 +113,10 @@ export function renderLines(
     ...(opts.bookmarks ?? []).map((b) => ({
       at: b.at.getTime(),
       line: `${clock(b.at, tz)} ⚑ bookmark${b.note ? `: ${b.note}` : ""}`,
+    })),
+    ...(opts.voiceCommands ?? []).map((c) => ({
+      at: c.spokenAt.getTime() - 0.25,
+      line: `${clock(c.spokenAt, tz)} [→ ${c.wakeName}] ${c.command || "(no command)"} (${c.status}) · voice command ${c.id}`,
     })),
     // Episode starts go before what happens at the same moment.
     ...(opts.episodes ?? []).map((e) => ({

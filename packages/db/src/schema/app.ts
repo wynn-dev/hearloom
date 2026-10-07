@@ -443,3 +443,73 @@ export const apiTokens = pgTable(
   },
   (t) => [uniqueIndex().on(t.tokenHash), index().on(t.userId)],
 );
+
+/**
+ * "Hey <agent>, …" voice commands the live pipeline heard: delivered ones, and ignored ones with
+ * why (for tuning). The id is also the webhook event id. Linked to utterances by time, like
+ * episodes (refine replaces utterances).
+ */
+export const voiceCommands = pgTable(
+  "voice_commands",
+  {
+    id: uuid().primaryKey(),
+    userId: owner(),
+    streamId: uuid().references(() => captureStreams.id, { onDelete: "set null" }),
+    /** Start of the wake phrase. */
+    spokenAt: ts().notNull(),
+    /** End of the last part of the command. */
+    endedAt: ts().notNull(),
+    /** Each utterance's span (a wake word and its command can be seconds apart). */
+    parts: jsonb().$type<{ startAt: number; endAt: number }[]>().notNull().default([]),
+    /** The command was complete and had passed the checks. */
+    detectedAt: ts().notNull(),
+    wakeName: text().notNull(),
+    /** The words heard as the name ("her mess"). */
+    heardAs: text().notNull(),
+    nameScore: real().notNull(),
+    transcript: text().notNull(),
+    command: text().notNull(),
+    lang: text(),
+    /** Similarity to the user's own voice (null: not checked). */
+    speakerScore: real(),
+    status: text()
+      .$type<"pending" | "sent" | "failed" | "expired" | "shadow" | "ignored" | "test">()
+      .notNull(),
+    /** Why it was ignored or failed (not_own_voice, media_voice, http_401…). */
+    reason: text(),
+    attempts: integer().notNull().default(0),
+    httpStatus: integer(),
+    /** The agent accepted it (latency = sentAt − endedAt). */
+    sentAt: ts(),
+    /** The user's verdict in the console; confirmed and missed ones are learned from. */
+    feedback: text().$type<"confirmed" | "false_trigger" | "missed">(),
+    createdAt: createdAt(),
+  },
+  (t) => [index().on(t.userId, t.spokenAt)],
+);
+
+/**
+ * Samples of the user saying the wake phrase: from teaching on the Voice page (pendant or browser
+ * mic) or from commands they confirmed. Each records how the recognizer heard the name and how
+ * close it was to their voice; long enough ones also became a voiceprint.
+ */
+export const voiceSamples = pgTable(
+  "voice_samples",
+  {
+    id: id(),
+    userId: owner(),
+    source: text().$type<"pendant" | "browser" | "command">().notNull(),
+    /** The prompted phrase (teaching) or null (a command). */
+    phrase: text(),
+    text: text().notNull(),
+    heardAs: text(),
+    nameScore: real().notNull(),
+    /** Similarity to the user's voiceprints before this sample was added. */
+    speakerScore: real(),
+    seconds: real().notNull(),
+    voiceprintId: uuid().references(() => voiceprints.id, { onDelete: "set null" }),
+    commandId: uuid().references(() => voiceCommands.id, { onDelete: "cascade" }),
+    createdAt: createdAt(),
+  },
+  (t) => [index().on(t.userId, t.createdAt)],
+);

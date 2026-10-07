@@ -13,6 +13,8 @@ import { enqueueRefine, stopJobs } from "./jobs";
 import { livePipeline } from "./live/host";
 import { stopNotifications } from "./notify/gateway";
 import { attachRealtimeServer, topicFor } from "./realtime";
+import { onDetection, recoverPending } from "./voice/commands";
+import { onTeachHeard, replayTeach } from "./voice/teach";
 
 interface RealtimeSocketData {
   kind: "realtime";
@@ -75,6 +77,22 @@ const server = Bun.serve<SocketData>({
 attachRealtimeServer(server as never);
 livePipeline.start();
 setFrameListener((meta, frames) => livePipeline.push(meta, frames));
+// "Hey <agent>, …": store what was heard, deliver commands to the agent; teaching samples.
+livePipeline.onVoiceCommand((d) => {
+  void onDetection(d).catch((err) => console.error("[voice] command failed", err));
+});
+// A restarted pipeline forgets teaching prompts: without them, read phrases would be commands.
+livePipeline.onReady(replayTeach);
+// Deliveries cut off by the last shutdown.
+void recoverPending()
+  .then(({ retried, expired }) => {
+    if (retried + expired > 0)
+      console.log(`[voice] after restart: ${retried} command(s) retried, ${expired} expired`);
+  })
+  .catch((err) => console.error("[voice] recovering pending commands failed", err));
+livePipeline.onTeachHeard((userId, result) => {
+  void onTeachHeard(userId, result).catch((err) => console.error("[voice] teach failed", err));
+});
 // Finished blocks get an offline refine pass (worker process).
 livePipeline.onBlockClosed((_userId, blockId) => {
   if (env.REFINE === "on")
