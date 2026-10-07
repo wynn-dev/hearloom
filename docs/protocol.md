@@ -97,7 +97,7 @@ Every notification (system alerts and the agent) goes through one gateway
    included), and a `notify_ack` within 4 s marks it delivered. Nothing is sent twice, so a late ack
    can't cause a duplicate banner.
 3. **Audit** — every attempt is stored in `notification_deliveries`; feedback (useful / not useful /
-   snooze / reply) is stored on the notification.
+   reply) is stored on the notification.
 
-APNs categories: `HL_NUDGE` (actions: Useful, Not useful, Snooze, Reply) and `HL_SYSTEM`. Deep links are
+APNs categories: `HL_NUDGE` (actions: Useful, Not useful, Reply) and `HL_SYSTEM`. Deep links are
 in-app paths only.

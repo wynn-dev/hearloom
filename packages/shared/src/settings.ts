@@ -21,7 +21,7 @@ export const timeZoneSchema = z
 export const buttonActionSchema = z.enum(["none", "bookmark", "mute", "ack_nudge"]);
 export type ButtonAction = z.infer<typeof buttonActionSchema>;
 
-export const notificationSourceSchema = z.enum(["system", "rule", "agent"]);
+export const notificationSourceSchema = z.enum(["system", "agent"]);
 export type NotificationSource = z.infer<typeof notificationSourceSchema>;
 
 /*
@@ -30,7 +30,7 @@ export type NotificationSource = z.infer<typeof notificationSourceSchema>;
  * the defaulted schema would silently reset every field the client didn't send.
  */
 const quietHoursFields = { enabled: z.boolean(), start: hhmm, end: hhmm };
-const sourcesFields = { system: z.boolean(), rule: z.boolean(), agent: z.boolean() };
+const sourcesFields = { system: z.boolean(), agent: z.boolean() };
 const notificationsFields = {
   /** Cap for non-system notifications in any rolling hour. */
   maxPerHour: z.number().int().min(0).max(60),
@@ -75,7 +75,6 @@ export const settingsSchema = z.object({
       sources: z
         .object({
           system: sourcesFields.system.default(true),
-          rule: sourcesFields.rule.default(true),
           agent: sourcesFields.agent.default(true),
         })
         .prefault({}),

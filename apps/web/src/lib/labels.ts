@@ -47,7 +47,6 @@ export const interruptionLabel: Record<NotificationItem["interruptionLevel"], st
 
 export const sourceLabel: Record<NotificationItem["source"], string> = {
   system: "System",
-  rule: "Rule",
   agent: "Agent",
 };
 
@@ -61,7 +60,7 @@ export const buttonActionLabel: Record<ButtonAction, string> = {
   none: "Do nothing",
   bookmark: "Bookmark this moment",
   mute: "Mute / unmute microphone",
-  ack_nudge: "Acknowledge latest nudge",
+  ack_nudge: "Acknowledge the latest agent notification",
 };
 
 export const buttonActions = Object.keys(buttonActionLabel) as ButtonAction[];

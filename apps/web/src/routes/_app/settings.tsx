@@ -316,7 +316,6 @@ function SettingsForm({ server }: { server: Settings }) {
           {(
             [
               ["system", "System alerts", "Pendant disconnected, low battery, test notifications."],
-              ["rule", "Rules", "Notifications from rules you define."],
               ["agent", "Agent", "Notifications from your agent."],
             ] as const
           ).map(([key, title, description]) => (

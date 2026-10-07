@@ -265,7 +265,7 @@ async function deliver(row: NotificationRow, pendantHaptic: boolean): Promise<No
 export async function recordFeedback(
   userId: string,
   id: string,
-  action: "opened" | "useful" | "not_useful" | "snoozed" | "reply",
+  action: "opened" | "useful" | "not_useful" | "reply",
   replyText?: string,
 ): Promise<void> {
   const patch: Partial<typeof notifications.$inferInsert> =

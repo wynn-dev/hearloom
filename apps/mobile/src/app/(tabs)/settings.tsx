@@ -12,7 +12,7 @@ import { useTheme } from "@/lib/theme";
 const ACTIONS: { value: ButtonAction; label: string }[] = [
   { value: "bookmark", label: "Bookmark" },
   { value: "mute", label: "Mute" },
-  { value: "ack_nudge", label: "Ack nudge" },
+  { value: "ack_nudge", label: "Ack notification" },
   { value: "none", label: "None" },
 ];
 
