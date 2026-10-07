@@ -19,7 +19,7 @@ Create a token in the console → **Agent**. Scopes: `read` (all tools below) an
 | `list_people` | known voices, last heard |
 | `changes_since` | finished conversations and bookmarks since a cursor — cheap wake-up check |
 | `get_audio_clip_url` | short-lived signed URLs to the Ogg Opus audio |
-| `send_notification` | push to the phone (and pendant buzz); policy still applies: quiet hours, hourly cap, "after the conversation" |
+| `send_notification` | push to the phone now; see [Notifications](#notifications) |
 
 Output is compact text for LLMs:
 
@@ -29,6 +29,22 @@ Output is compact text for LLMs:
 09:30:20 [door slam]
 09:31–09:45 {music}
 ```
+
+## Notifications
+
+`send_notification` delivers immediately. Hearloom never holds, queues or retries a notification: the
+agent picks the moment (with `get_current_context`), and a held message would go stale. Policy can only
+make it quieter:
+
+- **Silent** (no sound, no pendant buzz; it still lands in the notification list) during quiet hours,
+  while the user is in a conversation, or once the user's hourly limit of notifications with sound
+  (default 4) is used up.
+- **Time-sensitive** rings through conversations and the hourly limit (and buzzes the pendant), never
+  through quiet hours.
+- **Refused** past 30 agent notifications in an hour, or when the user turned agent notifications off.
+
+The tool result says which happened, e.g.
+`Notification 01a1…: delivered silently (no sound or buzz): quiet hours until 07:30.`
 
 ## Webhooks
 

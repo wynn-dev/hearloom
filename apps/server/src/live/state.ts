@@ -1,6 +1,6 @@
 /**
  * In-memory "what is happening right now" per user. The live pipeline (speech + sound
- * events) updates it; notification policy and, later, the agent's get_current_context read it.
+ * events) updates it; notification policy and the agent's get_current_context read it.
  */
 export interface LiveState {
   inConversation: boolean;
@@ -11,7 +11,6 @@ export interface LiveState {
 }
 
 const states = new Map<string, LiveState>();
-const conversationEndListeners = new Set<(userId: string) => void>();
 
 export function liveState(userId: string): LiveState {
   let s = states.get(userId);
@@ -29,12 +28,7 @@ export function liveState(userId: string): LiveState {
 }
 
 export function updateLiveState(userId: string, patch: Partial<LiveState>): void {
-  const s = liveState(userId);
-  const wasInConversation = s.inConversation;
-  Object.assign(s, patch);
-  if (wasInConversation && !s.inConversation) {
-    for (const fn of conversationEndListeners) fn(userId);
-  }
+  Object.assign(liveState(userId), patch);
 }
 
 /** The live pipeline stopped: nobody is in a conversation it is tracking anymore. */
@@ -42,9 +36,4 @@ export function resetConversationState(): void {
   for (const [userId, s] of states) {
     if (s.inConversation) updateLiveState(userId, { inConversation: false, conversationId: null });
   }
-}
-
-export function onConversationEnd(fn: (userId: string) => void): () => void {
-  conversationEndListeners.add(fn);
-  return () => conversationEndListeners.delete(fn);
 }

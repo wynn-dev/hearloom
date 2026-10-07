@@ -87,9 +87,11 @@ transcribed (it's logged; the audio is still stored). Everything else runs on th
 
 ## Notifications
 
-One gateway for system alerts and agent nudges: policy (source toggles, hourly cap, quiet hours in the
-user's timezone, "hold until the conversation ends") → delivery over the live socket (fast; can buzz the
-pendant) with APNs fallback → audit trail and feedback (useful / not useful / snooze / reply).
+One gateway for system alerts and agent notifications. Nothing is held or queued: the agent decides when
+to speak, and policy can only lower the volume (silent during quiet hours, a conversation, or past the
+hourly limit with sound) or refuse past a hard ceiling of 30 an hour → delivery over the live socket
+(fast; can buzz the pendant) with APNs fallback → audit trail and feedback (useful / not useful / snooze /
+reply).
 
 ## Agent interface
 

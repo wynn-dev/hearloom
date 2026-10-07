@@ -241,7 +241,7 @@ function SettingsForm({ server }: { server: Settings }) {
         <CardHeader
           icon={<Moon aria-hidden />}
           title="Quiet hours"
-          description="Non-urgent notifications are held until quiet hours end. Time-sensitive alerts still come through."
+          description="Notifications arrive silently, with no sound or buzz. Only a test notification rings through."
         />
         <CardBody className="divide-y divide-line">
           <SettingRow title="Enable quiet hours" htmlFor="quiet-enabled">
@@ -294,13 +294,13 @@ function SettingsForm({ server }: { server: Settings }) {
         />
         <CardBody className="divide-y divide-line">
           <SettingRow
-            title="Maximum per hour"
+            title="With sound per hour"
             htmlFor="max-per-hour"
             description={
               errors.maxPerHour ? (
                 <ErrorText>{errors.maxPerHour}</ErrorText>
               ) : (
-                "Cap for rule and agent nudges in any rolling hour. System alerts are never capped."
+                "Agent notifications past this many in an hour arrive silently. Time-sensitive ones and system alerts don't count."
               )
             }
           >
@@ -317,7 +317,7 @@ function SettingsForm({ server }: { server: Settings }) {
             [
               ["system", "System alerts", "Pendant disconnected, low battery, test notifications."],
               ["rule", "Rules", "Notifications from rules you define."],
-              ["agent", "Agent", "Proactive nudges from the assistant."],
+              ["agent", "Agent", "Notifications from your agent."],
             ] as const
           ).map(([key, title, description]) => (
             <SettingRow key={key} title={title} description={description} htmlFor={`src-${key}`}>
@@ -335,7 +335,7 @@ function SettingsForm({ server }: { server: Settings }) {
           <SettingRow
             title="Vibrate the pendant"
             htmlFor="pendant-haptic"
-            description="Buzz the Omi when a nudge arrives over the live connection."
+            description="Buzz the Omi for time-sensitive notifications while the phone is connected."
           >
             <Switch
               id="pendant-haptic"

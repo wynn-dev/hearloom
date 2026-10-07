@@ -127,7 +127,7 @@ export default function Settings() {
               }
             />
             <Row
-              label="Buzz pendant on nudges"
+              label="Buzz pendant when urgent"
               right={
                 <Switch
                   value={s.notifications.pendantHaptic}
@@ -135,7 +135,7 @@ export default function Settings() {
                 />
               }
             />
-            <Row label="Max nudges per hour" value={String(s.notifications.maxPerHour)} />
+            <Row label="With sound per hour" value={String(s.notifications.maxPerHour)} />
             <Row label="Timezone" value={s.timezone} />
             <Text style={{ color: t.muted, fontSize: 13 }}>More options in the web console.</Text>
           </Card>

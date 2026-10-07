@@ -85,11 +85,12 @@ resulting semantic events (`bookmark`, `muted`, …).
 
 ## 3. Notifications
 
-Every notification (system alerts, rules, later the agent) goes through one gateway
+Every notification (system alerts and the agent) goes through one gateway
 (`apps/server/src/notify`):
 
-1. **Policy** — source toggles, hourly cap (non-system), quiet hours in the user's timezone (unless
-   `time-sensitive`), and "hold until the current conversation ends".
+1. **Policy** — never delays: source toggles and a hard ceiling (30 agent notifications an hour) refuse;
+   quiet hours in the user's timezone, an ongoing conversation and the hourly limit with sound only make
+   it `passive` (silent). See `docs/agent.md`.
 2. **Delivery** — over the live ingest socket when the phone is connected (fast, and the only way to buzz
    the pendant); if the phone doesn't `notify_ack` within 4 s, fall back to APNs.
 3. **Audit** — every attempt is stored in `notification_deliveries`; feedback (useful / not useful /
