@@ -13,6 +13,8 @@ import { enqueueRefine, stopJobs } from "./jobs";
 import { livePipeline } from "./live/host";
 import { stopNotifications } from "./notify/gateway";
 import { attachRealtimeServer, topicFor } from "./realtime";
+import { onDetection } from "./voice/commands";
+import { onTeachHeard } from "./voice/teach";
 
 interface RealtimeSocketData {
   kind: "realtime";
@@ -75,6 +77,13 @@ const server = Bun.serve<SocketData>({
 attachRealtimeServer(server as never);
 livePipeline.start();
 setFrameListener((meta, frames) => livePipeline.push(meta, frames));
+// "Hey <agent>, …": store what was heard, deliver commands to the agent; teaching samples.
+livePipeline.onVoiceCommand((d) => {
+  void onDetection(d).catch((err) => console.error("[voice] command failed", err));
+});
+livePipeline.onTeachHeard((userId, result) => {
+  void onTeachHeard(userId, result).catch((err) => console.error("[voice] teach failed", err));
+});
 // Finished blocks get an offline refine pass (worker process).
 livePipeline.onBlockClosed((_userId, blockId) => {
   if (env.REFINE === "on")

@@ -164,6 +164,71 @@ export const apiTokenSchema = z.object({
   lastUsedAt: z.date().nullable(),
 });
 
+export const voiceCommandSchema = z.object({
+  id: z.uuid(),
+  spokenAt: z.date(),
+  endedAt: z.date(),
+  wakeName: z.string(),
+  heardAs: z.string(),
+  nameScore: z.number(),
+  transcript: z.string(),
+  command: z.string(),
+  speakerScore: z.number().nullable(),
+  status: z.enum(["pending", "sent", "failed", "expired", "shadow", "ignored", "test"]),
+  reason: z.string().nullable(),
+  attempts: z.number(),
+  httpStatus: z.number().nullable(),
+  /** Spoken (end) to accepted by the agent, ms. */
+  latencyMs: z.number().nullable(),
+  feedback: z.enum(["confirmed", "false_trigger", "missed"]).nullable(),
+});
+
+export const teachResultSchema = z.object({
+  kind: z.enum(["sample", "test"]),
+  index: z.number(),
+  phrase: z.string(),
+  source: z.enum(["pendant", "browser"]),
+  text: z.string(),
+  ok: z.boolean(),
+  heardAs: z.string().nullable(),
+  nameScore: z.number(),
+  wouldMatch: z.boolean(),
+  speakerScore: z.number().nullable(),
+  seconds: z.number(),
+  voiceprintId: z.string().nullable(),
+  wouldTrigger: z.boolean(),
+  error: z.string().optional(),
+});
+
+export const voiceStatusSchema = z.object({
+  profile: z.object({
+    voiceprints: z.number(),
+    voiceSeconds: z.number(),
+    samples: z.number(),
+    consistency: z.number().nullable(),
+    nameRecognition: z.number().nullable(),
+    threshold: z.number(),
+    thresholdLearned: z.boolean(),
+    progress: z.number(),
+    canEnable: z.boolean(),
+    minPrintSeconds: z.number(),
+  }),
+  teach: z
+    .object({
+      sessionId: z.string(),
+      kind: z.enum(["sample", "test"]),
+      index: z.number(),
+      phrase: z.string(),
+      taken: z.number(),
+      results: z.array(teachResultSchema),
+    })
+    .nullable(),
+  /** A pendant is streaming right now (teach through it). */
+  pendantLive: z.boolean(),
+  pipelineRunning: z.boolean(),
+  webhookConfigured: z.boolean(),
+});
+
 export const contract = {
   me: {
     get: oc.output(
@@ -276,6 +341,49 @@ export const contract = {
       revoke: oc.input(z.object({ id: z.uuid() })).output(ok),
     },
   },
+  voice: {
+    status: oc.output(voiceStatusSchema),
+    commands: oc
+      .input(
+        z.object({
+          limit: z.number().int().min(1).max(200).default(50),
+          before: z.date().optional(),
+        }),
+      )
+      .output(z.array(voiceCommandSchema)),
+    /** It was me / wasn't me / should have fired. Confirmed and missed ones are learned from. */
+    feedback: oc
+      .input(
+        z.object({
+          id: z.uuid(),
+          feedback: voiceCommandSchema.shape.feedback,
+        }),
+      )
+      .output(ok),
+    /** Send a signed `voice.command` with `test: true` to the agent webhook. */
+    test: oc.output(
+      z.object({
+        status: z.enum(["sent", "failed", "expired"]),
+        reason: z.string().nullable(),
+        httpStatus: z.number().nullable(),
+      }),
+    ),
+    teach: {
+      /** sample = learn from each phrase; test = say the wake phrase, see if it would fire. */
+      start: oc.input(z.object({ kind: z.enum(["sample", "test"]) })).output(ok),
+      stop: oc.output(ok),
+      skip: oc.output(ok),
+      /** A phrase recorded with the browser mic: base64 of 16 kHz mono PCM16 (little endian). */
+      upload: oc
+        .input(
+          z.object({
+            sessionId: z.string(),
+            pcm: z.string().max(16_000 * 2 * 15 * 1.4),
+          }),
+        )
+        .output(ok),
+    },
+  },
   bookmarks: {
     create: oc
       .input(z.object({ at: z.date().optional(), note: z.string().max(500).optional() }))
@@ -314,11 +422,16 @@ export type NotificationItem = z.infer<typeof notificationSchema>;
 export type AudioChunk = z.infer<typeof audioChunkSchema>;
 export type Person = z.infer<typeof personSchema>;
 export type ApiToken = z.infer<typeof apiTokenSchema>;
+export type VoiceCommand = z.infer<typeof voiceCommandSchema>;
+export type VoiceStatus = z.infer<typeof voiceStatusSchema>;
+export type TeachResultItem = z.infer<typeof teachResultSchema>;
 
 /** Realtime events pushed to console/app sockets (`/realtime`). Clients refetch on these. */
 export type RealtimeEvent =
   | {
       t: "invalidate";
-      keys: Array<"status" | "timeline" | "notifications" | "phones" | "settings" | "people">;
+      keys: Array<
+        "status" | "timeline" | "notifications" | "phones" | "settings" | "people" | "voice"
+      >;
     }
   | { t: "hello"; serverTime: number };

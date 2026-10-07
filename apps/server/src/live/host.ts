@@ -5,8 +5,11 @@ import type { StreamMeta } from "../ingest/stream-writer";
 import { invalidate } from "../realtime";
 import type { ChildMessage, HostMessage } from "./ipc";
 import { resetActivity, setActivity } from "./state";
+import type { TeachPrompt, TeachResult, VoiceDetection } from "./voice/types";
 
 type BlockClosedHandler = (userId: string, blockId: string) => void;
+type VoiceCommandHandler = (detection: VoiceDetection) => void;
+type TeachHeardHandler = (userId: string, result: TeachResult) => void;
 
 /**
  * Supervises the live pipeline child process: forwards stored frames, applies state updates,
@@ -19,7 +22,12 @@ export class LivePipelineHost {
   private backoffMs = 1000;
   private stopped = false;
   private readonly onBlock = new Set<BlockClosedHandler>();
-  private pending = new Map<string, { resolve: (s: number) => void; reject: (e: Error) => void }>();
+  private readonly onVoice = new Set<VoiceCommandHandler>();
+  private readonly onTeach = new Set<TeachHeardHandler>();
+  private pending = new Map<
+    string,
+    { resolve: (value: never) => void; reject: (e: Error) => void }
+  >();
 
   start(): void {
     if (env.LIVE_PIPELINE === "off") {
@@ -32,6 +40,16 @@ export class LivePipelineHost {
   /** A block of speech is complete (refine it). */
   onBlockClosed(fn: BlockClosedHandler): void {
     this.onBlock.add(fn);
+  }
+
+  /** A wake phrase was heard (deliverable, shadow, or ignored with a reason). */
+  onVoiceCommand(fn: VoiceCommandHandler): void {
+    this.onVoice.add(fn);
+  }
+
+  /** The user said something while teaching their voice. */
+  onTeachHeard(fn: TeachHeardHandler): void {
+    this.onTeach.add(fn);
   }
 
   push(meta: StreamMeta, frames: AudioFrame[]): void {
@@ -51,25 +69,75 @@ export class LivePipelineHost {
 
   /** Ask the pipeline (which holds the speaker model) to learn a voiceprint from an utterance. */
   enroll(userId: string, personId: string, utteranceId: string): Promise<number> {
+    return this.request<number>((requestId) => ({
+      t: "enroll",
+      requestId,
+      userId,
+      personId,
+      utteranceId,
+    }));
+  }
+
+  /** Learn the user's own voice from stored audio (a confirmed voice command). */
+  learnVoice(
+    userId: string,
+    personId: string,
+    streamId: string,
+    from: number,
+    to: number,
+  ): Promise<{ voiceprintId: string; seconds: number }> {
+    return this.request((requestId) => ({
+      t: "learn_voice",
+      requestId,
+      userId,
+      personId,
+      streamId,
+      from,
+      to,
+    }));
+  }
+
+  /** What the user is asked to say on the Voice page (null: not teaching). */
+  teach(userId: string, prompt: TeachPrompt | null): void {
+    this.send({ t: "teach", userId, prompt });
+  }
+
+  /** A teaching sample recorded in the browser. */
+  teachAudio(userId: string, prompt: TeachPrompt, pcm: Int16Array): boolean {
+    if (!this.child || !this.ready) return false;
+    this.send({ t: "teach_audio", userId, prompt, pcm });
+    return true;
+  }
+
+  /** Voice settings or samples changed. */
+  voiceChanged(userId: string): void {
+    this.send({ t: "voice_changed", userId });
+  }
+
+  get running(): boolean {
+    return this.child !== null && this.ready;
+  }
+
+  private request<T>(make: (requestId: string) => HostMessage): Promise<T> {
     if (!this.child || !this.ready)
       return Promise.reject(new Error("live pipeline is not running"));
     const requestId = crypto.randomUUID();
-    return new Promise<number>((resolve, reject) => {
+    return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(requestId);
-        reject(new Error("enrollment timed out"));
+        reject(new Error("the live pipeline did not answer in time"));
       }, 60_000);
       this.pending.set(requestId, {
-        resolve: (s) => {
+        resolve: (value: T) => {
           clearTimeout(timer);
-          resolve(s);
+          resolve(value);
         },
-        reject: (e) => {
+        reject: (e: Error) => {
           clearTimeout(timer);
           reject(e);
         },
-      });
-      this.send({ t: "enroll", requestId, userId, personId, utteranceId });
+      } as never);
+      this.send(make(requestId));
     });
   }
 
@@ -143,9 +211,23 @@ export class LivePipelineHost {
       case "enrolled": {
         const p = this.pending.get(msg.requestId);
         this.pending.delete(msg.requestId);
-        if (p) msg.ok ? p.resolve(msg.sampleSeconds) : p.reject(new Error(msg.error));
+        if (p) msg.ok ? p.resolve(msg.sampleSeconds as never) : p.reject(new Error(msg.error));
         return;
       }
+      case "learned": {
+        const p = this.pending.get(msg.requestId);
+        this.pending.delete(msg.requestId);
+        if (!p) return;
+        if (msg.ok) p.resolve({ voiceprintId: msg.voiceprintId, seconds: msg.seconds } as never);
+        else p.reject(new Error(msg.error));
+        return;
+      }
+      case "voice_command":
+        for (const fn of this.onVoice) fn(msg.detection);
+        return;
+      case "teach_heard":
+        for (const fn of this.onTeach) fn(msg.userId, msg.result);
+        return;
       case "block_closed":
         for (const fn of this.onBlock) fn(msg.userId, msg.blockId);
         return;

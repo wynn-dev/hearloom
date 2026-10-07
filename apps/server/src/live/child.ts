@@ -20,6 +20,7 @@ import { EpisodeTracker } from "./episodes";
 import type { ChildMessage, HostMessage } from "./ipc";
 import { type LiveDeps, type StreamInfo, StreamProcessor } from "./processor";
 import { SpeakerDirectory } from "./speakers";
+import { VoiceRuntime } from "./voice/runtime";
 
 const send = (msg: ChildMessage) => process.send?.(msg);
 const log = (message: string) => send({ t: "log", message });
@@ -50,6 +51,18 @@ const episodes = new EpisodeTracker(
   },
   async (userId) => (await speakers?.hasSelf(userId)) ?? false,
 );
+const sonioxConfig =
+  env.LIVE_ASR === "soniox" && env.SONIOX_API_KEY
+    ? {
+        apiKey: env.SONIOX_API_KEY,
+        model: env.SONIOX_MODEL,
+        asyncModel: env.SONIOX_ASYNC_MODEL,
+        languageHints: env.LANGUAGE_HINTS.split(",")
+          .map((s) => s.trim())
+          .filter(Boolean),
+      }
+    : null;
+const voice = new VoiceRuntime({ db, embedder, speakers, soniox: sonioxConfig, send, log });
 const deps: LiveDeps = {
   db,
   modelsDir,
@@ -73,17 +86,9 @@ const deps: LiveDeps = {
     },
     env.SPEAKER_CLUSTER_THRESHOLD,
   ),
-  soniox:
-    env.LIVE_ASR === "soniox" && env.SONIOX_API_KEY
-      ? {
-          apiKey: env.SONIOX_API_KEY,
-          model: env.SONIOX_MODEL,
-          asyncModel: env.SONIOX_ASYNC_MODEL,
-          languageHints: env.LANGUAGE_HINTS.split(",")
-            .map((s) => s.trim())
-            .filter(Boolean),
-        }
-      : null,
+  soniox: sonioxConfig,
+  voice: voice.detector,
+  terms: (userId) => voice.terms(userId),
   invalidate: (userId, keys) => send({ t: "invalidate", userId, keys }),
   log,
 };
@@ -111,6 +116,7 @@ function processorFor(info: StreamInfo): StreamProcessor {
 
 process.on("message", (raw) => {
   const msg = raw as HostMessage;
+  if (voice.handle(msg)) return;
   if (msg.t === "frames") {
     void processorFor(msg.stream).push(msg.frames as AudioFrame[]);
   } else if (msg.t === "voiceprints_changed") {
@@ -187,6 +193,7 @@ setInterval(() => {
   }
   void deps.blocks.tick(now).catch((err) => log(`blocks: ${err}`));
   void episodes.tick(now).catch(fail);
+  void voice.detector.tick().catch((err) => log(`voice: ${err}`));
 }, 1000);
 
 async function shutdown() {

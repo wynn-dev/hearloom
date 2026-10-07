@@ -1,11 +1,28 @@
 import type { Activity } from "./episodes";
 import type { StreamInfo } from "./processor";
+import type { TeachPrompt, TeachResult, VoiceDetection } from "./voice/types";
 
 export type HostMessage =
   | { t: "frames"; stream: StreamInfo; frames: { seq: number; at: number; data: Uint8Array }[] }
   | { t: "voiceprints_changed"; userId: string }
   | { t: "episodes_changed"; userId: string }
-  | { t: "enroll"; requestId: string; userId: string; personId: string; utteranceId: string };
+  | { t: "enroll"; requestId: string; userId: string; personId: string; utteranceId: string }
+  /** Voice settings or samples changed: reload the user's voice config. */
+  | { t: "voice_changed"; userId: string }
+  /** The user is teaching their voice (null: stopped). */
+  | { t: "teach"; userId: string; prompt: TeachPrompt | null }
+  /** A teaching sample recorded in the browser (16 kHz mono). */
+  | { t: "teach_audio"; userId: string; prompt: TeachPrompt; pcm: Int16Array }
+  /** Learn the user's voice from stored audio (a voice command they confirmed). */
+  | {
+      t: "learn_voice";
+      requestId: string;
+      userId: string;
+      personId: string;
+      streamId: string;
+      from: number;
+      to: number;
+    };
 
 export type ChildMessage =
   | { t: "ready" }
@@ -14,4 +31,8 @@ export type ChildMessage =
   | { t: "activity"; userId: string; activity: Activity | null }
   | { t: "block_closed"; userId: string; blockId: string }
   | { t: "enrolled"; requestId: string; ok: true; sampleSeconds: number }
-  | { t: "enrolled"; requestId: string; ok: false; error: string };
+  | { t: "enrolled"; requestId: string; ok: false; error: string }
+  | { t: "voice_command"; detection: VoiceDetection }
+  | { t: "teach_heard"; userId: string; result: TeachResult }
+  | { t: "learned"; requestId: string; ok: true; voiceprintId: string; seconds: number }
+  | { t: "learned"; requestId: string; ok: false; error: string };
