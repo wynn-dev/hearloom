@@ -59,8 +59,8 @@ pnpm check && pnpm typecheck && pnpm test
 ```
 
 Server tests create and delete rows and close open conversations, so they only run against a local
-database: `DATABASE_URL` on localhost, or set `TEST_DATABASE_URL` to a throwaway database (needed when
-`.env` points at a hosted one).
+database: `DATABASE_URL` on localhost, or `TEST_DATABASE_URL` (in `.env` or the environment) pointing
+at a throwaway database, which is needed when `.env` points at a hosted one.
 
 ## License
 
