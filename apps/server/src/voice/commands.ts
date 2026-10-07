@@ -295,12 +295,13 @@ async function learnFrom(
     // The verdict changed while we were learning: that one decides what's learned.
     if (now?.feedback !== feedback) return { learned: false, note: "changed meanwhile" };
     const [already] = await tx
-      .select({ id: voiceSamples.id })
+      .select({ voiceprintId: voiceSamples.voiceprintId })
       .from(voiceSamples)
       .where(eq(voiceSamples.commandId, row.id));
     // The same verdict, sent twice at once: the other request learned from it. Any other verdict
-    // in between would have removed its sample, so this one's is saved and learned from.
-    if (already) return { learned: true, note: null };
+    // in between would have removed its sample, so this one's is saved and learned from (the
+    // spelling only, if the voice wasn't: then say why, as the other request did).
+    if (already) return { learned: true, note: already.voiceprintId ? null : note };
     // The name: a fired command was already verified as the user's voice; a missed one only
     // if its voice just was. Confirmed by the user, so even a multi-word spelling.
     const { voice: settings } = await getSettings(userId);

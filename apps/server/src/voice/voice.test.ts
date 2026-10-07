@@ -348,6 +348,32 @@ test("two 👍 at once: both read as saved and learned, and it's learned once", 
   expect(await voiceprintIds()).toEqual(before);
 });
 
+test("two 👍 at once on a voice that isn't learned: both say why", async () => {
+  const refused = "That didn't sound enough like you to learn from.";
+  pipeline.learnVoice = async () => {
+    await Bun.sleep(100);
+    throw new Error(refused);
+  };
+  const before = await voiceprintIds();
+  // A fired command: its spelling is learned even though its voice isn't.
+  const d = detection({ status: "shadow", heardAs: "Hermus", nameScore: 0.9, streamId });
+  await onDetection(d);
+  const results = await Promise.all([
+    setFeedback(userId, d.id, "confirmed"),
+    setFeedback(userId, d.id, "confirmed"),
+  ]);
+  expect(results).toEqual([
+    { learned: true, note: refused },
+    { learned: true, note: refused },
+  ]);
+  const samples = await samplesOf(d.id);
+  expect(samples).toHaveLength(1);
+  expect(samples[0]!.voiceprintId).toBeNull();
+  expect(await voiceprintIds()).toEqual(before);
+  await setFeedback(userId, d.id, null);
+  await updateSettings(userId, { voice: { aliases: [], blocked: [] } });
+});
+
 test("a voiceprint is never stored without the sample that removes it", async () => {
   // "This is me" and People voiceprints have no sample row by design: never touched.
   const thisIsMe = await voiceprint();

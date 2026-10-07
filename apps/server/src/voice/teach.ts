@@ -7,6 +7,7 @@ import { TEACH_GRACE_MS } from "../live/voice/detector";
 import type { TeachHeard, TeachPrompt, TeachResult } from "../live/voice/types";
 import { invalidate } from "../realtime";
 import { getSettings, updateSettings } from "../settings";
+import { MAX_AGE_MS } from "./deliver";
 import { ensureSelfPerson, insertVoiceprint } from "./profile";
 
 const { voiceSamples } = schema;
@@ -45,9 +46,10 @@ const sessions = new Map<string, Session>();
 const stoppedAt = new Map<string, number>();
 /**
  * A stop is remembered this long. Longer than the grace window: a detection arrives only after
- * its command ends (up to 30 s of speech, then a pause), and is judged by when it started.
+ * its command ends, and is judged by when it started. One that started more than MAX_AGE_MS ago
+ * is never sent anyway, so the stop isn't needed after that.
  */
-const STOP_KEEP_MS = TEACH_GRACE_MS + 60_000;
+const STOP_KEEP_MS = TEACH_GRACE_MS + MAX_AGE_MS;
 
 /** Forget stops too old to matter (the map only ever holds recent ones). */
 function pruneStops(): void {
