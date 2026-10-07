@@ -145,6 +145,29 @@ async function setStatus(
   return row!;
 }
 
+export type PhoneOutcome = "acked" | "apns" | "socket" | "failed";
+
+/**
+ * One copy per phone. Apple push goes first: it reaches a suspended app, and nothing follows it, so a
+ * late socket ack can't put a second banner on the phone. The live socket is the fallback when push
+ * isn't set up or fails, and the only way to buzz the pendant.
+ */
+export async function deliverToPhone(channels: {
+  push: (() => Promise<boolean>) | null;
+  socket: (() => Promise<"acked" | "unacked" | "failed">) | null;
+  buzz: (() => void) | null;
+}): Promise<PhoneOutcome> {
+  if (channels.push && (await channels.push())) {
+    channels.buzz?.();
+    return "apns";
+  }
+  if (channels.socket) {
+    const sent = await channels.socket();
+    if (sent !== "failed") return sent === "acked" ? "acked" : "socket";
+  }
+  return "failed";
+}
+
 async function deliver(row: NotificationRow, pendantHaptic: boolean): Promise<NotificationRow> {
   const targets = await db
     .select()
@@ -164,57 +187,67 @@ async function deliver(row: NotificationRow, pendantHaptic: boolean): Promise<No
     interruptionLevel: row.interruptionLevel,
     collapseKey: row.collapseKey,
   };
+  const record = (
+    phoneId: string,
+    delivery: Omit<typeof notificationDeliveries.$inferInsert, "notificationId" | "phoneId">,
+  ) => db.insert(notificationDeliveries).values({ notificationId: row.id, phoneId, ...delivery });
 
   const outcomes = await Promise.all(
-    targets.map(async (phone): Promise<"acked" | "apns" | "failed"> => {
-      // 1) Live socket: fastest, and the only path that can buzz the pendant.
-      if (isPhoneOnline(phone.id)) {
-        const ackP = waitForAck(row.id, phone.id);
-        const sent = sendToPhone(phone.id, {
-          t: "notify",
-          id: row.id,
-          title: row.title,
-          body: row.body,
-          category: apnsMsg.category,
-          deepLink: row.deepLink ?? undefined,
-          interruptionLevel: row.interruptionLevel,
-          haptic,
-        });
-        if (sent && (await ackP)) {
-          await db.insert(notificationDeliveries).values({
-            notificationId: row.id,
-            phoneId: phone.id,
-            channel: "socket",
-            status: "acked",
-          });
-          return "acked";
-        }
-        pendingAcks.delete(ackKey(row.id, phone.id));
-      }
-      // 2) APNs fallback.
-      if (!apns || !phone.apnsToken || !phone.apnsEnv) {
-        await db.insert(notificationDeliveries).values({
-          notificationId: row.id,
-          phoneId: phone.id,
+    targets.map(async (phone) => {
+      const { apnsToken, apnsEnv } = phone;
+      const online = isPhoneOnline(phone.id);
+      const outcome = await deliverToPhone({
+        push:
+          apns && apnsToken && apnsEnv
+            ? async () => {
+                const res = await apns.send(apnsToken, apnsEnv, apnsMsg);
+                await record(phone.id, {
+                  channel: "apns",
+                  status: res.ok ? "sent" : "failed",
+                  apnsId: res.apnsId ?? null,
+                  error: res.ok ? null : `${res.status} ${res.reason ?? ""}`.trim(),
+                });
+                if (res.unregistered) {
+                  await db.update(phones).set({ apnsToken: null }).where(eq(phones.id, phone.id));
+                }
+                return res.ok;
+              }
+            : null,
+        socket: online
+          ? async () => {
+              const ackP = waitForAck(row.id, phone.id);
+              const sent = sendToPhone(phone.id, {
+                t: "notify",
+                id: row.id,
+                title: row.title,
+                body: row.body,
+                category: apnsMsg.category,
+                deepLink: row.deepLink ?? undefined,
+                interruptionLevel: row.interruptionLevel,
+                haptic,
+              });
+              if (!sent) {
+                pendingAcks.delete(ackKey(row.id, phone.id));
+                return "failed";
+              }
+              const acked = await ackP;
+              await record(phone.id, { channel: "socket", status: acked ? "acked" : "sent" });
+              return acked ? "acked" : "unacked";
+            }
+          : null,
+        buzz:
+          haptic && online
+            ? () => void sendToPhone(phone.id, { t: "haptic", pattern: haptic })
+            : null,
+      });
+      if (outcome === "failed" && !(apns && apnsToken && apnsEnv)) {
+        await record(phone.id, {
           channel: "apns",
           status: "failed",
           error: apns ? "no_push_token" : "apns_not_configured",
         });
-        return "failed";
       }
-      const res = await apns.send(phone.apnsToken, phone.apnsEnv, apnsMsg);
-      await db.insert(notificationDeliveries).values({
-        notificationId: row.id,
-        phoneId: phone.id,
-        channel: "apns",
-        status: res.ok ? "sent" : "failed",
-        apnsId: res.apnsId ?? null,
-        error: res.ok ? null : `${res.status} ${res.reason ?? ""}`.trim(),
-      });
-      if (res.unregistered) {
-        await db.update(phones).set({ apnsToken: null }).where(eq(phones.id, phone.id));
-      }
-      return res.ok ? "apns" : "failed";
+      return outcome;
     }),
   );
 
@@ -222,7 +255,7 @@ async function deliver(row: NotificationRow, pendantHaptic: boolean): Promise<No
   if (outcomes.includes("acked")) {
     return setStatus(row.id, { status: "delivered", sentAt: now, deliveredAt: now });
   }
-  if (outcomes.includes("apns")) {
+  if (outcomes.includes("apns") || outcomes.includes("socket")) {
     return setStatus(row.id, { status: "sent", sentAt: now });
   }
   return setStatus(row.id, { status: "failed", statusReason: "all_channels_failed" });
