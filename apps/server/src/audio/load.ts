@@ -66,11 +66,11 @@ export function concatPieces(pieces: AudioPiece[]): {
 } {
   const total = pieces.reduce((n, p) => n + p.samples.length, 0);
   const samples = new Float32Array(total);
-  const offsets: { at: number; startAt: number }[] = [];
+  const offsets: { at: number; startAt: number; end: number }[] = [];
   let o = 0;
   for (const p of pieces) {
     samples.set(p.samples, o);
-    offsets.push({ at: o / 16000, startAt: p.startAt });
+    offsets.push({ at: o / 16000, startAt: p.startAt, end: o + p.samples.length });
     o += p.samples.length;
   }
   return {
@@ -90,9 +90,10 @@ export function concatPieces(pieces: AudioPiece[]): {
         else break;
       }
       if (!span) return 0;
+      // A time in a gap between pieces maps to the end of the piece before it.
       return Math.max(
         0,
-        Math.min(total, Math.round((span.at + (absMs - span.startAt) / 1000) * 16000)),
+        Math.min(span.end, Math.round((span.at + (absMs - span.startAt) / 1000) * 16000)),
       );
     },
   };

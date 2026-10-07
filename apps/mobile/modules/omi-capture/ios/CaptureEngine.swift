@@ -30,7 +30,19 @@ final class CaptureEngine: NSObject {
   private var wearable: WearableInfo?
   private var codec: Int?
   private var charging = false
+  /// The charging state was reported on this connection (it's read and subscribed, so it can arrive twice).
+  private var chargingReported = false
   private var activeStreamId: String?
+  /// The active stream takes frames from the current connection. After a disconnect the stream stays
+  /// open (it tells the server capture is still intended, for alerts) but takes no more frames; the
+  /// next connection ends it at its last frame and starts a new one.
+  private var streamLive = false
+  /// Frames that arrive after a (re)connect before its stream starts (the pendant sends audio before
+  /// codec and device info are read). Journaled into the new stream, stamped by arrival time.
+  private var pendingFrames: [(data: Data, lost: Int, arrivedAt: Int64)] = []
+  /// Frames not held because `pendingFrames` was full.
+  private var pendingDropped = 0
+  private static let maxPendingFrames = 1500 // 30 s of 20 ms frames (codec 21), 15 s of 10 ms ones
   /// Capture time of the last frame, for stamping the next one; cleared when the timeline breaks
   /// (mute, disconnect) so the next frame re-anchors to the wall clock.
   private var lastFrameAt: Int64?
@@ -201,21 +213,28 @@ final class CaptureEngine: NSObject {
   private func startStream(codec: Int, wearable: WearableInfo) {
     endActiveStream()
     let frameMs = codec == 20 ? 10 : 20
+    let early = pendingFrames
+    if pendingDropped > 0 { Log.warn("engine: \(pendingDropped) frames before ready didn't fit and were dropped") }
+    pendingFrames = []
+    pendingDropped = 0
     let meta = StreamMeta(
-      id: UUID().uuidString.lowercased(), codec: codec, sampleRate: 16000, frameMs: frameMs, startedAt: nowMs(),
-      endedAt: nil, wearable: wearable)
+      id: UUID().uuidString.lowercased(), codec: codec, sampleRate: 16000, frameMs: frameMs,
+      startedAt: early.first?.arrivedAt ?? nowMs(), endedAt: nil, wearable: wearable)
     journal.create(meta)
     activeStreamId = meta.id
+    streamLive = true
     lastFrameAt = nil
     streamLastFrameAt = nil
     framesThisStream = 0
-    Log.info("engine: stream \(meta.id) started (codec \(codec))")
+    for f in early { appendFrame(f.data, lost: f.lost, arrivedAt: f.arrivedAt) }
+    Log.info("engine: stream \(meta.id) started (codec \(codec), \(early.count) early frames)")
     if uplink.state == .open { bind(meta.id) }
   }
 
   /// Mark the current stream finished at its last frame (like a stream recovered at launch); it is
   /// uploaded, then closed on the server with `bye`.
   private func endActiveStream() {
+    streamLive = false
     guard let id = activeStreamId else { return }
     activeStreamId = nil
     let endedAt = streamLastFrameAt ?? journal.meta(id)?.startedAt ?? nowMs()
@@ -227,9 +246,8 @@ final class CaptureEngine: NSObject {
   /// Capture time for the next frame. Contiguous frames advance exactly one frame duration (plus any
   /// lost notifications); if we've fallen far behind the wall clock the mic was asleep (silence), so
   /// re-anchor to now. Bursts after a BLE stall keep their earlier, correct times. Times never go
-  /// backwards within a stream (the server's chunk timing relies on it).
-  private func stamp(frameMs: Int, lost: Int) -> Int64 {
-    let now = nowMs()
+  /// backwards within a stream (the server's chunk timing relies on it). `now` is when the frame arrived.
+  private func stamp(frameMs: Int, lost: Int, now: Int64) -> Int64 {
     let floor = streamLastFrameAt.map { $0 + Int64(frameMs) } ?? 0
     guard let last = lastFrameAt else {
       let at = max(now, floor)
@@ -246,6 +264,14 @@ final class CaptureEngine: NSObject {
     at = max(at, floor)
     lastFrameAt = at
     return at
+  }
+
+  private func appendFrame(_ frame: Data, lost: Int, arrivedAt: Int64) {
+    guard let id = activeStreamId, let meta = journal.meta(id) else { return }
+    let at = stamp(frameMs: meta.frameMs, lost: lost, now: arrivedAt)
+    journal.append(id, at: at, data: frame)
+    streamLastFrameAt = at
+    framesThisStream += 1
   }
 
   private func applyMute(_ muted: Bool, fromButton: Bool) {
@@ -474,27 +500,32 @@ extension CaptureEngine: OmiBLEDelegate {
     guard codec == 20 || codec == 21 else {
       Log.error("ble: unsupported codec \(codec); update the pendant firmware")
       lastServerError = "Unsupported codec \(codec). Update the Omi firmware."
+      pendingFrames = []
+      pendingDropped = 0
       emitStatus()
       return
     }
     self.codec = codec
     wearable = info
     startStream(codec: codec, wearable: info)
+    // Ready comes once device info and battery are read, so this is the connection's only report.
     enqueueEvent(["t": "wearable", "wearable": info.json, "connected": true, "at": nowMs()])
-    emitStatus()
-  }
-
-  func ble(_ ble: OmiBLE, infoUpdated info: WearableInfo) {
-    wearable = info
-    if let id = activeStreamId { journal.updateMeta(id) { $0.wearable = info } }
-    sendIfOpen(["t": "wearable", "wearable": info.json, "connected": true, "at": nowMs()])
+    // A storage status that arrived before the codec was known (fresh app process) was skipped.
+    if offlineUnread > 0 { ble.refreshStorageStatus() }
     emitStatus()
   }
 
   func bleDisconnected(_ ble: OmiBLE, peripheralId: String, error: Error?) {
-    // Keep the stream open: if the pendant comes back, the next connection starts a new stream and
-    // closes this one. An open stream tells the server capture is still intended (for alerts).
+    // Stop feeding the stream but keep it open (see `streamLive`): it ends at its last frame when the
+    // pendant comes back, so frames of the next connection never land in it.
+    streamLive = false
+    if !pendingFrames.isEmpty {
+      Log.warn("engine: dropped \(pendingFrames.count + pendingDropped) frames received before ready")
+    }
+    pendingFrames = []
+    pendingDropped = 0
     lastFrameAt = nil
+    chargingReported = false
     finishOffline(reason: "disconnected")
     offlineSyncedTo = 0 // seqs are per pendant/connection; the pendant checkpoints on disconnect
     if let w = wearable {
@@ -504,28 +535,43 @@ extension CaptureEngine: OmiBLEDelegate {
   }
 
   func ble(_ ble: OmiBLE, frames: [Data], lost: Int) {
-    guard let id = activeStreamId, let meta = journal.meta(id), !settings.muted else { return }
-    for (i, frame) in frames.enumerated() {
-      let at = stamp(frameMs: meta.frameMs, lost: i == 0 ? lost : 0)
-      journal.append(id, at: at, data: frame)
-      streamLastFrameAt = at
-      framesThisStream += 1
+    guard !settings.muted, settings.captureEnabled else { return }
+    let now = nowMs()
+    guard streamLive else {
+      // Connected, but this connection's stream isn't started yet: hold them for it.
+      for (i, frame) in frames.enumerated() {
+        guard pendingFrames.count < CaptureEngine.maxPendingFrames else {
+          if pendingDropped == 0 { Log.warn("engine: still no stream after \(pendingFrames.count) frames; dropping") }
+          pendingDropped += 1
+          continue
+        }
+        pendingFrames.append((frame, i == 0 ? lost : 0, now))
+      }
+      return
     }
+    for (i, frame) in frames.enumerated() { appendFrame(frame, lost: i == 0 ? lost : 0, arrivedAt: now) }
     if framesThisStream % 50 == 0 { emitStatus() }
+  }
+
+  /// The connected pendant; battery and charging arrive before ready sets `wearable` (fresh process).
+  private func peripheralId(_ ble: OmiBLE) -> String {
+    ble.peripheral?.identifier.uuidString ?? wearable?.peripheralId ?? ""
   }
 
   func ble(_ ble: OmiBLE, battery: Int) {
     wearable?.battery = battery
     sendIfOpen([
-      "t": "event", "kind": "battery", "value": battery, "peripheralId": wearable?.peripheralId ?? "", "at": nowMs(),
+      "t": "event", "kind": "battery", "value": battery, "peripheralId": peripheralId(ble), "at": nowMs(),
     ])
     emitStatus()
   }
 
   func ble(_ ble: OmiBLE, charging: Bool) {
+    guard !chargingReported || charging != self.charging else { return }
+    chargingReported = true
     self.charging = charging
     sendIfOpen([
-      "t": "event", "kind": "charging", "value": charging, "peripheralId": wearable?.peripheralId ?? "", "at": nowMs(),
+      "t": "event", "kind": "charging", "value": charging, "peripheralId": peripheralId(ble), "at": nowMs(),
     ])
     emitStatus()
   }

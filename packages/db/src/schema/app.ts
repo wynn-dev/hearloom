@@ -169,7 +169,44 @@ export const voiceprints = pgTable(
   (t) => [index().on(t.personId)],
 );
 
-/** Rule-based conversation segments (silence gaps, speaker changes). */
+/** A voice the refine pass found in a block: later blocks of the chain match against it. */
+export interface BlockSpeaker {
+  /** Speaker key ("S3"), shared by every block of the chain. */
+  key: string;
+  personId: string | null;
+  isSelf: boolean | null;
+  /** Voice embedding of the cluster (SPEAKER_MODEL_ID). */
+  centroid: number[];
+  /** Seconds of speech it was learned from. */
+  seconds: number;
+}
+
+/**
+ * A bounded stretch of speech: the unit the refine pass works on. Blocks close after silence or,
+ * in long continuous speech (a lecture, an evening of TV), at a pause once they are long enough
+ * (see live/blocks.ts). Blocks of continuous speech share a chain, which scopes speaker keys; the
+ * chain id is the id of its conversation.
+ */
+export const blocks = pgTable(
+  "blocks",
+  {
+    id: id(),
+    userId: owner(),
+    chainId: uuid().notNull(),
+    startedAt: ts().notNull(),
+    endedAt: ts(),
+    status: text().$type<"open" | "closed" | "refining" | "refined">().notNull().default("open"),
+    speakers: jsonb().$type<BlockSpeaker[]>().notNull().default([]),
+    createdAt: createdAt(),
+    updatedAt: ts()
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (t) => [index().on(t.userId, t.startedAt), index().on(t.chainId)],
+);
+
+/** Continuous speech (no 2 minutes of silence): a chain of blocks. */
 export const conversations = pgTable(
   "conversations",
   {
@@ -196,6 +233,7 @@ export const utterances = pgTable(
     id: id(),
     userId: owner(),
     conversationId: uuid().references(() => conversations.id, { onDelete: "set null" }),
+    blockId: uuid().references(() => blocks.id, { onDelete: "set null" }),
     streamId: uuid().references(() => captureStreams.id, { onDelete: "set null" }),
     startAt: ts().notNull(),
     endAt: ts().notNull(),
@@ -220,6 +258,7 @@ export const utterances = pgTable(
   (t) => [
     index().on(t.userId, t.startAt),
     index().on(t.conversationId),
+    index().on(t.blockId),
     index("utterances_search_idx").using("gin", t.search),
   ],
 );

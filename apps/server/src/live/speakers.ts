@@ -68,9 +68,15 @@ export class SpeakerDirectory {
 export class SpeakerClusters {
   private clusters: { key: string; centroid: Float32Array; n: number }[] = [];
   private aliases = new Map<string, string>();
-  private next = 1;
+  private next: number;
 
-  constructor(private readonly threshold = 0.6) {}
+  /** `first`: number of the first key handed out (continue a chain's existing keys). */
+  constructor(
+    private readonly threshold = 0.6,
+    first = 1,
+  ) {
+    this.next = first;
+  }
 
   assign(embedding: Float32Array): string {
     let best: (typeof this.clusters)[number] | null = null;
