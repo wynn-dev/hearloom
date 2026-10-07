@@ -85,6 +85,14 @@ test("every token gets the read and episode-editing tools, and nothing else", as
   ]);
 });
 
+test("valid calls work for a user with no data", async () => {
+  expect(textOf(await call("get_timeline", { from: "2026-10-06T09:00:00Z" }))).toBe(
+    "Nothing recorded in this range.",
+  );
+  expect(textOf(await call("list_people", {}))).toBe("No known people yet.");
+  expect(textOf(await call("get_current_context", {}))).toContain("Local time:");
+});
+
 describe("input validation", () => {
   test("dates that don't parse are rejected before any query", async () => {
     for (const [name, args] of [
@@ -94,6 +102,10 @@ describe("input validation", () => {
       ["list_episodes", { from: "2026-10-06T09:00:00Z", to: "soon" }],
       ["get_audio_clip_url", { from: "nope", to: "2026-10-06T09:00:00Z" }],
       ["split_episode", { id: crypto.randomUUID(), at: "noon" }],
+      // JS parses these; Postgres doesn't.
+      ["get_timeline", { from: "-000001-01-01T00:00:00Z" }],
+      ["search_transcripts", { query: "hi", to: "+275760-09-12T00:00:00Z" }],
+      ["get_audio_clip_url", { from: "1969-12-31T23:00:00Z", to: "1969-12-31T23:30:00Z" }],
     ] as const) {
       const r = await call(name, args);
       expect(r.isError).toBe(true);
@@ -127,18 +139,25 @@ describe("input validation", () => {
   });
 
   test("LIKE wildcards and backslashes in a search are literal", async () => {
-    for (const query of ["100%", "a_b", "back\\slash", "\\"]) {
-      const r = await call("search_transcripts", { query, speaker: "50%\\" });
-      expect(r.isError).toBeFalsy();
-      expect(textOf(r)).toBe("No matches.");
+    const [alice] = await db.insert(schema.people).values({ userId, name: "Alice" }).returning();
+    await db.insert(schema.utterances).values({
+      userId,
+      personId: alice!.id,
+      startAt: new Date("2026-10-06T09:00:00Z"),
+      endAt: new Date("2026-10-06T09:00:03Z"),
+      text: "Hello world, 50 people came",
+      source: "live",
+      provider: "test",
+    });
+    const search = async (query: string, speaker?: string) =>
+      textOf(await call("search_transcripts", { query, ...(speaker ? { speaker } : {}) }));
+    // The seeded line is findable, so the cases below would match it if wildcards leaked through.
+    expect(await search("hello", "alice")).toContain("Alice: Hello world");
+    expect(await search("hello", "%")).toBe("No matches.");
+    expect(await search("%")).toBe("No matches.");
+    expect(await search("hello", "alic_")).toBe("No matches.");
+    for (const query of ["back\\slash", "\\"]) {
+      expect(await search(query, "50%\\")).toBe("No matches.");
     }
   });
-});
-
-test("valid calls work for a user with no data", async () => {
-  expect(textOf(await call("get_timeline", { from: "2026-10-06T09:00:00Z" }))).toBe(
-    "Nothing recorded in this range.",
-  );
-  expect(textOf(await call("list_people", {}))).toBe("No known people yet.");
-  expect(textOf(await call("get_current_context", {}))).toContain("Local time:");
 });

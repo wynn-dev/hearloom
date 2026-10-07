@@ -32,9 +32,14 @@ const PAGE_LINES = 400;
 
 const HOUR_MS = 3600_000;
 const text = (t: string) => ({ content: [{ type: "text" as const, text: t }] });
+const MAX_TIME = Date.UTC(10_000, 0, 1);
+/** Postgres refuses some times JS parses (negative or 6-digit years): keep to 1970–9999. */
 const iso = z
   .string()
-  .refine((s) => !Number.isNaN(Date.parse(s)), "not a valid date-time")
+  .refine((s) => {
+    const t = Date.parse(s);
+    return t >= 0 && t < MAX_TIME;
+  }, "not a valid date-time (years 1970–9999)")
   .describe("ISO 8601 date-time, e.g. 2026-10-06T09:00:00+02:00");
 
 /** `from`–`to` (default now), at most `max` long. Throws a message for the agent otherwise. */

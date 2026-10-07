@@ -104,7 +104,6 @@ When a block closes the server queues a job (pg-boss, in Postgres).
    identified), the job retries.
 7. Once the chain has ended and all its blocks are refined, merges keys that are the same voice
    but were split across blocks (never two keys heard in one block, or named after different people)
-   and marks the chain `refined`. An episode is refined once every block it overlaps is
-   (`episode.refined`).
+   and marks the chain `refined`. An episode is refined once every block it overlaps is.
 
 20 s of audio diarizes in ~0.3–1.3 s on an M5 Pro.
