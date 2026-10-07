@@ -40,7 +40,6 @@ pnpm --filter @hearloom/server create-user -- --email you@example.com --name You
 pnpm --filter @hearloom/server download-models            # local VAD/sound/speaker models
 pnpm --filter @hearloom/server build:diarizer              # macOS: speaker diarization sidecar
 pnpm dev                        # server :3000 + worker + console :5173
-pnpm dev:host                   # same, console (:5173) and server (:443) also on your tailnet over HTTPS
 ```
 
 Simulate a phone streaming audio (no hardware needed):
@@ -49,8 +48,9 @@ Simulate a phone streaming audio (no hardware needed):
 HEARLOOM_EMAIL=you@example.com HEARLOOM_PASSWORD=... pnpm --filter @hearloom/server simulate-phone
 ```
 
-Reach the server from your phone over [Tailscale](https://tailscale.com): set `PUBLIC_URL` to your
-machine's MagicDNS name (e.g. `https://mac.your-tailnet.ts.net` via `tailscale serve`).
+The phone has to reach the server: set `PUBLIC_URL` to a URL it can reach, over a network you set up
+yourself ([Tailscale](https://tailscale.com), your LAN, a reverse proxy…), e.g.
+`http://mac.your-tailnet.ts.net:3000`.
 
 ## Tests
 
