@@ -8,11 +8,17 @@ import { DayStrip } from "../../components/timeline/day-strip";
 import {
   buildEntries,
   defaultFilters,
+  type Episode,
   entryIndexAt,
   type Filters,
+  foldedByDefault,
   visibleDeviceEvents,
 } from "../../components/timeline/model";
-import { EntryView } from "../../components/timeline/rows";
+import {
+  EntryView,
+  type TimelineActions,
+  TimelineActionsProvider,
+} from "../../components/timeline/rows";
 import { Button, buttonClass } from "../../components/ui/button";
 import { Card, PageHeader } from "../../components/ui/card";
 import { Input } from "../../components/ui/input";
@@ -113,7 +119,34 @@ function DayView({ tz }: { tz: string }) {
     structuralSharing: shareTimeline,
   });
   const data = timeline.data;
-  const entries = useMemo(() => (data ? buildEntries(data, filters) : []), [data, filters]);
+  // Media and ambient episodes start folded; the user can open (or fold) any episode.
+  const [foldOverride, setFoldOverride] = useState<ReadonlyMap<string, boolean>>(new Map());
+  const folded = useCallback(
+    (ep: Episode) => foldOverride.get(ep.id) ?? foldedByDefault(ep),
+    [foldOverride],
+  );
+  const entries = useMemo(
+    () => (data ? buildEntries(data, filters, folded) : []),
+    [data, filters, folded],
+  );
+  const actions = useMemo((): TimelineActions => {
+    const eps = [...(data?.episodes ?? [])].sort(
+      (a, b) => a.startedAt.getTime() - b.startedAt.getTime(),
+    );
+    const byId = new Map(eps.map((e, i) => [e.id, i]));
+    return {
+      episode: (id) => eps[byId.get(id) ?? -1],
+      previous: (id) => eps[(byId.get(id) ?? 0) - 1],
+      folded: (id) => {
+        const ep = eps[byId.get(id) ?? -1];
+        return ep ? folded(ep) : false;
+      },
+      toggleFold: (id) => {
+        const ep = eps[byId.get(id) ?? -1];
+        if (ep) setFoldOverride((m) => new Map(m).set(id, !folded(ep)));
+      },
+    };
+  }, [data, folded]);
 
   const goTo = useCallback(
     (target: string) => void navigate({ search: target === today ? {} : { day: target } }),
@@ -224,7 +257,9 @@ function DayView({ tz }: { tz: string }) {
             <Summary data={data} />
             <DayStrip data={data} from={range.from} to={range.to} tz={tz} onPick={jumpTo} />
           </Card>
-          <DayList data={data} entries={entries} isToday={isToday} tz={tz} />
+          <TimelineActionsProvider value={actions}>
+            <DayList data={data} entries={entries} isToday={isToday} tz={tz} />
+          </TimelineActionsProvider>
         </div>
       ) : timeline.isPending ? (
         <Card>
@@ -240,7 +275,7 @@ function Summary({ data }: { data: Timeline }) {
   return (
     <div className="grid grid-cols-2 gap-4 sm:grid-cols-5">
       <Stat label="Audio recorded" value={recordedMs > 0 ? formatDuration(recordedMs) : "—"} />
-      <Stat label="Conversations" value={data.conversations.length} />
+      <Stat label="Episodes" value={data.episodes.length} />
       <Stat label="Utterances" value={data.utterances.length} />
       <Stat label="Sound events" value={data.soundEvents.length} />
       <Stat label="Bookmarks" value={data.bookmarks.length} />
@@ -306,7 +341,7 @@ function DayList({
     data.soundEvents.length === 0 &&
     data.bookmarks.length === 0 &&
     data.deviceEvents.length === 0 &&
-    data.conversations.length === 0;
+    data.episodes.length === 0;
 
   if (nothing) {
     return (

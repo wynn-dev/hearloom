@@ -151,3 +151,12 @@
   content-visibility: auto;
   contain-intrinsic-size: auto 36px;
 }
+
+/* Background speech (media, ambient) on the day strip: the episode color, hatched. */
+@utility hatch-series-2 {
+  background: repeating-linear-gradient(
+    135deg,
+    var(--series-2) 0 2px,
+    color-mix(in srgb, var(--series-2) 25%, transparent) 2px 4px
+  );
+}

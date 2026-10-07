@@ -7,10 +7,14 @@ import { BLOCK_MAX_MS, BLOCK_TARGET_MS, BlockTracker, SILENCE_GAP_MS } from "./b
 const { db, client } = createDb(process.env.DATABASE_URL, { max: 2 });
 const userId = `test-${crypto.randomUUID()}`;
 const events: string[] = [];
+const ends = new Map<string, number>();
 const tracker = () =>
   new BlockTracker(db, {
     chainStarted: (_u, id) => events.push(`started:${id}`),
-    chainEnded: (_u, id, live) => events.push(`ended:${id}:${live ? "live" : "backlog"}`),
+    chainEnded: (_u, id, live, endAt) => {
+      events.push(`ended:${id}:${live ? "live" : "backlog"}`);
+      ends.set(id, endAt);
+    },
     blockClosed: (_u, id) => events.push(`block:${id}`),
   });
 
@@ -22,12 +26,13 @@ afterAll(async () => {
   await client.end();
 });
 
-const conversations = () =>
+const chains = () =>
   db
     .select()
-    .from(schema.conversations)
-    .where(eq(schema.conversations.userId, userId))
-    .orderBy(asc(schema.conversations.startedAt));
+    .from(schema.chains)
+    .where(eq(schema.chains.userId, userId))
+    .orderBy(asc(schema.chains.startedAt));
+const chainOpen = async (id: string) => (await chains()).find((c) => c.id === id)!.endedAt === null;
 const blocks = (chainId: string) =>
   db
     .select()
@@ -42,7 +47,7 @@ test("backlog goes into one closed block and reports it once the upload is quiet
   const now = Date.now();
   // A live conversation is going on.
   const live = await t.place(userId, now - 5_000, now - 4_000, true);
-  expect(t.inConversation(userId, now)).toBe(true);
+  expect(await chainOpen(live.chainId)).toBe(true);
   // Meanwhile an hour-old recording uploads: 30 utterances, 20 s apart.
   const base = now - 3600_000;
   const placed = [];
@@ -54,7 +59,7 @@ test("backlog goes into one closed block and reports it once the upload is quiet
   const old = placed[0]!;
   expect(old.chainId).not.toBe(live.chainId);
   // The live conversation is untouched by the backlog.
-  expect(t.inConversation(userId, now)).toBe(true);
+  expect(await chainOpen(live.chainId)).toBe(true);
   const [block] = await blocks(old.chainId);
   expect(block!.endedAt!.getTime()).toBe(base + 29 * 20_000 + 5_000);
   expect(block!.status).toBe("closed");
@@ -62,6 +67,8 @@ test("backlog goes into one closed block and reports it once the upload is quiet
   await t.tick(Date.now() + SILENCE_GAP_MS + 1);
   expect(events).toContain(`block:${old.blockId}`);
   expect(events).toContain(`ended:${old.chainId}:backlog`);
+  expect(ends.get(old.chainId)).toBe(base + 29 * 20_000 + 5_000);
+  expect(ends.get(live.chainId)).toBe(now - 4_000);
   expect(events).toContain(`block:${live.blockId}`);
   expect(events).toContain(`ended:${live.chainId}:live`);
 });
@@ -78,16 +85,16 @@ test("concurrent placements for one user share a chain and block", async () => {
   await t.closeAll();
 });
 
-test("a restarted pipeline closes blocks and conversations left open", async () => {
+test("a restarted pipeline closes blocks and chains left open", async () => {
   const t = tracker();
   const at = Date.now() + 20 * MIN;
   const c = await t.place(userId, at, at + 1000, true);
   // New process: the old tracker is gone with the conversation still open in the DB.
   const fresh = tracker();
   expect(await fresh.closeOrphans()).toBeGreaterThanOrEqual(1);
-  const conv = (await conversations()).find((r) => r.id === c.chainId)!;
-  expect(conv.status).toBe("closed");
-  expect(conv.endedAt).not.toBeNull();
+  const chain = (await chains()).find((r) => r.id === c.chainId)!;
+  expect(chain.status).toBe("closed");
+  expect(chain.endedAt).not.toBeNull();
   const [block] = await blocks(c.chainId);
   expect(block!.status).toBe("closed");
   expect(block!.endedAt).not.toBeNull();
@@ -113,17 +120,14 @@ test("backlog blocks stay open while held, and new backlog re-opens a refined on
   expect(events).toContain(`ended:${c.chainId}:backlog`);
 
   await db.update(schema.blocks).set({ status: "refined" }).where(eq(schema.blocks.id, c.blockId));
-  await db
-    .update(schema.conversations)
-    .set({ status: "refined" })
-    .where(eq(schema.conversations.id, c.chainId));
+  await db.update(schema.chains).set({ status: "refined" }).where(eq(schema.chains.id, c.chainId));
   const again = await t.place(userId, base + 30_000, base + 35_000, false);
   expect(again.blockId).toBe(c.blockId);
   const [block] = await blocks(c.chainId);
   expect(block!.status).toBe("closed");
   expect(block!.endedAt!.getTime()).toBe(base + 35_000);
-  const conv = (await conversations()).find((r) => r.id === c.chainId)!;
-  expect(conv.status).toBe("closed");
+  const chain = (await chains()).find((r) => r.id === c.chainId)!;
+  expect(chain.status).toBe("closed");
 });
 
 test("continuous speech is cut into blocks at a pause once long, keeping one chain", async () => {
@@ -146,8 +150,7 @@ test("continuous speech is cut into blocks at a pause once long, keeping one cha
   // Closed blocks are reported right away; the conversation is still going.
   expect(events).toContain(`block:${rows[0]!.id}`);
   expect(events).toContain(`block:${rows[1]!.id}`);
-  expect(t.inConversation(userId, base + 25 * MIN)).toBe(true);
-  expect((await conversations()).find((c) => c.id === chainId)!.endedAt).toBeNull();
+  expect(await chainOpen(chainId)).toBe(true);
   await t.closeAll();
   expect(events).toContain(`block:${rows[2]!.id}`);
   expect(events).toContain(`ended:${chainId}:live`);
@@ -199,7 +202,7 @@ test("late audio from just before a live conversation joins it", async () => {
   expect(late.chainId).toBe(live.chainId);
   expect(late.blockId).toBe(live.blockId);
   await t.closeAll();
-  const conv = (await conversations()).find((c) => c.id === live.chainId)!;
+  const conv = (await chains()).find((c) => c.id === live.chainId)!;
   expect(conv.startedAt.getTime()).toBe(base - 60_000);
   const [block] = await blocks(live.chainId);
   expect(block!.startedAt.getTime()).toBe(base - 60_000);
@@ -216,7 +219,7 @@ test("ending a live conversation keeps a start that backlog moved earlier", asyn
   // Late audio from just before the first (now closed) block.
   await t.place(userId, base - 30_000, base - 27_000, false);
   await t.closeAll();
-  const conv = (await conversations()).find((c) => c.id === chainId)!;
+  const conv = (await chains()).find((c) => c.id === chainId)!;
   expect(conv.startedAt.getTime()).toBe(base - 30_000);
 });
 
@@ -226,7 +229,6 @@ test("new speaker keys of backlog in an ended conversation continue after its ke
   const first = await t.place(userId, base, base + 5_000, false);
   await db.insert(schema.utterances).values({
     userId,
-    conversationId: first.chainId,
     blockId: first.blockId,
     startAt: new Date(base),
     endAt: new Date(base + 5_000),

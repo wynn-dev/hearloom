@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { EpisodeKind } from "./episodes";
 
 const hhmm = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "expected HH:MM");
 
@@ -37,6 +38,7 @@ const notificationsFields = {
   /** Vibrate the pendant when a nudge arrives over the live connection. */
   pendantHaptic: z.boolean(),
 };
+
 const buttonFields = {
   tap: buttonActionSchema,
   doubleTap: buttonActionSchema,
@@ -53,9 +55,18 @@ const agentFields = {
   webhookUrl: z.union([z.url(), z.literal("")]),
   webhookSecret: z.string().max(256),
 };
+/** Send `episode.ended` for episodes of this kind. */
+const episodeEndedFields = {
+  conversation: z.boolean(),
+  talk: z.boolean(),
+  media: z.boolean(),
+  ambient: z.boolean(),
+  solo: z.boolean(),
+  unknown: z.boolean(),
+} satisfies Record<EpisodeKind, z.ZodBoolean>;
 const agentEventsFields = {
-  conversationEnded: z.boolean(),
-  conversationRefined: z.boolean(),
+  /** `episode.refined`: an ended episode's speakers have been refined. */
+  episodeRefined: z.boolean(),
   bookmark: z.boolean(),
 };
 
@@ -101,8 +112,17 @@ export const settingsSchema = z.object({
       webhookSecret: agentFields.webhookSecret.default(""),
       events: z
         .object({
-          conversationEnded: agentEventsFields.conversationEnded.default(true),
-          conversationRefined: agentEventsFields.conversationRefined.default(true),
+          episodeEnded: z
+            .object({
+              conversation: episodeEndedFields.conversation.default(true),
+              talk: episodeEndedFields.talk.default(true),
+              media: episodeEndedFields.media.default(false),
+              ambient: episodeEndedFields.ambient.default(false),
+              solo: episodeEndedFields.solo.default(false),
+              unknown: episodeEndedFields.unknown.default(true),
+            })
+            .prefault({}),
+          episodeRefined: agentEventsFields.episodeRefined.default(false),
           bookmark: agentEventsFields.bookmark.default(true),
         })
         .prefault({}),
@@ -123,15 +143,34 @@ export const settingsPatchSchema = z.object({
   button: z.object(buttonFields).partial().optional(),
   alerts: z.object(alertsFields).partial().optional(),
   agent: z
-    .object({ ...agentFields, events: z.object(agentEventsFields).partial() })
+    .object({
+      ...agentFields,
+      events: z
+        .object({ ...agentEventsFields, episodeEnded: z.object(episodeEndedFields).partial() })
+        .partial(),
+    })
     .partial()
     .optional(),
 });
 export type SettingsPatch = z.infer<typeof settingsPatchSchema>;
 
 export function resolveSettings(stored: unknown): Settings {
-  const parsed = settingsSchema.safeParse(stored ?? {});
+  const parsed = settingsSchema.safeParse(upgrade(stored ?? {}));
   return parsed.success ? parsed.data : settingsSchema.parse({});
+}
+
+/** Settings stored before episodes: "conversation ended" turned off → no episode.ended at all. */
+function upgrade(stored: unknown): unknown {
+  const events = (stored as { agent?: { events?: Record<string, unknown> } }).agent?.events;
+  if (!events || events.episodeEnded !== undefined || events.conversationEnded !== false) {
+    return stored;
+  }
+  const off = { conversation: false, talk: false, media: false, ambient: false, solo: false };
+  const s = stored as { agent: Record<string, unknown> };
+  return {
+    ...s,
+    agent: { ...s.agent, events: { ...events, episodeEnded: { ...off, unknown: false } } },
+  };
 }
 
 export function mergeSettings(current: Settings, patch: SettingsPatch): Settings {
@@ -149,7 +188,14 @@ export function mergeSettings(current: Settings, patch: SettingsPatch): Settings
     agent: {
       ...current.agent,
       ...patch.agent,
-      events: { ...current.agent.events, ...patch.agent?.events },
+      events: {
+        ...current.agent.events,
+        ...patch.agent?.events,
+        episodeEnded: {
+          ...current.agent.events.episodeEnded,
+          ...patch.agent?.events?.episodeEnded,
+        },
+      },
     },
   });
 }

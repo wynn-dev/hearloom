@@ -6,6 +6,15 @@ import { createToken } from "../agent/tokens";
 import { emitAgentEvent, sendAgentEvent } from "../agent/webhooks";
 import { type AuthSession, getSession } from "../auth";
 import { db } from "../db";
+import {
+  EpisodeEditError,
+  type EpisodeRow,
+  episodesIn,
+  mergeEpisodes,
+  refinedIds,
+  splitEpisode,
+  updateEpisode,
+} from "../episodes/store";
 import { chunkUrl } from "../http/media";
 import { isPhoneOnline } from "../ingest/phones";
 import { livePipeline } from "../live/host";
@@ -21,7 +30,6 @@ const {
   bookmarks,
   deviceEvents,
   notifications,
-  conversations,
   utterances,
   soundEvents,
   people,
@@ -110,6 +118,51 @@ async function listPeople(userId: string) {
       lastHeardAt: h?.last ?? null,
     };
   });
+}
+
+/** Episodes for the API, with what was heard in them (from the utterances at hand). */
+async function describeEpisodes(
+  userId: string,
+  rows: EpisodeRow[],
+  utts: {
+    startAt: Date;
+    personId: string | null;
+    speakerKey: string | null;
+    lang: string | null;
+  }[],
+) {
+  const refined = await refinedIds(db, userId, rows);
+  return rows.map((ep) => {
+    const start = ep.startedAt.getTime();
+    const end = ep.endedAt?.getTime() ?? Number.POSITIVE_INFINITY;
+    const inside = utts.filter((u) => u.startAt.getTime() >= start && u.startAt.getTime() < end);
+    return {
+      id: ep.id,
+      startedAt: ep.startedAt,
+      endedAt: ep.endedAt,
+      kind: ep.kind,
+      kindSource: ep.kindSource,
+      boundarySource: ep.boundarySource,
+      title: ep.title,
+      summary: ep.summary,
+      refined: refined.has(ep.id),
+      speakerCount: new Set(inside.map((u) => u.personId ?? u.speakerKey).filter(Boolean)).size,
+      languages: [...new Set(inside.map((u) => u.lang).filter((l): l is string => Boolean(l)))],
+    };
+  });
+}
+
+/** Run an episode edit: bad edits are the client's fault; the live pipeline picks up the change. */
+async function editEpisodes(userId: string, edit: () => Promise<unknown>): Promise<void> {
+  try {
+    await edit();
+  } catch (err) {
+    if (err instanceof EpisodeEditError)
+      throw new ORPCError("BAD_REQUEST", { message: err.message });
+    throw err;
+  }
+  livePipeline.episodesChanged(userId);
+  invalidate(userId, ["timeline"]);
 }
 
 export const router = authed.router({
@@ -275,7 +328,7 @@ export const router = authed.router({
         throw new ORPCError("BAD_REQUEST", { message: "range too large (max 7 days)" });
       }
 
-      const [chunkRows, bookmarkRows, eventRows, convRows, uttRows, soundRows] = await Promise.all([
+      const [chunkRows, bookmarkRows, eventRows, epRows, uttRows, soundRows] = await Promise.all([
         db
           .select()
           .from(audioChunks)
@@ -304,17 +357,7 @@ export const router = authed.router({
           )
           .orderBy(asc(deviceEvents.at))
           .limit(2000),
-        db
-          .select()
-          .from(conversations)
-          .where(
-            and(
-              eq(conversations.userId, userId),
-              lt(conversations.startedAt, to),
-              or(isNull(conversations.endedAt), gte(conversations.endedAt, from)),
-            ),
-          )
-          .orderBy(asc(conversations.startedAt)),
+        episodesIn(db, userId, from, to),
         db
           .select({ u: utterances, personName: people.name })
           .from(utterances)
@@ -365,18 +408,13 @@ export const router = authed.router({
           payload: e.payload,
           at: e.at,
         })),
-        conversations: convRows.map((c) => ({
-          id: c.id,
-          startedAt: c.startedAt,
-          endedAt: c.endedAt,
-          status: c.status,
-          languages: c.languages,
-          speakerCount: c.speakerCount,
-          title: c.title,
-        })),
+        episodes: await describeEpisodes(
+          userId,
+          epRows,
+          uttRows.map(({ u }) => u),
+        ),
         utterances: uttRows.map(({ u, personName }) => ({
           id: u.id,
-          conversationId: u.conversationId,
           startAt: u.startAt,
           endAt: u.endAt,
           speakerKey: u.speakerKey,
@@ -396,6 +434,24 @@ export const router = authed.router({
           confidence: s.confidence,
         })),
       };
+    }),
+  },
+
+  episodes: {
+    update: authed.episodes.update.handler(async ({ context, input }) => {
+      const { userId } = context as Ctx;
+      await editEpisodes(userId, () => updateEpisode(db, userId, input.id, input, "user"));
+      return { ok: true as const };
+    }),
+    split: authed.episodes.split.handler(async ({ context, input }) => {
+      const { userId } = context as Ctx;
+      await editEpisodes(userId, () => splitEpisode(db, userId, input.id, input.at, "user"));
+      return { ok: true as const };
+    }),
+    merge: authed.episodes.merge.handler(async ({ context, input }) => {
+      const { userId } = context as Ctx;
+      await editEpisodes(userId, () => mergeEpisodes(db, userId, input.ids, "user"));
+      return { ok: true as const };
     }),
   },
 

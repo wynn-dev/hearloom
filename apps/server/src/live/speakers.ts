@@ -49,6 +49,11 @@ export class SpeakerDirectory {
     return prints;
   }
 
+  /** The user has enrolled their own voice (so their speech can be recognized as theirs). */
+  async hasSelf(userId: string): Promise<boolean> {
+    return (await this.prints(userId)).some((p) => p.isSelf);
+  }
+
   async identify(userId: string, embedding: Float32Array): Promise<SpeakerMatch | null> {
     let best: SpeakerMatch | null = null;
     for (const p of await this.prints(userId)) {
@@ -62,7 +67,7 @@ export class SpeakerDirectory {
 }
 
 /**
- * Groups unidentified voices within one conversation into S1, S2, … by embedding similarity, and
+ * Groups unidentified voices within one chain of speech into S1, S2, … by embedding similarity, and
  * gives engine speaker labels (e.g. Soniox's per-session numbers) keys from the same series.
  */
 export class SpeakerClusters {
@@ -100,7 +105,7 @@ export class SpeakerClusters {
     return key;
   }
 
-  /** Stable `S…` key for an engine's speaker label within this conversation. */
+  /** Stable `S…` key for an engine's speaker label within this chain. */
   alias(external: string): string {
     let key = this.aliases.get(external);
     if (!key) {

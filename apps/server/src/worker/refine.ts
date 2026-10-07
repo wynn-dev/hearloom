@@ -285,7 +285,7 @@ function mergeProfiles(list: BlockSpeaker[]): BlockSpeaker[] {
 
 export interface RefineResult {
   message: string;
-  /** The block's chain (its conversation), if the block exists. */
+  /** The block's chain, if the block exists. */
   chainId: string | null;
   /** The block is refined now (by this run). */
   refined: boolean;
@@ -653,7 +653,6 @@ async function refineNow(deps: RefineDeps, blockId: string): Promise<RefineResul
                 };
           return {
             userId: block.userId,
-            conversationId: block.chainId,
             blockId,
             streamId: u.streamId,
             startAt: new Date(u.startAt),
@@ -686,20 +685,16 @@ async function refineNow(deps: RefineDeps, blockId: string): Promise<RefineResul
 
 /**
  * Once a chain has ended and all its blocks are refined: merge speaker keys that split across
- * blocks (same voice, see `consolidate`) and mark its conversation refined. Returns whether the
- * conversation is refined now.
+ * blocks (same voice, see `consolidate`) and mark the chain refined. Returns whether it is now.
  */
 export async function finishChain(
   deps: RefineDeps,
   chainId: string,
 ): Promise<{ finished: boolean; message: string }> {
   const { db } = deps;
-  const [conv] = await db
-    .select()
-    .from(schema.conversations)
-    .where(eq(schema.conversations.id, chainId));
-  if (!conv?.endedAt) return { finished: false, message: "chain still open" };
-  if (conv.status === "refined") return { finished: false, message: "already finished" };
+  const [row] = await db.select().from(schema.chains).where(eq(schema.chains.id, chainId));
+  if (!row?.endedAt) return { finished: false, message: "chain still open" };
+  if (row.status === "refined") return { finished: false, message: "already finished" };
   const chain = await db.select().from(schema.blocks).where(eq(schema.blocks.chainId, chainId));
   if (chain.length === 0 || chain.some((b) => b.status !== "refined")) {
     return { finished: false, message: "blocks still to refine" };
@@ -750,25 +745,10 @@ export async function finishChain(
         })
         .where(eq(schema.blocks.id, b.id));
     }
-    const rows = await tx
-      .select({
-        personId: schema.utterances.personId,
-        speakerKey: schema.utterances.speakerKey,
-        lang: schema.utterances.lang,
-      })
-      .from(schema.utterances)
-      .where(and(inArray(schema.utterances.blockId, ids), isNull(schema.utterances.supersededAt)));
-    await tx
-      .update(schema.conversations)
-      .set({
-        status: "refined",
-        speakerCount: new Set(rows.map((r) => r.personId ?? r.speakerKey).filter(Boolean)).size,
-        languages: [...new Set(rows.map((r) => r.lang).filter((l): l is string => Boolean(l)))],
-      })
-      .where(eq(schema.conversations.id, chainId));
+    await tx.update(schema.chains).set({ status: "refined" }).where(eq(schema.chains.id, chainId));
   });
   return {
     finished: true,
-    message: `conversation refined (${chain.length} blocks${renames.size ? `, ${renames.size} keys merged` : ""})`,
+    message: `chain refined (${chain.length} blocks${renames.size ? `, ${renames.size} keys merged` : ""})`,
   };
 }

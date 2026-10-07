@@ -1,10 +1,20 @@
 import type { AudioChunk } from "@hearloom/api";
 import {
+  EPISODE_KIND_DESCRIPTION,
+  EPISODE_KIND_LABEL,
+  type EpisodeKind,
+  KNOWN_EPISODE_KINDS,
+  type KnownEpisodeKind,
+} from "@hearloom/shared";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import {
   AudioLines,
   BatteryCharging,
   BatteryMedium,
   Bluetooth,
   BluetoothOff,
+  ChevronDown,
+  ChevronRight,
   CircleDot,
   Download,
   Flag,
@@ -12,23 +22,55 @@ import {
   MessagesSquare,
   Mic,
   MicOff,
+  Pencil,
   Play,
+  Presentation,
+  Scissors,
+  Tv,
+  User,
+  Users,
   Waves,
 } from "lucide-react";
-import { memo, type ReactNode, useEffect, useRef, useState } from "react";
+import {
+  createContext,
+  memo,
+  type ReactNode,
+  useContext,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+} from "react";
 import { cn } from "../../lib/cn";
+import { errorMessage, orpc } from "../../lib/orpc";
 import { formatBytes, formatDuration, formatTime } from "../../lib/time";
 import { IdentifySpeaker } from "../speakers";
 import { Badge } from "../ui/badge";
+import { Button } from "../ui/button";
+import { Dialog } from "../ui/dialog";
+import { Field, Input, Select, Textarea } from "../ui/input";
+import { useToast } from "../ui/toast";
 import {
   type Bookmark,
-  type Conversation,
   type DeviceEvent,
   deviceEventText,
   type Entry,
+  type Episode,
   type SoundEvent,
   type Utterance,
 } from "./model";
+
+/** What rows need to know about the day's episodes. */
+export interface TimelineActions {
+  episode(id: string): Episode | undefined;
+  /** The episode right before this one (for merging), if any. */
+  previous(id: string): Episode | undefined;
+  toggleFold(id: string): void;
+  folded(id: string): boolean;
+}
+
+const Actions = createContext<TimelineActions | null>(null);
+export const TimelineActionsProvider = Actions.Provider;
 
 /** Shared row grid: time | icon | content. */
 function Line({
@@ -171,7 +213,15 @@ function speakerOf(u: Utterance): string {
   return u.personName ?? (u.isWearer ? "Me" : (u.speakerKey ?? "Unknown speaker"));
 }
 
-const UtteranceRow = memo(function UtteranceRow({ item, tz }: { item: Utterance; tz: string }) {
+const UtteranceRow = memo(function UtteranceRow({
+  item,
+  tz,
+  ep,
+}: {
+  item: Utterance;
+  tz: string;
+  ep: string | null;
+}) {
   return (
     <Line
       at={item.startAt}
@@ -193,6 +243,7 @@ const UtteranceRow = memo(function UtteranceRow({ item, tz }: { item: Utterance;
         <Badge tone={item.source === "refine" ? "good" : "neutral"}>
           {item.source === "refine" ? "refined" : "live"}
         </Badge>
+        {ep ? <SplitHere episodeId={ep} at={item.startAt} tz={tz} /> : null}
       </div>
       <p className="text-[13px] leading-relaxed text-ink">{item.text}</p>
     </Line>
@@ -266,46 +317,228 @@ const DeviceRow = memo(function DeviceRow({ item, tz }: { item: DeviceEvent; tz:
   );
 });
 
-const convStatus: Record<
-  Conversation["status"],
-  { label: string; tone: "good" | "neutral" | "info" }
-> = {
-  open: { label: "ongoing", tone: "good" },
-  closed: { label: "closed", tone: "neutral" },
-  refining: { label: "refining", tone: "info" },
-  refined: { label: "refined", tone: "good" },
+const KIND_ICON: Record<EpisodeKind, ReactNode> = {
+  conversation: <MessagesSquare />,
+  talk: <Presentation />,
+  media: <Tv />,
+  ambient: <Users />,
+  solo: <User />,
+  unknown: <AudioLines />,
 };
 
-const ConversationHeader = memo(function ConversationHeader({
+function useEpisodeEdit<T>(
+  mutate: (input: T) => Promise<unknown>,
+  failure: string,
+  onDone?: () => void,
+) {
+  const toast = useToast();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: mutate,
+    onSuccess: () => {
+      onDone?.();
+      void queryClient.invalidateQueries({ queryKey: orpc.timeline.key() });
+    },
+    onError: (err) => toast({ tone: "bad", title: failure, description: errorMessage(err) }),
+  });
+}
+
+/** Rename, describe, re-classify, or merge with the episode before. */
+function EditEpisode({ item, tz }: { item: Episode; tz: string }) {
+  const actions = useContext(Actions);
+  const [open, setOpen] = useState(false);
+  const [title, setTitle] = useState(item.title ?? "");
+  const [summary, setSummary] = useState(item.summary ?? "");
+  const [kind, setKind] = useState<KnownEpisodeKind | "">(item.kind === "unknown" ? "" : item.kind);
+  const ids = { title: useId(), kind: useId(), summary: useId() };
+  const close = () => setOpen(false);
+  const update = useEpisodeEdit(
+    (input: Parameters<typeof orpc.episodes.update.call>[0]) => orpc.episodes.update.call(input),
+    "Couldn't save the episode",
+    close,
+  );
+  const merge = useEpisodeEdit(
+    (ids: [string, string]) => orpc.episodes.merge.call({ ids }),
+    "Couldn't merge",
+    close,
+  );
+  const prev = actions?.previous(item.id);
+  const canMerge = !!prev?.endedAt && !!item.endedAt;
+
+  const save = () =>
+    update.mutate({
+      id: item.id,
+      ...(title !== (item.title ?? "") ? { title: title.trim() || null } : {}),
+      ...(summary !== (item.summary ?? "") ? { summary: summary.trim() || null } : {}),
+      ...(kind && kind !== item.kind ? { kind } : {}),
+    });
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => {
+          setTitle(item.title ?? "");
+          setSummary(item.summary ?? "");
+          setKind(item.kind === "unknown" ? "" : item.kind);
+          setOpen(true);
+        }}
+        className="inline-flex cursor-pointer items-center gap-1 rounded px-1 text-[11px] text-ink-3 hover:text-ink"
+        title="Rename or re-classify"
+      >
+        <Pencil className="size-3" aria-hidden />
+        Edit
+      </button>
+      <Dialog
+        open={open}
+        onClose={close}
+        title="Edit episode"
+        description={`${formatTime(item.startedAt, tz)}–${item.endedAt ? formatTime(item.endedAt, tz) : "now"}. Your changes aren't undone by automatic segmentation or the agent.`}
+        footer={
+          <>
+            {canMerge ? (
+              <Button
+                className="mr-auto"
+                loading={merge.isPending}
+                onClick={() => merge.mutate([prev!.id, item.id])}
+                title={`Merge with the ${EPISODE_KIND_LABEL[prev!.kind].toLowerCase()} before it`}
+              >
+                Merge with previous
+              </Button>
+            ) : null}
+            <Button onClick={close}>Cancel</Button>
+            <Button variant="primary" loading={update.isPending} onClick={save}>
+              Save
+            </Button>
+          </>
+        }
+      >
+        <Field label="Title" htmlFor={ids.title}>
+          <Input
+            id={ids.title}
+            value={title}
+            maxLength={200}
+            placeholder={EPISODE_KIND_LABEL[item.kind]}
+            onChange={(e) => setTitle(e.target.value)}
+          />
+        </Field>
+        <Field
+          label="What was it?"
+          htmlFor={ids.kind}
+          hint={kind ? EPISODE_KIND_DESCRIPTION[kind] : "Not classified yet"}
+        >
+          <Select
+            id={ids.kind}
+            value={kind}
+            onChange={(e) => setKind(e.target.value as KnownEpisodeKind)}
+          >
+            {kind === "" ? <option value="">Not classified yet</option> : null}
+            {KNOWN_EPISODE_KINDS.map((k) => (
+              <option key={k} value={k}>
+                {EPISODE_KIND_LABEL[k]}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        <Field label="Summary" htmlFor={ids.summary}>
+          <Textarea
+            id={ids.summary}
+            value={summary}
+            maxLength={4000}
+            onChange={(e) => setSummary(e.target.value)}
+          />
+        </Field>
+      </Dialog>
+    </>
+  );
+}
+
+/** "Split here": a new episode starts at this utterance (ended episodes only). */
+function SplitHere({ episodeId, at, tz }: { episodeId: string; at: Date; tz: string }) {
+  const actions = useContext(Actions);
+  const split = useEpisodeEdit(
+    (input: { id: string; at: Date }) => orpc.episodes.split.call(input),
+    "Couldn't split",
+  );
+  const ep = actions?.episode(episodeId);
+  if (!ep?.endedAt || at.getTime() <= ep.startedAt.getTime()) return null;
+  return (
+    <button
+      type="button"
+      onClick={() => split.mutate({ id: episodeId, at })}
+      disabled={split.isPending}
+      className="inline-flex cursor-pointer items-center gap-1 rounded px-1 text-[11px] text-ink-3 opacity-0 transition-opacity group-hover:opacity-100 hover:text-ink focus-visible:opacity-100"
+      title={`Start a new episode at ${formatTime(at, tz, true)}`}
+    >
+      <Scissors className="size-3" aria-hidden />
+      Split here
+    </button>
+  );
+}
+
+const EpisodeHeader = memo(function EpisodeHeader({
   item,
+  hidden,
   tz,
 }: {
-  item: Conversation;
+  item: Episode;
+  hidden: number;
   tz: string;
 }) {
-  const status = convStatus[item.status];
+  const actions = useContext(Actions);
   const end = item.endedAt;
+  const folded = actions?.folded(item.id) ?? false;
+  const kind = EPISODE_KIND_LABEL[item.kind];
   return (
-    <div className="mt-3 mb-1 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md bg-surface-2 px-3 py-2">
-      <MessagesSquare className="size-4 text-series-2" aria-hidden />
-      <span className="text-[13px] font-semibold text-ink">{item.title ?? "Conversation"}</span>
-      <span className="text-xs text-ink-3 tabular">
-        {formatTime(item.startedAt, tz)}–{end ? formatTime(end, tz) : "now"}
-        {end ? ` · ${formatDuration(end.getTime() - item.startedAt.getTime())}` : ""}
-      </span>
-      <Badge tone={status.tone} dot={item.status === "open"}>
-        {status.label}
-      </Badge>
-      {item.speakerCount > 0 ? (
-        <span className="text-xs text-ink-3">
-          {item.speakerCount} speaker{item.speakerCount === 1 ? "" : "s"}
+    <div className="mt-3 mb-1 rounded-md bg-surface-2 px-3 py-2">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <span className="text-series-2 [&_svg]:size-4" aria-hidden>
+          {KIND_ICON[item.kind]}
         </span>
-      ) : null}
-      {item.languages.map((lang) => (
-        <Badge key={lang} className="uppercase">
-          {lang}
-        </Badge>
-      ))}
+        <span className="text-[13px] font-semibold text-ink">{item.title ?? kind}</span>
+        {item.title ? <span className="text-xs text-ink-2">{kind}</span> : null}
+        <span className="text-xs text-ink-3 tabular">
+          {formatTime(item.startedAt, tz)}–{end ? formatTime(end, tz) : "now"}
+          {end ? ` · ${formatDuration(end.getTime() - item.startedAt.getTime())}` : ""}
+        </span>
+        {!end ? (
+          <Badge tone="good" dot>
+            ongoing
+          </Badge>
+        ) : item.refined ? (
+          <Badge tone="good">refined</Badge>
+        ) : null}
+        {item.speakerCount > 0 ? (
+          <span className="text-xs text-ink-3">
+            {item.speakerCount} speaker{item.speakerCount === 1 ? "" : "s"}
+          </span>
+        ) : null}
+        {item.languages.map((lang) => (
+          <Badge key={lang} className="uppercase">
+            {lang}
+          </Badge>
+        ))}
+        <span className="ml-auto flex items-center gap-1">
+          {hidden > 0 ||
+          (actions && !folded && (item.kind === "media" || item.kind === "ambient")) ? (
+            <button
+              type="button"
+              aria-expanded={!folded}
+              onClick={() => actions?.toggleFold(item.id)}
+              className="inline-flex cursor-pointer items-center gap-0.5 rounded px-1 text-[11px] text-ink-3 hover:text-ink"
+            >
+              {folded ? (
+                <ChevronRight className="size-3" aria-hidden />
+              ) : (
+                <ChevronDown className="size-3" aria-hidden />
+              )}
+              {folded ? `Show ${hidden} line${hidden === 1 ? "" : "s"}` : "Hide"}
+            </button>
+          ) : null}
+          <EditEpisode item={item} tz={tz} />
+        </span>
+      </div>
+      {item.summary ? <p className="mt-1 text-[13px] text-ink-2">{item.summary}</p> : null}
     </div>
   );
 });
@@ -325,23 +558,23 @@ function EntryBody({ entry, tz }: { entry: Entry; tz: string }) {
     case "audio":
       return <AudioRunRow chunks={entry.chunks} tz={tz} />;
     case "utterance":
-      return <UtteranceRow item={entry.item} tz={tz} />;
+      return <UtteranceRow item={entry.item} tz={tz} ep={entry.ep} />;
     case "sound":
       return <SoundRow item={entry.item} tz={tz} />;
     case "bookmark":
       return <BookmarkRow item={entry.item} tz={tz} />;
     case "device":
       return <DeviceRow item={entry.item} tz={tz} />;
-    case "conversation":
-      return <ConversationHeader item={entry.item} tz={tz} />;
+    case "episode":
+      return <EpisodeHeader item={entry.item} hidden={entry.hidden} tz={tz} />;
     case "gap":
       return <GapRow ms={entry.ms} />;
   }
 }
 
-/** One list entry. Rows inside a conversation get an indented rule so the group reads as one. */
+/** One list entry. Rows inside an episode get an indented rule so the group reads as one. */
 export function EntryView({ entry, tz }: { entry: Entry; tz: string }) {
-  const grouped = entry.conv !== null && entry.kind !== "conversation";
+  const grouped = entry.ep !== null && entry.kind !== "episode";
   return (
     <li
       id={`e-${entry.key}`}

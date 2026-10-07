@@ -7,6 +7,7 @@ import {
   integer,
   jsonb,
   pgTable,
+  primaryKey,
   real,
   smallint,
   text,
@@ -184,15 +185,16 @@ export interface BlockSpeaker {
 /**
  * A bounded stretch of speech: the unit the refine pass works on. Blocks close after silence or,
  * in long continuous speech (a lecture, an evening of TV), at a pause once they are long enough
- * (see live/blocks.ts). Blocks of continuous speech share a chain, which scopes speaker keys; the
- * chain id is the id of its conversation.
+ * (see live/blocks.ts). Blocks of continuous speech share a chain, which scopes speaker keys.
  */
 export const blocks = pgTable(
   "blocks",
   {
     id: id(),
     userId: owner(),
-    chainId: uuid().notNull(),
+    chainId: uuid()
+      .notNull()
+      .references(() => chains.id, { onDelete: "cascade" }),
     startedAt: ts().notNull(),
     endedAt: ts(),
     status: text().$type<"open" | "closed" | "refining" | "refined">().notNull().default("open"),
@@ -206,18 +208,18 @@ export const blocks = pgTable(
   (t) => [index().on(t.userId, t.startedAt), index().on(t.chainId)],
 );
 
-/** Continuous speech (no 2 minutes of silence): a chain of blocks. */
-export const conversations = pgTable(
-  "conversations",
+/**
+ * Continuous speech (no 2 minutes of silence), cut into blocks. Internal: speaker keys are per
+ * chain, and its blocks' speakers are consolidated once it has ended. Users see episodes.
+ */
+export const chains = pgTable(
+  "chains",
   {
     id: id(),
     userId: owner(),
     startedAt: ts().notNull(),
     endedAt: ts(),
-    status: text().$type<"open" | "closed" | "refining" | "refined">().notNull().default("open"),
-    languages: text().array().notNull().default(sql`'{}'::text[]`),
-    speakerCount: smallint().notNull().default(0),
-    title: text(),
+    status: text().$type<"open" | "closed" | "refined">().notNull().default("open"),
     createdAt: createdAt(),
     updatedAt: ts()
       .notNull()
@@ -227,12 +229,60 @@ export const conversations = pgTable(
   (t) => [index().on(t.userId, t.startedAt)],
 );
 
+export type EpisodeKind = "conversation" | "talk" | "media" | "ambient" | "solo" | "unknown";
+export type EditSource = "rule" | "agent" | "user";
+
+/**
+ * What was happening: a time range of heard speech with a kind (conversation, talk, media…).
+ * Utterances belong to the episode whose [startedAt, endedAt) contains their start, so episodes
+ * can be re-cut without touching transcript rows. A user's episodes don't overlap.
+ */
+export const episodes = pgTable(
+  "episodes",
+  {
+    id: id(),
+    userId: owner(),
+    startedAt: ts().notNull(),
+    /** null while it is still going on. */
+    endedAt: ts(),
+    kind: text().$type<EpisodeKind>().notNull().default("unknown"),
+    /** Who set the kind; rules don't override agents, agents don't override users. */
+    kindSource: text().$type<EditSource>().notNull().default("rule"),
+    /** Who set the boundaries (split/merge); automatic segmentation leaves edited ones alone. */
+    boundarySource: text().$type<EditSource>().notNull().default("rule"),
+    title: text(),
+    summary: text(),
+    createdAt: createdAt(),
+    updatedAt: ts()
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (t) => [index().on(t.userId, t.startedAt), index().on(t.userId, t.updatedAt)],
+);
+
+/**
+ * Per-minute audio context for classifying episodes: mean scores of speech-context AudioSet
+ * classes (television, narration, laughter…) over the tagged windows of that minute.
+ */
+export const contextSamples = pgTable(
+  "context_samples",
+  {
+    userId: owner(),
+    /** Start of the minute. */
+    at: ts().notNull(),
+    /** Tagged windows averaged. */
+    windows: integer().notNull(),
+    scores: jsonb().$type<Record<string, number>>().notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.userId, t.at] })],
+);
+
 export const utterances = pgTable(
   "utterances",
   {
     id: id(),
     userId: owner(),
-    conversationId: uuid().references(() => conversations.id, { onDelete: "set null" }),
     blockId: uuid().references(() => blocks.id, { onDelete: "set null" }),
     streamId: uuid().references(() => captureStreams.id, { onDelete: "set null" }),
     startAt: ts().notNull(),
@@ -257,7 +307,6 @@ export const utterances = pgTable(
   },
   (t) => [
     index().on(t.userId, t.startAt),
-    index().on(t.conversationId),
     index().on(t.blockId),
     index("utterances_search_idx").using("gin", t.search),
   ],

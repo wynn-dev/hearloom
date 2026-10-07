@@ -1,21 +1,43 @@
 import { expect, test } from "bun:test";
 import type { Timeline } from "@hearloom/api";
-import { buildEntries, defaultFilters } from "./model";
+import { buildEntries, defaultFilters, foldedByDefault } from "./model";
 
 const t = (hhmm: string) => new Date(`2026-10-06T${hhmm}:00Z`);
-const conv = (id: string, from: string, to: string): Timeline["conversations"][number] => ({
+const episode = (
+  id: string,
+  from: string,
+  to: string,
+  kind: Timeline["episodes"][number]["kind"] = "conversation",
+): Timeline["episodes"][number] => ({
   id,
   startedAt: t(from),
   endedAt: t(to),
-  status: "closed",
-  languages: ["en"],
-  speakerCount: 1,
+  kind,
+  kindSource: "rule",
+  boundarySource: "rule",
   title: null,
+  summary: null,
+  refined: false,
+  speakerCount: 1,
+  languages: ["en"],
 });
 
-test("conversations after the last row only get a gap divider when there is one", () => {
+const utterance = (id: string, at: string): Timeline["utterances"][number] => ({
+  id,
+  startAt: t(at),
+  endAt: t(at),
+  speakerKey: "S1",
+  personId: null,
+  personName: null,
+  isWearer: null,
+  text: id,
+  lang: "en",
+  source: "live",
+});
+
+test("episodes after the last row only get a gap divider when there is one", () => {
   const data: Timeline = {
-    conversations: [conv("c1", "10:00", "10:05"), conv("c2", "10:10", "10:20")],
+    episodes: [episode("c1", "10:00", "10:05"), episode("c2", "10:10", "10:20")],
     utterances: [],
     soundEvents: [],
     bookmarks: [{ id: "b1", at: t("09:00"), note: null, source: "button" }],
@@ -24,5 +46,27 @@ test("conversations after the last row only get a gap divider when there is one"
   };
   const kinds = buildEntries(data, defaultFilters).map((e) => e.kind);
   // 09:00 → 10:00 is a gap; 10:05 → 10:10 is not.
-  expect(kinds).toEqual(["bookmark", "gap", "conversation", "conversation"]);
+  expect(kinds).toEqual(["bookmark", "gap", "episode", "episode"]);
+});
+
+test("rows belong to the episode they start in; folded episodes hide their rows", () => {
+  const data: Timeline = {
+    episodes: [episode("talk", "10:00", "10:30"), episode("tv", "10:30", "11:00", "media")],
+    utterances: [utterance("u1", "10:15"), utterance("u2", "10:29"), utterance("u3", "10:31")],
+    soundEvents: [],
+    bookmarks: [],
+    deviceEvents: [],
+    chunks: [],
+  };
+  const all = buildEntries(data, defaultFilters);
+  expect(all.map((e) => `${e.kind}:${e.ep}`)).toEqual([
+    "episode:talk",
+    "utterance:talk",
+    "utterance:talk",
+    "episode:tv",
+    "utterance:tv",
+  ]);
+  const folded = buildEntries(data, defaultFilters, foldedByDefault);
+  expect(folded.map((e) => e.key)).toEqual(["e:talk", "u:u1", "u:u2", "e:tv"]);
+  expect(folded[3]).toMatchObject({ kind: "episode", hidden: 1 });
 });

@@ -1,6 +1,8 @@
+import { EPISODE_KIND_LABEL, type EpisodeKind } from "@hearloom/shared";
+
 /**
  * Compact, token-efficient text for LLMs. One line per event, times in the user's timezone:
- *   ## Tue 2026-10-06 · Conversation 01a1b2c3 · 09:30–09:52 · Me, Alice, S2
+ *   ## Tue 2026-10-06 · Conversation · episode 01a1b2c3 · 09:30–09:52 · Me, Alice, S2
  *   09:30:12 Me: Did the fix land?
  *   09:30:20 [door slam]
  *   09:31–09:45 {music}
@@ -26,11 +28,13 @@ export interface RenderMark {
   note: string | null;
 }
 
-export interface RenderConversation {
+export interface RenderEpisode {
   id: string;
   startedAt: Date;
   endedAt: Date | null;
-  speakers: string[];
+  kind: EpisodeKind;
+  title: string | null;
+  speakers?: string[];
 }
 
 export function clock(d: Date, tz: string, seconds = true): string {
@@ -55,11 +59,19 @@ export function day(d: Date, tz: string): string {
   return `${get("weekday")} ${get("year")}-${get("month")}-${get("day")}`;
 }
 
-export function conversationHeader(c: RenderConversation, tz: string): string {
-  const end = c.endedAt ? clock(c.endedAt, tz, false) : "now";
-  const who = c.speakers.length ? ` · ${c.speakers.join(", ")}` : "";
-  return `## ${day(c.startedAt, tz)} · Conversation ${c.id} · ${clock(c.startedAt, tz, false)}–${end}${who}`;
+/** "Talk "Distributed systems"" / "Media" — the kind, and the title if there is one. */
+export function episodeLabel(e: { kind: EpisodeKind; title: string | null }): string {
+  return `${EPISODE_KIND_LABEL[e.kind]}${e.title ? ` "${e.title}"` : ""}`;
 }
+
+export function episodeHeader(e: RenderEpisode, tz: string): string {
+  const end = e.endedAt ? clock(e.endedAt, tz, false) : "now";
+  const who = e.speakers?.length ? ` · ${e.speakers.join(", ")}` : "";
+  return `## ${day(e.startedAt, tz)} · ${episodeLabel(e)} · episode ${e.id} · ${clock(e.startedAt, tz, false)}–${end}${who}`;
+}
+
+/** Media speech is from a TV, radio or video, not from people present. */
+export const MEDIA_NOTE = "(media: voices from a TV, radio or recording, not people present)";
 
 /**
  * Interleave utterances, sound events and bookmarks chronologically. With `dayHeaders`, a
@@ -69,7 +81,7 @@ export function renderLines(
   utterances: RenderUtterance[],
   sounds: RenderSound[],
   tz: string,
-  opts: { bookmarks?: RenderMark[]; dayHeaders?: boolean } = {},
+  opts: { bookmarks?: RenderMark[]; dayHeaders?: boolean; episodes?: RenderEpisode[] } = {},
 ): string[] {
   type Row = { at: number; line: string };
   const rows: Row[] = [
@@ -87,6 +99,11 @@ export function renderLines(
     ...(opts.bookmarks ?? []).map((b) => ({
       at: b.at.getTime(),
       line: `${clock(b.at, tz)} ⚑ bookmark${b.note ? `: ${b.note}` : ""}`,
+    })),
+    // Episode starts go before what happens at the same moment.
+    ...(opts.episodes ?? []).map((e) => ({
+      at: e.startedAt.getTime() - 0.5,
+      line: `── ${clock(e.startedAt, tz, false)}–${e.endedAt ? clock(e.endedAt, tz, false) : "now"} ${episodeLabel(e)} · episode ${e.id}${e.kind === "media" ? ` ${MEDIA_NOTE}` : ""}`,
     })),
   ];
   rows.sort((a, b) => a.at - b.at);

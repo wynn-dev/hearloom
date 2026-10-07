@@ -1,3 +1,4 @@
+import { EPISODE_KIND_DESCRIPTION, EPISODE_KIND_LABEL, EPISODE_KINDS } from "@hearloom/shared";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { Bot, Copy, KeyRound, Trash2, Webhook } from "lucide-react";
@@ -11,6 +12,7 @@ import { Field, Input } from "../../components/ui/input";
 import { EmptyState, ErrorNotice, LoadingRows } from "../../components/ui/misc";
 import { Switch } from "../../components/ui/switch";
 import { useToast } from "../../components/ui/toast";
+import { cn } from "../../lib/cn";
 import { useTimeZone } from "../../lib/me";
 import { errorMessage, orpc } from "../../lib/orpc";
 import { useNow } from "../../lib/time";
@@ -203,7 +205,7 @@ function WebhookCard() {
       <CardHeader
         icon={<Webhook aria-hidden />}
         title="Webhook"
-        description="Hearloom POSTs small events (ids and times only) so the agent can react — e.g. read a conversation when it ends. Signed with X-Hearloom-Signature: sha256=HMAC(secret, timestamp.body)."
+        description="Hearloom POSTs small events (ids and times only) so the agent can react — e.g. read an episode when it ends. Signed with X-Hearloom-Signature: sha256=HMAC(secret, timestamp.body)."
       />
       <CardBody className="flex flex-col gap-3">
         <div className="grid gap-3 sm:grid-cols-2">
@@ -225,23 +227,51 @@ function WebhookCard() {
           </Field>
         </div>
         {events ? (
-          <div className="flex flex-wrap gap-4 text-[13px] text-ink-2">
-            {(
-              [
-                ["conversationEnded", "Conversation ended"],
-                ["conversationRefined", "Conversation refined"],
-                ["bookmark", "Bookmark"],
-              ] as const
-            ).map(([key, label]) => (
-              <div key={key} className="flex items-center gap-2">
-                <Switch
-                  checked={events[key]}
-                  label={label}
-                  onChange={(v) => save.mutate({ agent: { events: { [key]: v } } })}
-                />
-                <span aria-hidden>{label}</span>
-              </div>
-            ))}
+          <div className="flex flex-col gap-3 text-[13px] text-ink-2">
+            <fieldset className="flex flex-wrap items-center gap-1.5">
+              <legend className="mb-1.5 text-xs font-medium text-ink-2">
+                Episode ended, for these kinds
+              </legend>
+              {EPISODE_KINDS.map((kind) => {
+                const on = events.episodeEnded[kind];
+                return (
+                  <button
+                    key={kind}
+                    type="button"
+                    aria-pressed={on}
+                    title={EPISODE_KIND_DESCRIPTION[kind]}
+                    onClick={() =>
+                      save.mutate({ agent: { events: { episodeEnded: { [kind]: !on } } } })
+                    }
+                    className={cn(
+                      "inline-flex h-7 cursor-pointer items-center rounded-full border px-2.5 text-xs transition-colors",
+                      on
+                        ? "border-accent/40 bg-accent-soft text-accent-ink"
+                        : "border-line bg-surface text-ink-3 hover:text-ink-2",
+                    )}
+                  >
+                    {kind === "unknown" ? "Unclassified" : EPISODE_KIND_LABEL[kind]}
+                  </button>
+                );
+              })}
+            </fieldset>
+            <div className="flex flex-wrap gap-4">
+              {(
+                [
+                  ["episodeRefined", "Episode refined (speakers final)"],
+                  ["bookmark", "Bookmark"],
+                ] as const
+              ).map(([key, label]) => (
+                <div key={key} className="flex items-center gap-2">
+                  <Switch
+                    checked={events[key]}
+                    label={label}
+                    onChange={(v) => save.mutate({ agent: { events: { [key]: v } } })}
+                  />
+                  <span aria-hidden>{label}</span>
+                </div>
+              ))}
+            </div>
           </div>
         ) : null}
         <div className="flex gap-2">
@@ -275,8 +305,8 @@ function HermesSnippet() {
     headers:
       Authorization: "Bearer \${HEARLOOM_MCP_TOKEN}"
     tools:
-      include: [get_current_context, search_transcripts, get_timeline, list_conversations,
-                get_conversation, list_sound_events, list_people, changes_since,
+      include: [get_current_context, search_transcripts, get_timeline, list_episodes,
+                get_episode, list_sound_events, list_people, changes_since,
                 get_audio_clip_url, send_notification]`;
   return (
     <Card>

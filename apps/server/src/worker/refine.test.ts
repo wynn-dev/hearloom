@@ -251,16 +251,16 @@ describe("refining the blocks of a chain", () => {
 
   /** A finished conversation of two closed blocks with live rows (see `speech`). */
   async function chain() {
-    const [conv] = await db
-      .insert(schema.conversations)
+    const [row] = await db
+      .insert(schema.chains)
       .values({
         userId,
         startedAt: new Date(t0),
         endedAt: new Date(t0 + 12 * MIN + 8_000),
         status: "closed",
       })
-      .returning({ id: schema.conversations.id });
-    const chainId = conv!.id;
+      .returning({ id: schema.chains.id });
+    const chainId = row!.id;
     const block = async (from: number, to: number) =>
       (
         await db
@@ -279,7 +279,6 @@ describe("refining the blocks of a chain", () => {
     await db.insert(schema.utterances).values(
       speech.map((s, i) => ({
         userId,
-        conversationId: chainId,
         blockId: s.block === "A" ? blockA : blockB,
         streamId,
         startAt: new Date(s.from),
@@ -324,12 +323,8 @@ describe("refining the blocks of a chain", () => {
 
     const done = await finishChain(deps(), chainId);
     expect(done.finished).toBe(true);
-    const [conv] = await db
-      .select()
-      .from(schema.conversations)
-      .where(eq(schema.conversations.id, chainId));
-    expect(conv!.status).toBe("refined");
-    expect(conv!.speakerCount).toBe(3);
+    const [row] = await db.select().from(schema.chains).where(eq(schema.chains.id, chainId));
+    expect(row!.status).toBe("refined");
 
     expect((await refineBlock(deps(), blockB)).message).toBe("already refined");
   });

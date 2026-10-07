@@ -5,7 +5,7 @@ cloud services. The pendant streams to your iPhone over Bluetooth; the phone for
 server, which keeps every second (speech **and** non-speech sound) as a structured, searchable timeline.
 
 > Status: early development. Working end to end: iOS capture (Swift), durable upload, live
-> transcription (EN/NL), speakers, sound events, conversations, refine pass, notifications, web console,
+> transcription (EN/NL), speakers, sound events, episodes (conversations, talks, TV…), refine pass, notifications, web console,
 > and an MCP endpoint for agents (Hermes).
 
 ## Layout

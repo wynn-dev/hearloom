@@ -1,7 +1,7 @@
 /**
  * Live pipeline worker process (spawned by the server, see host.ts). Holds the native models
  * (sherpa-onnx) so a crash here can't take down audio ingest. Receives stored Opus frames over IPC,
- * writes utterances / sound events / blocks / conversations to Postgres, and reports state back.
+ * writes utterances / sound events / blocks / episodes to Postgres, and reports state back.
  */
 import { createDb, schema } from "@hearloom/db";
 import {
@@ -16,12 +16,14 @@ import { and, eq } from "drizzle-orm";
 import { loadStreamAudio } from "../audio/load";
 import { env, modelsDir } from "../env";
 import { BlockTracker } from "./blocks";
+import { EpisodeTracker } from "./episodes";
 import type { ChildMessage, HostMessage } from "./ipc";
 import { type LiveDeps, type StreamInfo, StreamProcessor } from "./processor";
 import { SpeakerDirectory } from "./speakers";
 
 const send = (msg: ChildMessage) => process.send?.(msg);
 const log = (message: string) => send({ t: "log", message });
+const fail = (err: unknown) => log(`episodes: ${err}`);
 
 /** Can't run with this configuration: exit code 2 tells the host not to restart us. */
 function fatal(message: string): never {
@@ -37,23 +39,35 @@ if (env.LIVE_ASR === "soniox" && !env.SONIOX_API_KEY)
 const { db, client } = createDb(env.DATABASE_URL, { max: 3 });
 
 const embedder = hasModel(modelsDir, MODEL_FILES.speaker) ? new SpeakerEmbedder(modelsDir) : null;
+const speakers = embedder
+  ? new SpeakerDirectory(db, SPEAKER_MODEL_ID, env.SPEAKER_MATCH_THRESHOLD)
+  : null;
+const episodes = new EpisodeTracker(
+  db,
+  {
+    activity: (userId, activity) => send({ t: "activity", userId, activity }),
+    ended: (userId, episodeId) => send({ t: "episode_ended", userId, episodeId }),
+    changed: (userId) => send({ t: "invalidate", userId, keys: ["timeline"] }),
+  },
+  async (userId) => (await speakers?.hasSelf(userId)) ?? false,
+);
 const deps: LiveDeps = {
   db,
   modelsDir,
   tagger: hasModel(modelsDir, MODEL_FILES.tagger) ? new SoundTagger(modelsDir) : null,
   embedder,
-  speakers: embedder
-    ? new SpeakerDirectory(db, SPEAKER_MODEL_ID, env.SPEAKER_MATCH_THRESHOLD)
-    : null,
+  speakers,
+  episodes,
   blocks: new BlockTracker(
     db,
     {
-      chainStarted: (userId, conversationId) =>
-        send({ t: "state", userId, patch: { inConversation: true, conversationId } }),
-      chainEnded: (userId, conversationId, live) => {
-        if (live)
-          send({ t: "state", userId, patch: { inConversation: false, conversationId: null } });
-        send({ t: "conversation_ended", userId, conversationId });
+      chainStarted: (userId, _chainId, at) => void episodes.chainStarted(userId, at).catch(fail),
+      chainEnded: (userId, chainId, live, endAt) => {
+        const done = live
+          ? episodes.chainEnded(userId, endAt)
+          : episodes.segmentChain(userId, chainId);
+        void done.catch(fail);
+        send({ t: "invalidate", userId, keys: ["timeline"] });
       },
       blockClosed: (userId, blockId) => send({ t: "block_closed", userId, blockId }),
     },
@@ -74,9 +88,11 @@ const deps: LiveDeps = {
   log,
 };
 
-// A previous child may have died with conversations open; close them before taking new audio.
+// A previous child may have died with episodes and chains open; close them before taking new
+// audio (closed chains are segmented into episodes again).
+await episodes.closeOrphans();
 const orphans = await deps.blocks.closeOrphans();
-if (orphans > 0) log(`closed ${orphans} conversation(s) left open by a previous run`);
+if (orphans > 0) log(`closed ${orphans} chain(s) of speech left open by a previous run`);
 
 log(
   `ready: asr=${env.LIVE_ASR}, tagger=${deps.tagger ? "ced-base" : "off"}, speakers=${embedder ? SPEAKER_MODEL_ID : "off"}`,
@@ -99,6 +115,8 @@ process.on("message", (raw) => {
     void processorFor(msg.stream).push(msg.frames as AudioFrame[]);
   } else if (msg.t === "voiceprints_changed") {
     deps.speakers?.invalidate(msg.userId);
+  } else if (msg.t === "episodes_changed") {
+    void episodes.reload(msg.userId).catch(fail);
   } else if (msg.t === "enroll") {
     void enroll(msg).then(
       (sampleSeconds) => send({ t: "enrolled", requestId: msg.requestId, ok: true, sampleSeconds }),
@@ -156,7 +174,8 @@ async function enroll(msg: Extract<HostMessage, { t: "enroll" }>): Promise<numbe
   return audio.length / 16000;
 }
 
-// Close runs after silence, idle Soniox sessions, quiet conversations and blocks; drop idle processors.
+// Close runs after silence, idle Soniox sessions, quiet chains and blocks; classify episodes; drop
+// idle processors.
 setInterval(() => {
   const now = Date.now();
   for (const [id, p] of processors) {
@@ -167,6 +186,7 @@ setInterval(() => {
     }
   }
   void deps.blocks.tick(now).catch((err) => log(`blocks: ${err}`));
+  void episodes.tick(now).catch(fail);
 }, 1000);
 
 async function shutdown() {

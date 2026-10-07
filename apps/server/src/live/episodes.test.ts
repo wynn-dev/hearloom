@@ -1,0 +1,188 @@
+import { afterAll, beforeAll, expect, test } from "bun:test";
+import { createDb, schema } from "@hearloom/db";
+import { and, asc, eq, gte, lt } from "drizzle-orm";
+import { MINUTE, type SpeechSpan } from "../episodes/rules";
+import { type Activity, EpisodeTracker, uncovered } from "./episodes";
+
+// Runs against DATABASE_URL with a throwaway user (rows cascade on delete).
+const { db, client } = createDb(process.env.DATABASE_URL, { max: 2 });
+const userId = `test-${crypto.randomUUID()}`;
+const activity: (Activity | null)[] = [];
+const ended: string[] = [];
+const tracker = (selfKnown = true) =>
+  new EpisodeTracker(
+    db,
+    {
+      activity: (_u, a) => activity.push(a),
+      ended: (_u, id) => ended.push(id),
+      changed: () => {},
+    },
+    async () => selfKnown,
+  );
+
+beforeAll(async () => {
+  await db.insert(schema.user).values({ id: userId, name: "test", email: `${userId}@test.local` });
+});
+afterAll(async () => {
+  await db.delete(schema.user).where(eq(schema.user.id, userId));
+  await client.end();
+});
+
+const episodesBetween = (from: number, to: number) =>
+  db
+    .select()
+    .from(schema.episodes)
+    .where(
+      and(
+        eq(schema.episodes.userId, userId),
+        gte(schema.episodes.startedAt, new Date(from)),
+        lt(schema.episodes.startedAt, new Date(to)),
+      ),
+    )
+    .orderBy(asc(schema.episodes.startedAt));
+
+/** Speakers taking 5 s turns with 1 s pauses over [from, to). */
+function turns(from: number, to: number, speakers: string[]): SpeechSpan[] {
+  const out: SpeechSpan[] = [];
+  let i = 0;
+  for (let t = from; t + 5_000 <= to; t += 6_000) {
+    const speaker = speakers[i++ % speakers.length]!;
+    out.push({ startAt: t, endAt: t + 5_000, speaker, isWearer: speaker === "me" });
+  }
+  return out;
+}
+
+test("a live chain: dinner talk, then the TV takes over, then silence", async () => {
+  const t = tracker();
+  const t0 = Date.UTC(2026, 8, 1, 19, 0);
+  await t.chainStarted(userId, t0);
+  const speech = [
+    ...turns(t0, t0 + 12 * MINUTE, ["me", "sam"]),
+    ...turns(t0 + 12 * MINUTE, t0 + 30 * MINUTE, ["a", "b", "c", "d"]),
+  ];
+  for (const s of speech) t.speech(userId, s);
+  for (let m = 12; m < 30; m++) {
+    t.context(userId, { at: t0 + m * MINUTE, windows: 60, scores: { tv: 0.4 } });
+  }
+  // Step through the minutes as they complete.
+  for (let m = 1; m <= 30; m++) await t.tick(t0 + m * MINUTE + 30_000);
+  await t.chainEnded(userId, t0 + 30 * MINUTE);
+
+  const rows = await episodesBetween(t0, t0 + 31 * MINUTE);
+  expect(rows.map((r) => r.kind)).toEqual(["conversation", "media"]);
+  const cut = rows[1]!.startedAt.getTime();
+  expect(Math.abs(cut - (t0 + 12 * MINUTE))).toBeLessThanOrEqual(2 * MINUTE);
+  expect(rows[0]!.endedAt!.getTime()).toBe(cut);
+  expect(rows[1]!.endedAt!.getTime()).toBe(t0 + 30 * MINUTE);
+  expect(ended).toEqual(rows.map((r) => r.id));
+  // Activity: unknown → conversation → media → nothing (never "nothing" in between).
+  expect(activity.map((a) => a?.kind ?? null)).toEqual(["unknown", "conversation", "media", null]);
+  expect(t.current(userId)).toBeNull();
+});
+
+test("a kind the user set on the open episode isn't re-labelled", async () => {
+  const t = tracker();
+  const t0 = Date.UTC(2026, 8, 2, 9, 0);
+  await t.chainStarted(userId, t0);
+  const [open] = await episodesBetween(t0, t0 + 1);
+  await db
+    .update(schema.episodes)
+    .set({ kind: "talk", kindSource: "user" })
+    .where(eq(schema.episodes.id, open!.id));
+  await t.reload(userId);
+  expect(t.current(userId)?.kind).toBe("talk");
+  // The rules hear a conversation throughout: what they hear doesn't change, so nothing is cut,
+  // and the kind stays the user's.
+  for (const s of turns(t0, t0 + 10 * MINUTE, ["me", "sam"])) t.speech(userId, s);
+  for (let m = 1; m <= 10; m++) await t.tick(t0 + m * MINUTE + 30_000);
+  expect(t.current(userId)?.kind).toBe("talk");
+  await t.chainEnded(userId, t0 + 10 * MINUTE);
+  const rows = await episodesBetween(t0, t0 + 11 * MINUTE);
+  expect(rows).toHaveLength(1);
+  expect(rows[0]).toMatchObject({ kind: "talk", kindSource: "user" });
+});
+
+test("backlog chains are segmented from stored speech, around episodes someone edited", async () => {
+  const t = tracker();
+  const t0 = Date.UTC(2026, 8, 3, 14, 0);
+  const t1 = t0 + 40 * MINUTE;
+  const [chain] = await db
+    .insert(schema.chains)
+    .values({ userId, startedAt: new Date(t0), endedAt: new Date(t1), status: "closed" })
+    .returning({ id: schema.chains.id });
+  const speech = [
+    ...turns(t0, t0 + 20 * MINUTE, ["prof"]),
+    ...turns(t0 + 20 * MINUTE, t1, ["me", "alice"]),
+  ];
+  await db.insert(schema.utterances).values(
+    speech.map((s, i) => ({
+      userId,
+      startAt: new Date(s.startAt),
+      endAt: new Date(s.endAt),
+      speakerKey: s.speaker === "me" ? null : s.speaker,
+      isWearer: s.isWearer,
+      text: `line ${i}`,
+      source: "live" as const,
+      provider: "test",
+    })),
+  );
+  // A rule-made episode (replaced) and one the user titled (kept).
+  await db.insert(schema.episodes).values([
+    { userId, startedAt: new Date(t0), endedAt: new Date(t0 + 5 * MINUTE) },
+    {
+      userId,
+      startedAt: new Date(t0 + 30 * MINUTE),
+      endedAt: new Date(t1),
+      kind: "conversation",
+      title: "Coffee with Alice",
+    },
+  ]);
+  ended.length = 0;
+  await t.segmentChain(userId, chain!.id);
+
+  const rows = await episodesBetween(t0, t1);
+  expect(rows.map((r) => [r.kind, r.title])).toEqual([
+    ["talk", null],
+    ["conversation", null],
+    ["conversation", "Coffee with Alice"],
+  ]);
+  expect(rows[0]!.startedAt.getTime()).toBe(t0);
+  expect(Math.abs(rows[1]!.startedAt.getTime() - (t0 + 20 * MINUTE))).toBeLessThanOrEqual(
+    2 * MINUTE,
+  );
+  expect(rows[1]!.endedAt!.getTime()).toBe(t0 + 30 * MINUTE);
+  expect(ended).toHaveLength(2);
+});
+
+test("a restart ends episodes left open at their last speech", async () => {
+  const t0 = Date.UTC(2026, 8, 4, 8, 0);
+  const [ep] = await db
+    .insert(schema.episodes)
+    .values({ userId, startedAt: new Date(t0) })
+    .returning();
+  await db.insert(schema.utterances).values({
+    userId,
+    startAt: new Date(t0 + 1_000),
+    endAt: new Date(t0 + 4_000),
+    text: "hi",
+    source: "live",
+    provider: "test",
+  });
+  expect(await tracker().closeOrphans()).toBeGreaterThanOrEqual(1);
+  const [row] = await db.select().from(schema.episodes).where(eq(schema.episodes.id, ep!.id));
+  expect(row!.endedAt!.getTime()).toBe(t0 + 4_000);
+});
+
+test("uncovered parts of a range", () => {
+  expect(
+    uncovered(0, 100_000, [
+      [10_000, 20_000],
+      [15_000, 30_000],
+      [90_000, Number.POSITIVE_INFINITY],
+    ]),
+  ).toEqual([
+    [0, 10_000],
+    [30_000, 90_000],
+  ]);
+  expect(uncovered(0, 10_000, [[0, 9_500]])).toEqual([]);
+});
