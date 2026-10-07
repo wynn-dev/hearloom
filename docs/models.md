@@ -78,12 +78,18 @@ When a block closes the server queues a job (pg-boss, in Postgres).
    key most of its utterances had (if no earlier block uses it); else a new key. Matches are
    one-to-one: two clusters of one block never share a key.
 4. Names each cluster against enrolled voiceprints (or keeps the name its key already had); a
-   confident match on an utterance's own voiceprint wins over the cluster (diarizers can merge similar
-   voices).
-5. Replaces the live rows it re-derived (kept with `superseded_at` for history; rows without stored audio
-   stay live) and marks the block `refined`, storing each cluster's voice for later blocks. If a row
-   was edited meanwhile (e.g. a speaker was identified), the job retries.
-6. Once the conversation has ended and all its blocks are refined, merges keys that are the same voice
+   confident match on a line's own voiceprint wins over the cluster (diarizers can merge similar
+   voices). A line only loses its cluster's name for not sounding like that person with ≥ 3 s of
+   audio (a low score on a shorter clip is noise).
+5. Joins each speaker's fragments: live transcription splits at every endpoint ("Um," / "so." /
+   "Recursion."), so consecutive lines of one cluster with the same voice-check result ≤ 1.5 s apart
+   (same language) become one line of up to 30 s, and a stray line under 1 s without a speaker joins
+   its neighbor. The text is kept.
+6. Replaces the live rows it re-derived (kept with `superseded_at` for history; rows without stored audio
+   or where the diarizer finds no speech in the block stay live) and marks the block `refined`, storing
+   each cluster's voice for later blocks. If a row was edited meanwhile (e.g. a speaker was
+   identified), the job retries.
+7. Once the conversation has ended and all its blocks are refined, merges keys that are the same voice
    but were split across blocks (never two keys heard in one block, or named after different people)
    and marks the conversation `refined`.
 

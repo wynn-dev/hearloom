@@ -91,6 +91,75 @@ export function windows<T extends { startAt: Date; endAt: Date }>(rows: T[], max
   return out;
 }
 
+/** One speaker's lines this close together become one line (the live pause rule). */
+const MERGE_GAP_MS = 1500;
+/** Longest line a merge may produce (the live cap). */
+const MERGE_MAX_MS = 30_000;
+/** A line without a speaker this short (a stray "Um,") joins the speaker next to it. */
+const STRAY_MS = 1000;
+/**
+ * Shortest clip whose own voice may drop its cluster's name for not sounding like that person:
+ * a low score on a short clip is noise. (A confident match names a line from 1 s on.)
+ */
+const DROP_NAME_MIN_SAMPLES = 3 * 16000;
+
+export interface Line {
+  startAt: number;
+  endAt: number;
+  text: string;
+  lang: string | null;
+  speaker: string | null;
+  confidence: number | null;
+  model: string | null;
+  /** The line's own voice check: a person, null = not the cluster's person, undefined = no opinion. */
+  own?: { personId: string; isSelf: boolean } | null;
+}
+
+/**
+ * Live transcription splits at every endpoint, so one speaker's sentence often arrives as several
+ * lines ("Um," / "so." / "Recursion."). Joins consecutive lines (sorted by time) of the same
+ * speaker, own voice check, language and model that are at most MERGE_GAP_MS apart, up to
+ * MERGE_MAX_MS long. A short line without a speaker joins a neighbor; two lines without a speaker
+ * stay apart (they may be two people).
+ */
+export function mergeLines<T extends Line>(lines: T[]): T[] {
+  const stray = (l: Line) =>
+    l.speaker === null && l.own === undefined && l.endAt - l.startAt < STRAY_MS;
+  const ownKey = (l: Line) => (l.own === undefined ? "?" : (l.own?.personId ?? "-"));
+  const out: T[] = [];
+  for (const l of lines) {
+    const prev = out[out.length - 1];
+    const fits =
+      prev &&
+      l.startAt - prev.endAt <= MERGE_GAP_MS &&
+      Math.max(l.endAt, prev.endAt) - prev.startAt <= MERGE_MAX_MS &&
+      (prev.speaker === l.speaker
+        ? prev.speaker !== null && ownKey(prev) === ownKey(l)
+        : stray(prev) || stray(l)) &&
+      (prev.lang === l.lang || prev.lang === null || l.lang === null) &&
+      prev.model === l.model;
+    if (!fits) {
+      out.push({ ...l });
+      continue;
+    }
+    // Confidence weighted by text length.
+    const confidence =
+      prev.confidence === null || l.confidence === null
+        ? (prev.confidence ?? l.confidence)
+        : (prev.confidence * prev.text.length + l.confidence * l.text.length) /
+          (prev.text.length + l.text.length);
+    Object.assign(prev, {
+      endAt: Math.max(prev.endAt, l.endAt),
+      text: `${prev.text} ${l.text}`,
+      lang: prev.lang ?? l.lang,
+      speaker: prev.speaker ?? l.speaker,
+      own: prev.own === undefined ? l.own : prev.own,
+      confidence,
+    });
+  }
+  return out;
+}
+
 const keyNumber = (key: string) => Number(/^S(\d+)$/.exec(key)?.[1] ?? 0);
 
 /** A speaker the chain already knows (from its refined blocks). */
@@ -458,10 +527,8 @@ async function refineNow(deps: RefineDeps, blockId: string): Promise<RefineResul
     if (pieces.length === 0) continue; // audio gone: keep the live rows
     const { samples, toAbs, toOffset } = concatPieces(pieces);
     const blockOffset = from < blockFrom ? toOffset(blockFrom) : 0;
-    const firstNew = created.length;
     /** Cluster labels are per pass: diarizer labels restart in every pass. */
     const tag = `${pass}:`;
-    replaced.push(...utts);
 
     // 1) Offline diarization over the block (and the context before it).
     const segs: DiarSegment[] = await diarizer.diarize(samples);
@@ -476,6 +543,10 @@ async function refineNow(deps: RefineDeps, blockId: string): Promise<RefineResul
       utts.map((u) => [u.id, speakerFor(turns, u.startAt.getTime(), u.endAt.getTime())]),
     );
     const labels = [...new Set([...labelOf.values()].filter((l): l is string => l !== null))];
+    // No speech found in the block (e.g. one short line in noise; any speech was in the context):
+    // nothing to re-attribute, keep the live rows.
+    if (labels.length === 0) continue;
+    replaced.push(...utts);
 
     // 3) Facts per cluster: shared speech with the previous block's speakers, its voice in this
     // block, and the live keys of its utterances.
@@ -569,9 +640,9 @@ async function refineNow(deps: RefineDeps, blockId: string): Promise<RefineResul
     }
 
     // 5) Keep the live text, re-attributed.
-    for (const u of utts) {
+    const lines: (typeof created)[number][] = utts.map((u) => {
       const label = labelOf.get(u.id);
-      created.push({
+      return {
         startAt: u.startAt.getTime(),
         endAt: u.endAt.getTime(),
         text: u.text,
@@ -581,13 +652,13 @@ async function refineNow(deps: RefineDeps, blockId: string): Promise<RefineResul
         provider: u.provider,
         model: u.model,
         streamId,
-      });
-    }
+      };
+    });
 
     // Per-utterance voice match: diarizers can merge similar voices into one cluster, so a
     // confident match on the utterance itself overrides the cluster's name.
     if (deps.embedder && people.length > 0) {
-      for (const u of created.slice(firstNew)) {
+      for (const u of lines) {
         const clip = samples.subarray(toOffset(u.startAt), toOffset(u.endAt));
         if (clip.length < 16000) continue;
         const emb = deps.embedder.embed(clip);
@@ -599,9 +670,11 @@ async function refineNow(deps: RefineDeps, blockId: string): Promise<RefineResul
             u.own = { personId: p.id, isSelf: p.isSelf };
           }
         }
-        // No match: if the cluster was named after someone this clip clearly isn't, drop the name.
         const clusterPerson = u.speaker ? speakerPerson.get(u.speaker)?.personId : null;
-        if (u.own === undefined && clusterPerson) {
+        // Agrees with the cluster: no opinion, so it joins the cluster's unchecked lines.
+        if (u.own && u.own.personId === clusterPerson) u.own = undefined;
+        // No match: if the cluster was named after someone this clip clearly isn't, drop the name.
+        if (u.own === undefined && clusterPerson && clip.length >= DROP_NAME_MIN_SAMPLES) {
           const theirs = people
             .filter((p) => p.id === clusterPerson)
             .map((p) => cosine(emb, p.embedding));
@@ -609,11 +682,16 @@ async function refineNow(deps: RefineDeps, blockId: string): Promise<RefineResul
         }
       }
     }
+
+    // 6) One speaker's fragments joined into lines (only where the voice checks agree).
+    created.push(...mergeLines(lines));
   }
 
   if (replaced.length === 0) {
-    // Nothing to re-derive (no stored audio): the live rows are final.
-    return (await markRefined()) ? result("no stored audio to refine", true) : result(again, false);
+    // Nothing to re-derive (no stored audio, or no speech in it): the live rows are final.
+    return (await markRefined())
+      ? result("no stored audio or speech to refine", true)
+      : result(again, false);
   }
 
   const now = new Date();
@@ -680,7 +758,7 @@ async function refineNow(deps: RefineDeps, blockId: string): Promise<RefineResul
   });
   const kept = live.length - replaced.length;
   const speakers = new Set([...speakerPerson.values()].map((s) => s.key)).size;
-  const done = `refined: ${replaced.length} live → ${created.length} utterances, ${speakers} speakers${kept ? ` (${kept} kept: no audio)` : ""}`;
+  const done = `refined: ${replaced.length} live → ${created.length} utterances, ${speakers} speakers${kept ? ` (${kept} kept: no audio or speech)` : ""}`;
   return result(refined ? done : `${done}; ${again}`, refined, replaced.length);
 }
 

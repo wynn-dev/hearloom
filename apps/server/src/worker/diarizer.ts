@@ -98,6 +98,8 @@ export class Diarizer {
           proc.stdin.write(`${JSON.stringify({ id, audio: path })}\n`);
           proc.stdin.flush();
         }).finally(() => clearTimeout(timer));
+        // FluidAudio reports audio without speech as an error; for us it's just no speakers.
+        if (reply.error === "noSpeechDetected") return [];
         if (reply.error) throw new Error(reply.error);
         return reply.segments ?? [];
       } finally {
