@@ -28,6 +28,8 @@ describe("SoundEventSmoother", () => {
   test("ignores speech classes", () => {
     const s = new SoundEventSmoother();
     expect(s.push([{ name: "Speech", prob: 0.99 }], 0, 2000).opened).toHaveLength(0);
+    // Classes the tagger gives to plain talking.
+    expect(s.push([{ name: "Mantra", prob: 0.7 }], 0, 2000).opened).toHaveLength(0);
   });
 });
 
@@ -61,6 +63,31 @@ describe("Soniox assembly", () => {
     const last = a.flush()!;
     expect(last.text).toBe("Later");
     expect(last.startAt).toBe(1_060_100);
+  });
+
+  test("punctuation stays with the words before it and never forms a line of its own", () => {
+    const clock = new SessionClock();
+    clock.sent(0, 10_000);
+    const a = new SonioxAssembler(clock, "stt-rt-v5");
+    const tok = (text: string, s: number, e: number, speaker = "1") => ({
+      text,
+      start_ms: s,
+      end_ms: e,
+      is_final: true,
+      speaker,
+    });
+    const out = a.push([
+      tok("Yes", 100, 400),
+      tok(".", 2500, 2600, "2"), // late, other speaker: still ends "Yes"
+      tok("<end>", 2600, 2600),
+      tok(".", 2700, 2800), // after the endpoint: dropped
+      tok("So", 3000, 3200),
+      tok("<end>", 3200, 3200),
+      tok("…", 4000, 4100),
+      tok("<end>", 4100, 4100),
+    ]);
+    expect(out.map((u) => u.text)).toEqual(["Yes.", "So"]);
+    expect(a.flush()).toBeNull();
   });
 
   test("silence cut out of stitched backlog audio still splits utterances", () => {

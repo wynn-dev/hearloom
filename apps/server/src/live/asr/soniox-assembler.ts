@@ -50,6 +50,9 @@ export class SessionClock {
   }
 }
 
+/** Text with no letters or digits (also matches ""). */
+const PUNCTUATION_ONLY = /^[^\p{L}\p{N}]*$/u;
+
 /**
  * Groups final Soniox tokens into utterances: a new utterance starts on the `<end>` endpoint
  * token, a speaker change, a pause longer than `maxGapMs` (wall clock), where the audio we sent
@@ -78,6 +81,9 @@ export class SonioxAssembler {
         continue;
       }
       if (/^<\w+>$/.test(t.text)) continue;
+      // Punctuation finalized after its sentence was already emitted: drop it rather than start
+      // the next utterance with it.
+      if (this.current.length === 0 && PUNCTUATION_ONLY.test(t.text)) continue;
       if (this.splitsBefore(t)) {
         const u = this.emit();
         if (u) out.push(u);
@@ -90,6 +96,8 @@ export class SonioxAssembler {
   private splitsBefore(t: SonioxToken): boolean {
     const prev = this.current[this.current.length - 1];
     if (!prev) return false;
+    // Trailing punctuation belongs to the words before it, whatever speaker or time it carries.
+    if (PUNCTUATION_ONLY.test(t.text)) return false;
     if (t.speaker !== undefined && t.speaker !== prev.speaker) return true;
     if (t.start_ms === undefined || prev.end_ms === undefined) return false;
     const { clock } = this;
@@ -114,7 +122,8 @@ export class SonioxAssembler {
       .map((t) => t.text)
       .join("")
       .trim();
-    if (!text) return null;
+    // Nothing but punctuation (a "." finalized after an endpoint): not worth a line of its own.
+    if (PUNCTUATION_ONLY.test(text)) return null;
     const first = toks[0]!;
     const last = toks[toks.length - 1]!;
     const langs = new Map<string, number>();
