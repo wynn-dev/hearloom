@@ -1,7 +1,7 @@
 /**
  * Live pipeline worker process (spawned by the server, see host.ts). Holds the native models
  * (sherpa-onnx) so a crash here can't take down audio ingest. Receives stored Opus frames over IPC,
- * writes utterances / sound events / conversations to Postgres, and reports state back.
+ * writes utterances / sound events / blocks / conversations to Postgres, and reports state back.
  */
 import { createDb, schema } from "@hearloom/db";
 import {
@@ -15,7 +15,7 @@ import type { AudioFrame } from "@hearloom/shared";
 import { and, eq } from "drizzle-orm";
 import { loadStreamAudio } from "../audio/load";
 import { env, modelsDir } from "../env";
-import { ConversationTracker } from "./conversations";
+import { BlockTracker } from "./blocks";
 import type { ChildMessage, HostMessage } from "./ipc";
 import { type LiveDeps, type StreamInfo, StreamProcessor } from "./processor";
 import { SpeakerDirectory } from "./speakers";
@@ -45,16 +45,17 @@ const deps: LiveDeps = {
   speakers: embedder
     ? new SpeakerDirectory(db, SPEAKER_MODEL_ID, env.SPEAKER_MATCH_THRESHOLD)
     : null,
-  conversations: new ConversationTracker(
+  blocks: new BlockTracker(
     db,
     {
-      started: (userId, conversationId) =>
+      chainStarted: (userId, conversationId) =>
         send({ t: "state", userId, patch: { inConversation: true, conversationId } }),
-      ended: (userId, conversationId, live) => {
+      chainEnded: (userId, conversationId, live) => {
         if (live)
           send({ t: "state", userId, patch: { inConversation: false, conversationId: null } });
         send({ t: "conversation_ended", userId, conversationId });
       },
+      blockClosed: (userId, blockId) => send({ t: "block_closed", userId, blockId }),
     },
     env.SPEAKER_CLUSTER_THRESHOLD,
   ),
@@ -74,7 +75,7 @@ const deps: LiveDeps = {
 };
 
 // A previous child may have died with conversations open; close them before taking new audio.
-const orphans = await deps.conversations.closeOrphans();
+const orphans = await deps.blocks.closeOrphans();
 if (orphans > 0) log(`closed ${orphans} conversation(s) left open by a previous run`);
 
 log(
@@ -155,7 +156,7 @@ async function enroll(msg: Extract<HostMessage, { t: "enroll" }>): Promise<numbe
   return audio.length / 16000;
 }
 
-// Close runs after silence, idle Soniox sessions, quiet conversations; drop idle processors.
+// Close runs after silence, idle Soniox sessions, quiet conversations and blocks; drop idle processors.
 setInterval(() => {
   const now = Date.now();
   for (const [id, p] of processors) {
@@ -165,12 +166,12 @@ setInterval(() => {
       void p.dispose();
     }
   }
-  void deps.conversations.tick(now).catch((err) => log(`conversations: ${err}`));
+  void deps.blocks.tick(now).catch((err) => log(`blocks: ${err}`));
 }, 1000);
 
 async function shutdown() {
   await Promise.all([...processors.values()].map((p) => p.dispose()));
-  await deps.conversations.closeAll();
+  await deps.blocks.closeAll();
   await client.end({ timeout: 3 });
   process.exit(0);
 }

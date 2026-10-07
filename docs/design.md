@@ -21,8 +21,8 @@ Omi pendant ──BLE (Opus 16 kHz, 20 ms frames)──▶ iPhone app
                                                          ▼
 Server (Bun) ── fsync'd spool → Ogg chunks (disk/S3) ── Postgres 18
    │  auth, typed API (oRPC), realtime, notifications (socket → APNs), MCP
-   ├── live pipeline (child process): decode → VAD → ASR (Soniox) → speakers → sounds → conversations
-   └── job queue (pg-boss) ──▶ worker: refine finished conversations (diarizer sidecar)
+   ├── live pipeline (child process): decode → VAD → ASR (Soniox) → speakers → sounds → blocks
+   └── job queue (pg-boss) ──▶ worker: refine finished blocks (diarizer sidecar)
 Web console (Vite/TanStack) ── same-origin to server        Hermes agent ── MCP + signed webhooks
 ```
 
@@ -30,8 +30,8 @@ Web console (Vite/TanStack) ── same-origin to server        Hermes agent ─
 |---|---|---|
 | `apps/mobile` | Expo SDK 58, RN 0.88, Swift module `omi-capture` | BLE + state restoration, frame journal, uplink, pendant button/haptics, offline-storage download, push |
 | `apps/server` | Bun 1.4, Hono, oRPC, Better Auth, postgres.js + Drizzle | ingest, storage, API, realtime, notifications, live pipeline host, MCP |
-| live pipeline | child process of the server, sherpa-onnx | real-time transcript, speakers, sound events, conversations |
-| worker | Bun + pg-boss | refine pass per conversation |
+| live pipeline | child process of the server, sherpa-onnx | real-time transcript, speakers, sound events, conversations and blocks |
+| worker | Bun + pg-boss | refine pass per block |
 | `sidecars/diarizer` | Swift + FluidAudio (Core ML) | offline speaker diarization |
 | `apps/web` | Vite, TanStack Router/Query, Tailwind | timeline, people, notifications, devices, settings, agent tokens |
 | Postgres | 18 + pgvector image | everything except audio; jobs; LISTEN/NOTIFY |
@@ -48,8 +48,9 @@ Web console (Vite/TanStack) ── same-origin to server        Hermes agent ─
 3. **Chunks.** Spooled frames become Ogg Opus files (no re-encoding; lost packets become TOC-only frames
    so timing holds) at ≤ 60 s or at silence gaps. Crash recovery replays the spool.
 4. **Live pipeline** turns frames into rows within seconds (see models below). Late audio (backlog)
-   joins the closed conversation it falls in; a crashed pipeline restarts and closes what it left open.
-5. **Refine** runs when a conversation ends (2 min of silence) and replaces the live rows it re-derives
+   joins the closed block it falls in; a crashed pipeline restarts and closes what it left open.
+5. **Refine** runs when a block ends (2 min of silence, or a pause once the block is 10–20 min long,
+   so long speech is refined as it goes) and replaces the live rows it re-derives
    (kept, superseded); rows without stored audio stay.
 6. **Offline.** Away from the phone, the pendant records to its own flash; the app downloads it on
    reconnect (raw records persisted first — stock firmware deletes data as it sends — then ADVANCE so
@@ -60,6 +61,7 @@ Web console (Vite/TanStack) ── same-origin to server        Hermes agent ─
 `phones`, `wearables`, `capture_streams` (ack position), `audio_chunks` (storage key, time range),
 `utterances` (time, text, lang, speaker key, person, wearer flag, source live/refine, superseded,
 EN/NL full-text `tsvector`), `sound_events` (label, point/state, confidence), `conversations`,
+`blocks` (≤ 20 min refine units of a conversation, with the voices refine found),
 `people` + `voiceprints`, `bookmarks`, `device_events`, `notifications` + `notification_deliveries`,
 `user_settings`, `api_tokens`. Every row has a `user_id`; times are absolute (`timestamptz`).
 
@@ -74,7 +76,7 @@ Pipecat, BDM diarization benchmark) and our own measurements on Omi-style Opus a
 | Live ASR | Soniox `stt-rt-v5` | cloud, ~$0.12/h of speech | per-word EN↔NL language ID, streaming speakers, EU residency, no training; we only stream during speech | MAI-Transcribe-2-Streaming (best English WER, but no diarization/lang tags, preview), AssemblyAI U-3.6, Meta Muse, ElevenLabs Scribe v2 Realtime ($0.39/h, no streaming speakers) |
 | Backlog ASR | Soniox `stt-async-v5` | cloud, $0.10/h of speech | same provider and features as live, for audio uploaded late | Parakeet TDT 0.6B v3 locally (weaker Dutch, no speakers) |
 | Refine text | none: live text is kept | — | the agent acts on the live transcript, so better text after the conversation comes too late; refine only fixes speakers | ElevenLabs Scribe v2 ($0.22/h, best Dutch FLEURS 2.5 %), Soniox async |
-| Diarization | FluidAudio offline (segmentation + embeddings + VBx) | local, Core ML | consistent speakers per conversation; offline beats streaming (~2.5× lower DER) | pyannoteAI (paid), sherpa pyannote-3.0 (outdated) |
+| Diarization | FluidAudio offline (segmentation + embeddings + VBx) | local, Core ML | consistent speakers per block, carried across blocks; offline beats streaming (~2.5× lower DER) | pyannoteAI (paid), sherpa pyannote-3.0 (outdated) |
 | Speaker ID | 3D-Speaker CAM++ (zh/en) | local | raw cosine separates speakers on Opus audio (same 0.75–0.91, different ≤ 0.51); 28 MB | WeSpeaker ResNet293 (better VoxCeleb EER, but scores overlapped 0.72–0.94 on our audio) |
 | Sound events | CED-base (AudioSet, 527 classes, 16 kHz) | local, ~15 ms per 2 s window | at SOTA (mAP 50.0), trained on 16 kHz | EfficientAT (32 kHz), BEATs, CLAP (open vocabulary, later) |
 | Scene captions | Gemini Flash-Lite batch (planned) | cloud, ~$0.02/h | cheapest decent captions | Qwen3-Omni-Captioner on MLX |
@@ -115,6 +117,7 @@ transport. Not yet: encryption at rest, retention policies, bystander redaction.
 | Expo SDK 58 beta | Xcode 27 requires the UIScene lifecycle |
 | One transcription provider (Soniox), no local fallback | one key and bill; live text is what a proactive agent acts on |
 | Refine pass re-diarizes only | offline diarization far beats live speakers; re-transcribing after the fact is too late to matter |
+| Refine per ≤ 20 min block, not per conversation | a lecture or TV evening has no 2-minute silence: refining it as one unit waited hours and diarized hours of audio at once. Keys carry across blocks via shared context and stored voices |
 | No built-in LLM layer | the agent (Hermes + Claude) does summarizing/reasoning over MCP |
 
 ## Not yet built

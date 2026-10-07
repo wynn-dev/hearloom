@@ -2,10 +2,16 @@ import { PgBoss } from "pg-boss";
 import { env } from "./env";
 
 export const QUEUES = {
-  refine: "refine-conversation",
+  refine: "refine-block",
+  /** Jobs queued before blocks existed; each conversation became a block with the same id. */
+  refineLegacy: "refine-conversation",
 } as const;
 
 export interface RefineJob {
+  blockId: string;
+}
+
+export interface LegacyRefineJob {
   conversationId: string;
 }
 
@@ -24,11 +30,11 @@ export async function jobs(): Promise<PgBoss> {
   return boss;
 }
 
-/** Queue a refine pass for a finished conversation (deduplicated per conversation). */
-export async function enqueueRefine(conversationId: string): Promise<void> {
+/** Queue a refine pass for a finished block (deduplicated per block). */
+export async function enqueueRefine(blockId: string): Promise<void> {
   const b = await jobs();
-  await b.send(QUEUES.refine, { conversationId } satisfies RefineJob, {
-    singletonKey: conversationId,
+  await b.send(QUEUES.refine, { blockId } satisfies RefineJob, {
+    singletonKey: blockId,
     retryLimit: 3,
     retryDelay: 60,
     retryBackoff: true,
