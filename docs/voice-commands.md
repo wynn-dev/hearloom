@@ -148,8 +148,10 @@ Teaching reuses the voiceprint machinery behind "This is me" (`voiceprints` rows
     voice. Before your
     first voiceprint, a sample clearly matching another enrolled person is refused. Whoever else
     talks while the page is open isn't enrolled as you;
-  - if the audio is at least 1.5 s long, it is stored as a new voiceprint. Shorter "Hey Hermes"
-    samples teach the name but would blur the voice match;
+  - if the audio is at least 1.5 s long, it becomes a new voiceprint. Shorter "Hey Hermes"
+    samples teach the name but would blur the voice match. The live pipeline only computes the
+    embedding; the server stores the voiceprint and the sample row in one transaction, and only
+    for the current phrase of a running session;
   - the phrase advances.
 - **A session ends** in any of these cases:
   - after 5 minutes without progress. Only matching samples and your own actions count, so the TV
@@ -188,9 +190,13 @@ Teaching reuses the voiceprint machinery behind "This is me" (`voiceprints` rows
   - **👎 false trigger** removes anything learned from that command and blocks the spelling from
     loose matching.
   - Changing your verdict undoes the earlier one. Verdicts on one command are serialized with a
-    row lock, held only briefly. The verdict is recorded first, the voice is learned without the
-    lock, and the result is linked only if the verdict hasn't changed meanwhile; otherwise the new
-    voiceprint is deleted. A quick 👍 then 👎 can't leave the 👍's voiceprint behind.
+    row lock, held only briefly. The verdict is recorded first, and the live pipeline embeds the
+    voice without the lock. The voiceprint and its sample row are then stored together, only if
+    the verdict hasn't changed meanwhile. A quick 👍 then 👎 can't leave the 👍's voiceprint
+    behind. Two 👍 at once both read as learned, and it is learned once.
+  - **Every voiceprint learned here has a `voice_samples` row,** so 👎 can always remove it. A
+    timeout or restart while the live pipeline works stores nothing. "This is me" and People
+    voiceprints have no sample rows by design and are never touched by this.
   - **Only taught samples set the own-voice threshold.** Vouched-for commands never pull it down.
 - **Readiness on the Voice page:**
   - number of samples and seconds of voice learned;
@@ -298,10 +304,11 @@ The webhook URL and secret are the agent's (`agent.webhookUrl`, `agent.webhookSe
   - feedback learning and undo;
   - Missed refused on someone else's voice;
   - learning from part ranges;
-  - serialized verdicts;
+  - serialized verdicts, and two 👍 at once;
+  - no voiceprint without its sample (a timeout stores nothing; "This is me" prints untouched);
   - teaching sessions and alias learning;
   - the teaching guard, and prompts replayed after a restart;
-  - session expiry and stale stops;
+  - session expiry and stale stops, and old stops being forgotten;
   - the upload limit;
   - pending recovery after a restart;
   - the threshold ignoring command samples.

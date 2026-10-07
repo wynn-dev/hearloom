@@ -12,14 +12,14 @@ import {
   teachVoiceVerdict,
   VoiceDetector,
 } from "./detector";
-import type { TeachResult, VoiceConfig, VoiceDetection } from "./types";
+import type { TeachHeard, VoiceConfig, VoiceDetection } from "./types";
 
 const T = 1_800_000_000_000;
 
 function setup(over: { config?: Partial<VoiceConfig>; self?: number | null; other?: number } = {}) {
   let now = T;
   const detections: VoiceDetection[] = [];
-  const taught: TeachResult[] = [];
+  const taught: TeachHeard[] = [];
   const learned: number[] = [];
   const audioCalls: [number, number][] = [];
   const media = new Set<string>();
@@ -34,9 +34,9 @@ function setup(over: { config?: Partial<VoiceConfig>; self?: number | null; othe
     config: async () => config,
     score: async () => ({ ...scores }),
     isMediaVoice: async (_u, chainId, key) => media.has(`${chainId}:${key}`),
-    learn: async (_u, _p, audio) => {
+    embed: async (audio) => {
       learned.push(audio.length);
-      return "vp1";
+      return [0.1, 0.2];
     },
     detected: (d) => detections.push(d),
     taught: (_u, r) => taught.push(r),
@@ -188,7 +188,8 @@ describe("VoiceDetector", () => {
       ok: true,
       heardAs: "her mess",
       speakerScore: 0.71,
-      voiceprintId: "vp1",
+      // The embedding goes to the host, which stores it with the sample.
+      embedding: [0.1, 0.2],
       // A split name only matches once it's learned as an alias.
       wouldMatch: false,
       wouldTrigger: false,
@@ -197,10 +198,10 @@ describe("VoiceDetector", () => {
     // Too short for a voiceprint, still a sample.
     await t.say("Hey Hermes, what's the weather tomorrow?", 5, 5.6);
     expect(t.learned).toHaveLength(1);
-    expect(t.taught[1]).toMatchObject({ ok: true, voiceprintId: null });
+    expect(t.taught[1]).toMatchObject({ ok: true, embedding: null });
     // Something else.
     await t.say("Where did I put my keys?", 8, 10);
-    expect(t.taught[2]).toMatchObject({ ok: false, voiceprintId: null });
+    expect(t.taught[2]).toMatchObject({ ok: false, embedding: null });
   });
 
   test("self-test reports whether it would trigger", async () => {
@@ -233,7 +234,7 @@ describe("review fixes", () => {
     t.detector.setTeach("u1", prompt);
     await t.say("Hey Hermes, what's the weather tomorrow?", 0, 2.5, { isSelf: false });
     expect(t.learned).toHaveLength(0);
-    expect(t.taught[0]).toMatchObject({ ok: false, voiceprintId: null });
+    expect(t.taught[0]).toMatchObject({ ok: false, embedding: null });
     expect(t.taught[0]!.error).toContain("didn't sound like you");
   });
 

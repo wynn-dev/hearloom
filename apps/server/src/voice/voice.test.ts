@@ -1,5 +1,5 @@
 import "../test-db";
-import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, expect, setSystemTime, test } from "bun:test";
 import { schema } from "@hearloom/db";
 import { SPEAKER_MODEL_ID } from "@hearloom/inference";
 import type { ServerWebSocket } from "bun";
@@ -16,7 +16,9 @@ import { MAX_AGE_MS } from "./deliver";
 import { ensureSelfPerson, voiceProfile } from "./profile";
 import {
   IDLE_MS,
+  isTeaching,
   onTeachHeard,
+  rememberedStops,
   replayTeach,
   resetTeach,
   startTeach,
@@ -262,7 +264,7 @@ test("feedback: Missed learns from the parts' audio only if it sounds like the u
   const calls: unknown[] = [];
   pipeline.learnVoice = async (...args) => {
     calls.push(args);
-    return { voiceprintId: await voiceprint(), seconds: 2.1 };
+    return { embedding: [0.1, 0.2, 0.3], seconds: 2.1 };
   };
   const parts = [
     { startAt: Date.now() - 9000, endAt: Date.now() - 8200 },
@@ -278,10 +280,19 @@ test("feedback: Missed learns from the parts' audio only if it sounds like the u
   await onDetection(d);
   expect(await setFeedback(userId, d.id, "missed")).toEqual({ learned: true, note: null });
   // The command's own utterances, not the 5 s between them.
-  expect(calls[0]).toEqual([userId, expect.any(String), streamId, parts]);
+  expect(calls[0]).toEqual([userId, streamId, parts]);
   const [sample] = await samplesOf(d.id);
   expect(sample).toMatchObject({ source: "command", seconds: 2.1 });
-  expect(sample!.voiceprintId).not.toBeNull();
+  // The host stored the voiceprint, for the user's own person, with the sample.
+  const [vp] = await db
+    .select()
+    .from(schema.voiceprints)
+    .where(eq(schema.voiceprints.id, sample!.voiceprintId!));
+  expect(vp).toMatchObject({
+    personId: (await voiceProfile(userId)).personId,
+    embedding: [0.1, 0.2, 0.3].map((x) => expect.closeTo(x, 5)),
+    sampleSeconds: expect.closeTo(2.1, 5),
+  });
   expect((await getSettings(userId)).voice.aliases).toEqual(["Hermus"]);
   await updateSettings(userId, { voice: { aliases: [] } });
 
@@ -298,13 +309,11 @@ test("feedback: Missed learns from the parts' audio only if it sounds like the u
 });
 
 test("feedback on one command is serialized: 👍 then 👎 leaves nothing learned", async () => {
-  const created: string[] = [];
   pipeline.learnVoice = async () => {
     await Bun.sleep(150); // the 👎 arrives while the 👍 is still learning
-    const voiceprintId = await voiceprint();
-    created.push(voiceprintId);
-    return { voiceprintId, seconds: 2 };
+    return { embedding: [0.1, 0.2], seconds: 2 };
   };
+  const before = await voiceprintIds();
   const d = detection({ status: "shadow", streamId });
   await onDetection(d);
   const up = setFeedback(userId, d.id, "confirmed");
@@ -313,15 +322,96 @@ test("feedback on one command is serialized: 👍 then 👎 leaves nothing learn
   await Promise.all([up, down]);
   expect((await row(d.id)).feedback).toBe("false_trigger");
   expect(await samplesOf(d.id)).toHaveLength(0);
-  expect(created).toHaveLength(1);
-  const left = await db
-    .select()
-    .from(schema.voiceprints)
-    .where(eq(schema.voiceprints.id, created[0]!));
-  expect(left).toHaveLength(0);
+  expect(await voiceprintIds()).toEqual(before);
 });
 
-/** A voiceprint row for the user's own person (what the live pipeline would store). */
+test("two 👍 at once: both read as saved and learned, and it's learned once", async () => {
+  pipeline.learnVoice = async () => {
+    await Bun.sleep(100);
+    return { embedding: [0.1, 0.2], seconds: 2 };
+  };
+  const before = await voiceprintIds();
+  const d = detection({ status: "shadow", streamId });
+  await onDetection(d);
+  const results = await Promise.all([
+    setFeedback(userId, d.id, "confirmed"),
+    setFeedback(userId, d.id, "confirmed"),
+  ]);
+  expect(results).toEqual([
+    { learned: true, note: null },
+    { learned: true, note: null },
+  ]);
+  const samples = await samplesOf(d.id);
+  expect(samples).toHaveLength(1);
+  expect(await voiceprintIds()).toEqual([...before, samples[0]!.voiceprintId!].sort());
+  await setFeedback(userId, d.id, null);
+  expect(await voiceprintIds()).toEqual(before);
+});
+
+test("two 👍 at once on a voice that isn't learned: both say why", async () => {
+  const refused = "That didn't sound enough like you to learn from.";
+  pipeline.learnVoice = async () => {
+    await Bun.sleep(100);
+    throw new Error(refused);
+  };
+  const before = await voiceprintIds();
+  // A fired command: its spelling is learned even though its voice isn't.
+  const d = detection({ status: "shadow", heardAs: "Hermus", nameScore: 0.9, streamId });
+  await onDetection(d);
+  const results = await Promise.all([
+    setFeedback(userId, d.id, "confirmed"),
+    setFeedback(userId, d.id, "confirmed"),
+  ]);
+  expect(results).toEqual([
+    { learned: true, note: refused },
+    { learned: true, note: refused },
+  ]);
+  const samples = await samplesOf(d.id);
+  expect(samples).toHaveLength(1);
+  expect(samples[0]!.voiceprintId).toBeNull();
+  expect(await voiceprintIds()).toEqual(before);
+  await setFeedback(userId, d.id, null);
+  await updateSettings(userId, { voice: { aliases: [], blocked: [] } });
+});
+
+test("a voiceprint is never stored without the sample that removes it", async () => {
+  // "This is me" and People voiceprints have no sample row by design: never touched.
+  const thisIsMe = await voiceprint();
+  const before = await voiceprintIds();
+  const d = detection({ status: "shadow", streamId });
+  await onDetection(d);
+
+  // The live pipeline didn't answer in time, or restarted: it stored nothing, nor does the host.
+  pipeline.learnVoice = async () => {
+    throw new Error("the live pipeline did not answer in time");
+  };
+  const r = await setFeedback(userId, d.id, "confirmed");
+  expect(r.note).toBe("the live pipeline did not answer in time");
+  for (const s of await samplesOf(d.id)) expect(s.voiceprintId).toBeNull();
+  expect(await voiceprintIds()).toEqual(before);
+
+  // Learned: the voiceprint comes with its sample, and 👎 removes it.
+  pipeline.learnVoice = async () => ({ embedding: [0.3, 0.4], seconds: 2 });
+  await setFeedback(userId, d.id, null);
+  await setFeedback(userId, d.id, "confirmed");
+  const [sample] = await samplesOf(d.id);
+  expect(sample!.voiceprintId).not.toBeNull();
+  await setFeedback(userId, d.id, "false_trigger");
+  expect(await voiceprintIds()).toEqual(before);
+  expect(before).toContain(thisIsMe);
+  await db.delete(schema.voiceprints).where(eq(schema.voiceprints.id, thisIsMe));
+  await updateSettings(userId, { voice: { aliases: [], blocked: [] } });
+});
+
+async function voiceprintIds(): Promise<string[]> {
+  const rows = await db
+    .select({ id: schema.voiceprints.id })
+    .from(schema.voiceprints)
+    .where(eq(schema.voiceprints.userId, userId));
+  return rows.map((r) => r.id).sort();
+}
+
+/** A voiceprint row for the user's own person with no sample (like "This is me"). */
 async function voiceprint(seconds = 2): Promise<string> {
   const personId = await ensureSelfPerson(userId, "Tester");
   const [vp] = await db
@@ -357,7 +447,7 @@ test("teaching: samples are stored, the phrase advances, aliases are learned", a
       wouldMatch: false,
       speakerScore: 0.7,
       seconds: 2,
-      voiceprintId: null,
+      embedding: null,
       wouldTrigger: false,
     });
   await heard(state.index, state.phrase, "air miss");
@@ -415,7 +505,7 @@ test("only progress keeps a teaching session alive; stale stops don't end a newe
     wouldMatch: ok,
     speakerScore: ok ? 0.7 : null,
     seconds: 1,
-    voiceprintId: null,
+    embedding: null,
     wouldTrigger: false,
   });
   await Bun.sleep(10);
@@ -459,7 +549,7 @@ test("browser uploads: one at a time", async () => {
     wouldMatch: false,
     speakerScore: null,
     seconds: 0,
-    voiceprintId: null,
+    embedding: null,
     wouldTrigger: false,
     error: "transcription is off",
   });
@@ -523,6 +613,73 @@ test("speech from just before or after Done is still teaching, never sent", asyn
   await onDetection(later);
   expect((await row(later.id)).status).toBe("sent");
   expect(received.map((x) => x.body.id)).toEqual([later.id]);
+});
+
+test("teaching: a sample's voiceprint is stored with it, a stale one's not at all", async () => {
+  const before = await voiceprintIds();
+  await startTeach(userId, "Tester", "sample");
+  const s = teachState(userId)!;
+  const heard = (index: number, sessionId = s.sessionId) =>
+    onTeachHeard(userId, {
+      sessionId,
+      kind: "sample",
+      index,
+      phrase: s.phrase,
+      source: "pendant",
+      text: s.phrase,
+      ok: true,
+      heardAs: "Hermes",
+      nameScore: 1,
+      wouldMatch: true,
+      speakerScore: 0.7,
+      seconds: 2.5,
+      embedding: [0.5, 0.6],
+      wouldTrigger: true,
+    });
+  await heard(s.index);
+  const [stored] = teachState(userId)!.results;
+  expect(stored!.voiceprintId).not.toBeNull();
+  expect(stored).not.toHaveProperty("embedding");
+  const [sample] = await db
+    .select()
+    .from(schema.voiceSamples)
+    .where(eq(schema.voiceSamples.voiceprintId, stored!.voiceprintId!));
+  expect(sample).toMatchObject({ source: "pendant", seconds: 2.5 });
+  // An old phrase, or a session that ended: no sample, so no voiceprint either.
+  await heard(s.index);
+  expect(teachState(userId)!.results[0]!.voiceprintId).toBeNull();
+  stopTeach(userId);
+  await heard(s.index + 1);
+  expect(await voiceprintIds()).toEqual([...before, stored!.voiceprintId!].sort());
+});
+
+test("teaching stops are forgotten once too old to matter", async () => {
+  const t0 = Date.now();
+  const other = `test-${crypto.randomUUID()}`;
+  try {
+    await startTeach(userId, "Tester", "sample");
+    stopTeach(userId);
+    expect(rememberedStops()).toBe(1);
+    // A long command started within the grace window arrives well after it: still teaching.
+    setSystemTime(new Date(t0 + 45_000));
+    expect(isTeaching(userId, t0 + 5_000)).toBe(true);
+    // A couple of minutes on, the stop is pruned when checked.
+    setSystemTime(new Date(t0 + 2 * 60_000));
+    expect(isTeaching(userId, t0 + 5_000)).toBe(false);
+    expect(rememberedStops()).toBe(0);
+    // …and when someone else's stop is added.
+    await startTeach(userId, "Tester", "sample");
+    stopTeach(userId);
+    await db.insert(schema.user).values({ id: other, name: "Other", email: `${other}@test.local` });
+    await startTeach(other, "Other", "sample");
+    setSystemTime(new Date(t0 + 4 * 60_000));
+    stopTeach(other);
+    expect(rememberedStops()).toBe(1);
+    expect(isTeaching(other, t0 + 4 * 60_000)).toBe(true);
+  } finally {
+    setSystemTime();
+    await db.delete(schema.user).where(eq(schema.user.id, other));
+  }
 });
 
 test("the own-voice threshold ignores scores from vouched-for commands", async () => {

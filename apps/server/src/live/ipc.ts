@@ -1,6 +1,6 @@
 import type { Activity } from "./episodes";
 import type { StreamInfo } from "./processor";
-import type { TeachPrompt, TeachResult, VoiceDetection } from "./voice/types";
+import type { TeachHeard, TeachPrompt, VoiceDetection } from "./voice/types";
 
 export type HostMessage =
   | { t: "frames"; stream: StreamInfo; frames: { seq: number; at: number; data: Uint8Array }[] }
@@ -13,12 +13,11 @@ export type HostMessage =
   | { t: "teach"; userId: string; prompt: TeachPrompt | null }
   /** A teaching sample recorded in the browser (16 kHz mono). */
   | { t: "teach_audio"; userId: string; prompt: TeachPrompt; pcm: Int16Array }
-  /** Learn the user's voice from stored audio (a voice command they confirmed). */
+  /** Embed the user's voice from stored audio (a voice command they confirmed), if it's theirs. */
   | {
       t: "learn_voice";
       requestId: string;
       userId: string;
-      personId: string;
       streamId: string;
       /** The command's utterances (not the gaps between them). */
       ranges: { startAt: number; endAt: number }[];
@@ -33,6 +32,6 @@ export type ChildMessage =
   | { t: "enrolled"; requestId: string; ok: true; sampleSeconds: number }
   | { t: "enrolled"; requestId: string; ok: false; error: string }
   | { t: "voice_command"; detection: VoiceDetection }
-  | { t: "teach_heard"; userId: string; result: TeachResult }
-  | { t: "learned"; requestId: string; ok: true; voiceprintId: string; seconds: number }
+  | { t: "teach_heard"; userId: string; result: TeachHeard }
+  | { t: "learned"; requestId: string; ok: true; embedding: number[]; seconds: number }
   | { t: "learned"; requestId: string; ok: false; error: string };
