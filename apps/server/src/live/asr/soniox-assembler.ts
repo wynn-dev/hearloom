@@ -52,8 +52,11 @@ export class SessionClock {
 
 /** Text with no letters or digits (also matches ""). */
 const NO_WORDS = /^[^\p{L}\p{N}]*$/u;
-/** A token that only closes what came before it: "." "?" "," "—" closing quotes and brackets. */
-const CLOSING = /^\s*[.,!?;:…。，！？、)\]}"'”’»\-–—]+$/u;
+/**
+ * A token that only closes what came before it: "." "?" "," "—", closing quotes and brackets, with
+ * no space before it. Straight quotes and hyphens are left out: they can also open text ("-5", "'t").
+ */
+const CLOSING = /^[.,!?;:…。，！？、)\]}”’»–—]+$/u;
 
 /**
  * Groups final Soniox tokens into utterances: a new utterance starts on the `<end>` endpoint

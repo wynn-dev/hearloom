@@ -130,12 +130,19 @@ describe("Soniox assembly", () => {
       ]);
     });
 
-    test("leading symbols are kept", () => {
+    test("symbols that can open text are kept", () => {
       const clock = new SessionClock();
       clock.sent(0, 10_000);
-      const a = new SonioxAssembler(clock, "stt-rt-v5");
-      const [u] = a.push([tok("€", 100, 200), tok("5", 200, 400), tok("<end>", 400, 400)]);
-      expect(u!.text).toBe("€5");
+      const line = (...texts: string[]) => {
+        const a = new SonioxAssembler(clock, "stt-rt-v5");
+        a.push(texts.map((t, i) => tok(t, 100 + i * 100, 200 + i * 100)));
+        return a.flush()!.text;
+      };
+      expect(line("€", "5")).toBe("€5");
+      expect(line("-", "5", " graden")).toBe("-5 graden");
+      expect(line(" '", "t", " is")).toBe("'t is");
+      expect(line("Yes", ' "', "Hello", '"')).toBe('Yes "Hello"');
+      expect(line("Yes", " —", " so")).toBe("Yes — so");
     });
   });
 
