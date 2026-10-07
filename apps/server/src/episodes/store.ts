@@ -6,7 +6,7 @@
 import type { Db } from "@hearloom/db";
 import { schema } from "@hearloom/db";
 import { type EditSource, type KnownEpisodeKind, mayEdit } from "@hearloom/shared";
-import { and, asc, eq, gt, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, isNotNull, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
 
 export type EpisodeRow = typeof schema.episodes.$inferSelect;
 const { episodes: e, blocks: b } = schema;
@@ -36,6 +36,50 @@ export async function episodesAt(
     ) ep`)) as unknown as { at: Date | string; id: string; kind: EpisodeRow["kind"] }[];
   for (const r of rows) out.set(new Date(r.at).getTime(), { id: r.id, kind: r.kind });
   return out;
+}
+
+/** A voice that spoke at least this long in a media episode of a chain is a media voice there. */
+const MEDIA_VOICE_MS = 20_000;
+
+/**
+ * Voices from a TV or radio, per chain ("<chainId>:<speakerKey>"): unnamed voices (not the user,
+ * not an enrolled person) that speak in the chain's media episodes. Speaker keys are per chain, so
+ * when the same voice goes on during a conversation over the TV, its lines can be marked too.
+ */
+export async function mediaVoices(
+  db: Db,
+  userId: string,
+  chainIds: string[],
+): Promise<Set<string>> {
+  if (chainIds.length === 0) return new Set();
+  const u = schema.utterances;
+  const ms = sql<number>`sum(extract(epoch from (${u.endAt} - ${u.startAt})) * 1000)`;
+  const rows = await db
+    .select({ chainId: b.chainId, key: u.speakerKey })
+    .from(u)
+    .innerJoin(b, eq(b.id, u.blockId))
+    .innerJoin(
+      e,
+      and(
+        eq(e.userId, u.userId),
+        eq(e.kind, "media"),
+        lte(e.startedAt, u.startAt),
+        or(isNull(e.endedAt), gt(e.endedAt, u.startAt)),
+      ),
+    )
+    .where(
+      and(
+        eq(u.userId, userId),
+        inArray(b.chainId, [...new Set(chainIds)]),
+        isNull(u.supersededAt),
+        isNotNull(u.speakerKey),
+        isNull(u.personId),
+        sql`${u.isWearer} is not true`,
+      ),
+    )
+    .groupBy(b.chainId, u.speakerKey)
+    .having(sql`${ms} >= ${MEDIA_VOICE_MS}`);
+  return new Set(rows.map((r) => `${r.chainId}:${r.key}`));
 }
 
 /** Episodes overlapping [from, to), oldest first. */

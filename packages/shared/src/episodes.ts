@@ -10,6 +10,7 @@ export const episodeKindSchema = z.enum([
   "media",
   "ambient",
   "solo",
+  "sound",
   "unknown",
 ]);
 export type EpisodeKind = z.infer<typeof episodeKindSchema>;
@@ -27,6 +28,7 @@ export const EPISODE_KIND_LABEL: Record<EpisodeKind, string> = {
   media: "Media",
   ambient: "Ambient",
   solo: "Solo",
+  sound: "Sound",
   unknown: "Speech",
 };
 
@@ -36,6 +38,7 @@ export const EPISODE_KIND_DESCRIPTION: Record<EpisodeKind, string> = {
   media: "TV, radio, podcasts, videos",
   ambient: "Speech nearby that you're not part of",
   solo: "Only you (dictation, thinking aloud, a call on the earpiece)",
+  sound: "A long stretch without speech: music, a commute, rain",
   unknown: "Not classified yet",
 };
 

@@ -7,11 +7,24 @@ import { z } from "zod";
 import { type Scope, verifyToken } from "../agent/tokens";
 import { db } from "../db";
 import { env } from "../env";
-import { episodesAt, episodesIn, getEpisode, refinedIds } from "../episodes/store";
+import {
+  EpisodeEditError,
+  type EpisodeRow,
+  episodesAt,
+  episodesIn,
+  getEpisode,
+  mediaVoices,
+  mergeEpisodes,
+  refinedIds,
+  splitEpisode,
+  updateEpisode,
+} from "../episodes/store";
 import { chunkUrl } from "../http/media";
+import { livePipeline } from "../live/host";
 import { liveState } from "../live/state";
 import { notify } from "../notify/gateway";
 import { inQuietHours } from "../notify/policy";
+import { invalidate } from "../realtime";
 import { getSettings } from "../settings";
 import {
   clock,
@@ -23,7 +36,8 @@ import {
   speakerName,
 } from "./render";
 
-const { utterances, people, soundEvents, episodes, bookmarks, audioChunks, wearables } = schema;
+const { utterances, people, soundEvents, episodes, bookmarks, audioChunks, wearables, blocks } =
+  schema;
 /** Lines per get_episode page. */
 const PAGE_LINES = 400;
 
@@ -39,8 +53,9 @@ function range(from: string, to?: string): { from: Date; to: Date } {
   return { from: f, to: t };
 }
 
+/** Utterances with speaker names; voices from a TV or radio are marked (`media`). */
 async function loadUtterances(userId: string, where: ReturnType<typeof and>, limit = 2000) {
-  return db
+  const rows = await db
     .select({
       id: utterances.id,
       startAt: utterances.startAt,
@@ -50,12 +65,20 @@ async function loadUtterances(userId: string, where: ReturnType<typeof and>, lim
       speakerKey: utterances.speakerKey,
       isWearer: utterances.isWearer,
       personName: people.name,
+      chainId: blocks.chainId,
     })
     .from(utterances)
     .leftJoin(people, eq(people.id, utterances.personId))
+    .leftJoin(blocks, eq(blocks.id, utterances.blockId))
     .where(and(eq(utterances.userId, userId), isNull(utterances.supersededAt), where))
     .orderBy(asc(utterances.startAt))
     .limit(limit);
+  const media = await mediaVoices(
+    db,
+    userId,
+    rows.flatMap((r) => (r.chainId ? [r.chainId] : [])),
+  );
+  return rows.map((r) => ({ ...r, media: media.has(`${r.chainId}:${r.speakerKey}`) }));
 }
 
 async function loadSounds(userId: string, from: Date, to: Date) {
@@ -472,6 +495,63 @@ function buildServer(userId: string, scopes: Scope[]): McpServer {
       );
     },
   );
+
+  if (scopes.includes("write")) {
+    const write = { readOnlyHint: false, destructiveHint: false, openWorldHint: false } as const;
+    /** Run an edit as the agent; report what the episode looks like now, or why not. */
+    const edit = async (run: () => Promise<EpisodeRow | EpisodeRow[]>) => {
+      let rows: EpisodeRow[];
+      try {
+        const out = await run();
+        rows = Array.isArray(out) ? out : [out];
+      } catch (err) {
+        if (err instanceof EpisodeEditError) return text(`Not changed: ${err.message}.`);
+        throw err;
+      }
+      livePipeline.episodesChanged(userId);
+      invalidate(userId, ["timeline"]);
+      const tz = (await getSettings(userId)).timezone;
+      return text(rows.map((e) => episodeHeader(e, tz)).join("\n"));
+    };
+
+    server.registerTool(
+      "update_episode",
+      {
+        description:
+          "Give an episode a title or summary (shown in the user's timeline), or correct its kind (e.g. it was the TV, not a conversation). The user's own edits can't be overridden. Pass null to clear a title or summary.",
+        inputSchema: {
+          id: z.string().uuid(),
+          title: z.string().max(200).nullable().optional(),
+          summary: z.string().max(4000).nullable().optional(),
+          kind: episodeKindSchema.exclude(["unknown"]).optional(),
+        },
+        annotations: write,
+      },
+      ({ id, ...patch }) => edit(() => updateEpisode(db, userId, id, patch, "agent")),
+    );
+
+    server.registerTool(
+      "split_episode",
+      {
+        description:
+          "Split an ended episode in two at a time inside it (e.g. where a meeting turned into a chat). Both parts keep its kind; use update_episode to change one.",
+        inputSchema: { id: z.string().uuid(), at: iso },
+        annotations: write,
+      },
+      ({ id, at }) => edit(() => splitEpisode(db, userId, id, new Date(at), "agent")),
+    );
+
+    server.registerTool(
+      "merge_episodes",
+      {
+        description:
+          "Merge two neighbouring ended episodes into one (e.g. a lecture interrupted by a break). The longer one's kind wins.",
+        inputSchema: { ids: z.tuple([z.string().uuid(), z.string().uuid()]) },
+        annotations: write,
+      },
+      ({ ids }) => edit(() => mergeEpisodes(db, userId, ids, "agent")),
+    );
+  }
 
   if (scopes.includes("notify")) {
     server.registerTool(

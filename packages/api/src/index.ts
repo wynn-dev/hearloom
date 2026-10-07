@@ -88,6 +88,8 @@ export const utteranceSchema = z.object({
   text: z.string(),
   lang: z.string().nullable(),
   source: z.enum(["live", "refine"]),
+  /** A voice from a TV or radio (it also speaks in a media episode of this stretch of speech). */
+  mediaVoice: z.boolean(),
 });
 
 export const soundEventSchema = z.object({
@@ -160,7 +162,7 @@ export const apiTokenSchema = z.object({
   id: z.uuid(),
   name: z.string(),
   prefix: z.string(),
-  scopes: z.array(z.enum(["read", "notify"])),
+  scopes: z.array(z.enum(["read", "notify", "write"])),
   createdAt: z.date(),
   lastUsedAt: z.date().nullable(),
 });
@@ -275,7 +277,7 @@ export const contract = {
         .input(
           z.object({
             name: z.string().trim().min(1).max(80),
-            scopes: z.array(z.enum(["read", "notify"])).min(1),
+            scopes: z.array(z.enum(["read", "notify", "write"])).min(1),
           }),
         )
         .output(z.object({ token: z.string(), info: apiTokenSchema })),

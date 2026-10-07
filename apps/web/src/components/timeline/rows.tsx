@@ -22,6 +22,7 @@ import {
   MessagesSquare,
   Mic,
   MicOff,
+  Music,
   Pencil,
   Play,
   Presentation,
@@ -65,6 +66,8 @@ export interface TimelineActions {
   episode(id: string): Episode | undefined;
   /** The episode right before this one (for merging), if any. */
   previous(id: string): Episode | undefined;
+  /** The sound heard longest during an episode ("music"), for sound episodes. */
+  soundOf(id: string): string | undefined;
   toggleFold(id: string): void;
   folded(id: string): boolean;
 }
@@ -240,6 +243,11 @@ const UtteranceRow = memo(function UtteranceRow({
           shortClip={item.endAt.getTime() - item.startAt.getTime() < 1000}
         />
         {item.lang ? <Badge className="uppercase">{item.lang}</Badge> : null}
+        {item.mediaVoice ? (
+          <Badge tone="info" title="This voice also speaks on the TV or radio in this stretch">
+            TV
+          </Badge>
+        ) : null}
         <Badge tone={item.source === "refine" ? "good" : "neutral"}>
           {item.source === "refine" ? "refined" : "live"}
         </Badge>
@@ -323,6 +331,7 @@ const KIND_ICON: Record<EpisodeKind, ReactNode> = {
   media: <Tv />,
   ambient: <Users />,
   solo: <User />,
+  sound: <Music />,
   unknown: <AudioLines />,
 };
 
@@ -489,14 +498,16 @@ const EpisodeHeader = memo(function EpisodeHeader({
   const end = item.endedAt;
   const folded = actions?.folded(item.id) ?? false;
   const kind = EPISODE_KIND_LABEL[item.kind];
+  const sound = item.kind === "sound" ? actions?.soundOf(item.id) : undefined;
+  const name = item.title ?? (sound ? sound[0]!.toUpperCase() + sound.slice(1) : kind);
   return (
     <div className="mt-3 mb-1 rounded-md bg-surface-2 px-3 py-2">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
         <span className="text-series-2 [&_svg]:size-4" aria-hidden>
           {KIND_ICON[item.kind]}
         </span>
-        <span className="text-[13px] font-semibold text-ink">{item.title ?? kind}</span>
-        {item.title ? <span className="text-xs text-ink-2">{kind}</span> : null}
+        <span className="text-[13px] font-semibold text-ink">{name}</span>
+        {name !== kind ? <span className="text-xs text-ink-2">{kind}</span> : null}
         <span className="text-xs text-ink-3 tabular">
           {formatTime(item.startedAt, tz)}–{end ? formatTime(end, tz) : "now"}
           {end ? ` · ${formatDuration(end.getTime() - item.startedAt.getTime())}` : ""}

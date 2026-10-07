@@ -2,7 +2,8 @@ import { schema } from "@hearloom/db";
 import { and, eq, isNull } from "drizzle-orm";
 import { db } from "../db";
 
-export type Scope = "read" | "notify";
+/** read: MCP read tools; notify: send_notification; write: edit episodes (titles, kinds…). */
+export type Scope = "read" | "notify" | "write";
 
 const hash = (token: string) => new Bun.CryptoHasher("sha256").update(token).digest("hex");
 

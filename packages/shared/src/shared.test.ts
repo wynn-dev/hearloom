@@ -66,9 +66,11 @@ test("toggling an agent event keeps the webhook URL and secret", () => {
       media: false,
       ambient: false,
       solo: false,
+      sound: false,
       unknown: true,
     },
     episodeRefined: false,
+    episodeCheckpoint: false,
     bookmark: false,
   });
 });

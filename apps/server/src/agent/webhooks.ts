@@ -18,6 +18,15 @@ export type AgentEvent =
       /** Sent again when a later pass merges speaker labels across the episode's chain. */
       again: boolean;
     }
+  | {
+      type: "episode.checkpoint";
+      episodeId: string;
+      kind: EpisodeKind;
+      title: string | null;
+      startedAt: string;
+      /** Time of the checkpoint: the episode is still going on. */
+      at: string;
+    }
   | { type: "bookmark"; at: string; source: string; note: string | null }
   | { type: "test"; message: string };
 
@@ -29,6 +38,8 @@ function enabled(settings: Settings, event: AgentEvent): boolean {
       return events.episodeEnded[event.kind];
     case "episode.refined":
       return events.episodeRefined && events.episodeEnded[event.kind];
+    case "episode.checkpoint":
+      return events.episodeCheckpoint && events.episodeEnded[event.kind];
     case "bookmark":
       return events.bookmark;
     case "test":

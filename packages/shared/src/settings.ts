@@ -62,11 +62,14 @@ const episodeEndedFields = {
   media: z.boolean(),
   ambient: z.boolean(),
   solo: z.boolean(),
+  sound: z.boolean(),
   unknown: z.boolean(),
 } satisfies Record<EpisodeKind, z.ZodBoolean>;
 const agentEventsFields = {
   /** `episode.refined`: an ended episode's speakers have been refined. */
   episodeRefined: z.boolean(),
+  /** `episode.checkpoint`: every 15 minutes of a long episode (for kinds `episodeEnded` sends). */
+  episodeCheckpoint: z.boolean(),
   bookmark: z.boolean(),
 };
 
@@ -119,10 +122,12 @@ export const settingsSchema = z.object({
               media: episodeEndedFields.media.default(false),
               ambient: episodeEndedFields.ambient.default(false),
               solo: episodeEndedFields.solo.default(false),
+              sound: episodeEndedFields.sound.default(false),
               unknown: episodeEndedFields.unknown.default(true),
             })
             .prefault({}),
           episodeRefined: agentEventsFields.episodeRefined.default(false),
+          episodeCheckpoint: agentEventsFields.episodeCheckpoint.default(false),
           bookmark: agentEventsFields.bookmark.default(true),
         })
         .prefault({}),
@@ -165,7 +170,14 @@ function upgrade(stored: unknown): unknown {
   if (!events || events.episodeEnded !== undefined || events.conversationEnded !== false) {
     return stored;
   }
-  const off = { conversation: false, talk: false, media: false, ambient: false, solo: false };
+  const off = {
+    conversation: false,
+    talk: false,
+    media: false,
+    ambient: false,
+    solo: false,
+    sound: false,
+  };
   const s = stored as { agent: Record<string, unknown> };
   return {
     ...s,

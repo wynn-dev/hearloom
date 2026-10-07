@@ -31,12 +31,18 @@ export interface EpisodeEvents {
   ended(userId: string, episodeId: string): void;
   /** Episodes changed: refresh what clients show. */
   changed(userId: string): void;
+  /** An open episode has been going on for another CHECKPOINT_MS (long talks, TV evenings). */
+  checkpoint(userId: string, episodeId: string, at: number): void;
 }
 
 /** Utterances are final a little after they're spoken: classify a minute once it's this old. */
 const LAG_MS = 20_000;
 /** Speech and context kept per user for classifying the open episode. */
 const KEEP_MS = 10 * MINUTE;
+/** A long open episode reports progress this often (`episode.checkpoint`). */
+export const CHECKPOINT_MS = 15 * MINUTE;
+/** A sound state (music, traffic…) this long without speech becomes a `sound` episode. */
+export const SOUND_EPISODE_MS = 15 * MINUTE;
 
 interface Open {
   id: string;
@@ -50,6 +56,8 @@ interface Open {
   segmenter: Segmenter;
   /** Last minute boundary classified. */
   lastStep: number;
+  /** Checkpoints reported so far. */
+  checkpoints: number;
 }
 
 interface UserState {
@@ -160,6 +168,7 @@ export class EpisodeTracker {
         kindLocked: false,
         segmenter: new Segmenter(at),
         lastStep: Math.floor(at / MINUTE) * MINUTE,
+        checkpoints: 0,
       };
       this.events.activity(userId, this.current(userId));
       this.events.changed(userId);
@@ -330,6 +339,11 @@ export class EpisodeTracker {
       await this.step(userId, u, m);
       if (!u.open) return;
       u.open.lastStep = m;
+      const due = Math.floor((m - u.open.startedAt) / CHECKPOINT_MS);
+      if (due > u.open.checkpoints) {
+        u.open.checkpoints = due;
+        this.events.checkpoint(userId, u.open.id, m);
+      }
     }
   }
 
@@ -376,6 +390,7 @@ export class EpisodeTracker {
       kindLocked: false,
       segmenter: open.segmenter,
       lastStep: open.lastStep,
+      checkpoints: 0,
     };
     this.events.activity(userId, this.current(userId));
     this.events.changed(userId);
@@ -393,6 +408,49 @@ export class EpisodeTracker {
     this.events.ended(userId, open.id);
     if (idle) this.events.activity(userId, null);
     this.events.changed(userId);
+  }
+
+  /**
+   * A long sound state ended (music, a commute…): the parts of [from, to] no episode covers, if
+   * long enough, become `sound` episodes.
+   */
+  soundEnded(userId: string, from: number, to: number): Promise<void> {
+    return this.serial(userId, async () => {
+      if (to - from < SOUND_EPISODE_MS) return;
+      const e = schema.episodes;
+      const existing = await this.db
+        .select({ startedAt: e.startedAt, endedAt: e.endedAt })
+        .from(e)
+        .where(
+          and(
+            eq(e.userId, userId),
+            lt(e.startedAt, new Date(to)),
+            or(isNull(e.endedAt), gt(e.endedAt, new Date(from))),
+          ),
+        );
+      const parts = uncovered(
+        from,
+        to,
+        existing.map((x) => [
+          x.startedAt.getTime(),
+          x.endedAt?.getTime() ?? Number.POSITIVE_INFINITY,
+        ]),
+      ).filter(([a, b]) => b - a >= SOUND_EPISODE_MS);
+      if (parts.length === 0) return;
+      const rows = await this.db
+        .insert(e)
+        .values(
+          parts.map(([a, b]) => ({
+            userId,
+            startedAt: new Date(a),
+            endedAt: new Date(b),
+            kind: "sound" as const,
+          })),
+        )
+        .returning({ id: e.id });
+      for (const row of rows) this.events.ended(userId, row.id);
+      this.events.changed(userId);
+    });
   }
 
   /**

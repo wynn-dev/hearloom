@@ -213,8 +213,9 @@ export default function Timeline() {
           );
           switch (item.kind) {
             case "utterance": {
-              const who =
+              const name =
                 item.u.personName ?? (item.u.isWearer ? "Me" : (item.u.speakerKey ?? "Someone"));
+              const who = item.u.mediaVoice ? `${name} · TV` : name;
               return (
                 <View style={{ flexDirection: "row", gap: 8, paddingVertical: 6 }}>
                   {time}

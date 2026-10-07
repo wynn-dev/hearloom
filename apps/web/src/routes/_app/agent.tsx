@@ -45,6 +45,7 @@ function Tokens() {
   const tokens = useQuery(orpc.agent.tokens.list.queryOptions());
   const [name, setName] = useState("Hermes");
   const [notifyScope, setNotifyScope] = useState(true);
+  const [writeScope, setWriteScope] = useState(true);
   const [created, setCreated] = useState<string | null>(null);
   const nameId = useId();
   const refresh = () => void queryClient.invalidateQueries({ queryKey: orpc.agent.tokens.key() });
@@ -65,14 +66,21 @@ function Tokens() {
       <CardHeader
         icon={<KeyRound aria-hidden />}
         title="Access tokens"
-        description="Tokens for the MCP endpoint. Read lets the agent search and read your timeline; notify also lets it send notifications (still subject to quiet hours and the hourly cap)."
+        description="Tokens for the MCP endpoint. Read lets the agent search and read your timeline; notify also lets it send notifications (still subject to quiet hours and the hourly cap); write lets it title, summarize and re-classify episodes (never undoing your own edits)."
       />
       <CardBody className="flex flex-col gap-4">
         <form
           className="flex flex-wrap items-end gap-3"
           onSubmit={(e) => {
             e.preventDefault();
-            create.mutate({ name, scopes: notifyScope ? ["read", "notify"] : ["read"] });
+            create.mutate({
+              name,
+              scopes: [
+                "read",
+                ...(notifyScope ? (["notify"] as const) : []),
+                ...(writeScope ? (["write"] as const) : []),
+              ],
+            });
           }}
         >
           <Field label="Name" htmlFor={nameId} className="w-56">
@@ -85,6 +93,10 @@ function Tokens() {
               label="Can send notifications"
             />
             <span aria-hidden>Can send notifications</span>
+          </div>
+          <div className="flex h-8.5 items-center gap-2 text-[13px] text-ink-2">
+            <Switch checked={writeScope} onChange={setWriteScope} label="Can edit episodes" />
+            <span aria-hidden>Can edit episodes</span>
           </div>
           <Button
             variant="primary"
@@ -127,7 +139,10 @@ function Tokens() {
                 <span className="font-medium">{t.name}</span>
                 <code className="text-xs text-ink-3">{t.prefix}…</code>
                 {t.scopes.map((s) => (
-                  <Badge key={s} tone={s === "notify" ? "warn" : "neutral"}>
+                  <Badge
+                    key={s}
+                    tone={s === "notify" ? "warn" : s === "write" ? "info" : "neutral"}
+                  >
                     {s}
                   </Badge>
                 ))}
@@ -259,6 +274,7 @@ function WebhookCard() {
               {(
                 [
                   ["episodeRefined", "Episode refined (speakers identified)"],
+                  ["episodeCheckpoint", "Every 15 min of a long episode"],
                   ["bookmark", "Bookmark"],
                 ] as const
               ).map(([key, label]) => (
@@ -307,7 +323,8 @@ function HermesSnippet() {
     tools:
       include: [get_current_context, search_transcripts, get_timeline, list_episodes,
                 get_episode, list_sound_events, list_people, changes_since,
-                get_audio_clip_url, send_notification]`;
+                get_audio_clip_url, send_notification, update_episode,
+                split_episode, merge_episodes]`;
   return (
     <Card>
       <CardHeader

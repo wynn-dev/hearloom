@@ -51,6 +51,9 @@ A child process of the server (`apps/server/src/live`) receives every stored bat
    chains are segmented the same way once their upload is quiet. Kinds and boundaries set by the
    user or an agent are never changed by these rules. Conversation, talk and unclassified speech
    make the user busy (agent notifications are delivered silently); media, ambient and solo don't.
+   A sound state of 15 minutes or more (music, traffic…) that no episode covers becomes a `sound`
+   episode. Speaker keys are per chain, so a voice that speaks in a media episode is marked as a
+   media voice in the rest of the chain too (the TV while people talk over it).
 
 ### Why CAM++ instead of WeSpeaker ResNet293
 

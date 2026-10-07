@@ -10,6 +10,7 @@ import {
   EpisodeEditError,
   type EpisodeRow,
   episodesIn,
+  mediaVoices,
   mergeEpisodes,
   refinedIds,
   splitEpisode,
@@ -35,6 +36,7 @@ const {
   people,
   voiceprints,
   apiTokens,
+  blocks,
 } = schema;
 
 export interface RpcContext {
@@ -362,9 +364,10 @@ export const router = authed.router({
           .limit(2000),
         episodesIn(db, userId, from, to),
         db
-          .select({ u: utterances, personName: people.name })
+          .select({ u: utterances, personName: people.name, chainId: blocks.chainId })
           .from(utterances)
           .leftJoin(people, eq(people.id, utterances.personId))
+          .leftJoin(blocks, eq(blocks.id, utterances.blockId))
           .where(
             and(
               eq(utterances.userId, userId),
@@ -389,6 +392,11 @@ export const router = authed.router({
           .limit(5000),
       ]);
 
+      const media = await mediaVoices(
+        db,
+        userId,
+        uttRows.flatMap((r) => (r.chainId ? [r.chainId] : [])),
+      );
       return {
         chunks: chunkRows.map((c) => ({
           id: c.id,
@@ -416,7 +424,7 @@ export const router = authed.router({
           epRows,
           uttRows.map(({ u }) => u),
         ),
-        utterances: uttRows.map(({ u, personName }) => ({
+        utterances: uttRows.map(({ u, personName, chainId }) => ({
           id: u.id,
           startAt: u.startAt,
           endAt: u.endAt,
@@ -427,6 +435,7 @@ export const router = authed.router({
           text: u.text,
           lang: u.lang,
           source: u.source,
+          mediaVoice: !!chainId && media.has(`${chainId}:${u.speakerKey}`),
         })),
         soundEvents: soundRows.map((s) => ({
           id: s.id,

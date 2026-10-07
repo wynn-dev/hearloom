@@ -120,7 +120,7 @@ transport. Not yet: encryption at rest, retention policies, bystander redaction.
 | One transcription provider (Soniox), no local fallback | one key and bill; live text is what a proactive agent acts on |
 | Refine pass re-diarizes only | offline diarization far beats live speakers; re-transcribing after the fact is too late to matter |
 | Refine per ≤ 20 min block, not per conversation | a lecture or TV evening has no 2-minute silence: refining it as one unit waited hours and diarized hours of audio at once. Keys carry across blocks via shared context and stored voices |
-| Episodes with kinds, not "conversations" | not everything heard is a conversation (a lecture, the TV, a café). The kind decides whether the user is busy, which webhooks fire and how the timeline shows it; rules classify, the agent and the user can correct (user > agent > rule) |
+| Episodes with kinds, not "conversations" | not everything heard is a conversation (a lecture, the TV, a café, an hour of music). The kind decides whether the user is busy, which webhooks fire and how the timeline shows it; rules classify, the agent (with a `write` token) and the user can correct (user > agent > rule) |
 | No built-in LLM layer | the agent (Hermes + Claude) does summarizing/reasoning over MCP |
 
 ## Not yet built
