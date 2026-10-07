@@ -28,6 +28,10 @@ describe("SoundEventSmoother", () => {
   test("ignores speech classes", () => {
     const s = new SoundEventSmoother();
     expect(s.push([{ name: "Speech", prob: 0.99 }], 0, 2000).opened).toHaveLength(0);
+    // Classes the tagger gives to plain talking.
+    for (const name of ["Mantra", "Chant", "Beatboxing"]) {
+      expect(s.push([{ name, prob: 0.7 }], 0, 2000).opened).toHaveLength(0);
+    }
   });
 });
 
@@ -61,6 +65,85 @@ describe("Soniox assembly", () => {
     const last = a.flush()!;
     expect(last.text).toBe("Later");
     expect(last.startAt).toBe(1_060_100);
+  });
+
+  describe("punctuation", () => {
+    const tok = (text: string, s: number, e: number, speaker = "1") => ({
+      text,
+      start_ms: s,
+      end_ms: e,
+      is_final: true,
+      speaker,
+    });
+
+    test("closes the words before it and never forms a line of its own", () => {
+      const clock = new SessionClock();
+      clock.sent(0, 10_000);
+      const a = new SonioxAssembler(clock, "stt-rt-v5");
+      const out = a.push([
+        tok("Yes", 100, 400),
+        tok(".", 2500, 2600, "2"), // late, other speaker: still ends "Yes"
+        tok("<end>", 2600, 2600),
+        tok(".", 2700, 2800), // after the endpoint: dropped
+        tok("So", 3000, 3200),
+        tok("<end>", 3200, 3200),
+        tok("…", 4000, 4100),
+        tok("<end>", 4100, 4100),
+      ]);
+      expect(out.map((u) => [u.text, u.speakerKey, u.endAt])).toEqual([
+        ["Yes.", "soniox:1", 400],
+        ["So", "soniox:1", 3200],
+      ]);
+      expect(a.flush()).toBeNull();
+    });
+
+    test("doesn't hide a speaker change or a pause after it", () => {
+      const clock = new SessionClock();
+      clock.sent(0, 30_000);
+      const a = new SonioxAssembler(clock, "stt-rt-v5");
+      const out = a.push([
+        tok("Yes", 100, 400),
+        tok(".", 2500, 2600, "2"),
+        tok(" So", 2700, 2900, "2"), // the other speaker, no endpoint in between
+        tok(" what", 2900, 3100, "2"),
+        tok("?", 3100, 3200, "2"),
+        tok(" Later", 20_000, 20_300, "2"), // long pause
+      ]);
+      const last = a.flush()!;
+      expect([...out, last].map((u) => [u.text, u.speakerKey, u.startAt, u.endAt])).toEqual([
+        ["Yes.", "soniox:1", 100, 400],
+        ["So what?", "soniox:2", 2700, 3100],
+        ["Later", "soniox:2", 20_000, 20_300],
+      ]);
+    });
+
+    test("doesn't bridge stitched backlog segments", () => {
+      const clock = new SessionClock();
+      clock.sent(1_000_000, 2000);
+      clock.sent(1_010_000, 2000); // 10 s later
+      const a = new SonioxAssembler(clock, "stt-async-v5");
+      const out = a.push([tok("Hello", 100, 900), tok(".", 2100, 2200), tok(" Next", 2300, 2900)]);
+      const last = a.flush()!;
+      expect([...out, last].map((u) => [u.text, u.startAt, u.endAt])).toEqual([
+        ["Hello.", 1_000_100, 1_000_900],
+        ["Next", 1_010_300, 1_010_900],
+      ]);
+    });
+
+    test("symbols that can open text are kept", () => {
+      const clock = new SessionClock();
+      clock.sent(0, 10_000);
+      const line = (...texts: string[]) => {
+        const a = new SonioxAssembler(clock, "stt-rt-v5");
+        a.push(texts.map((t, i) => tok(t, 100 + i * 100, 200 + i * 100)));
+        return a.flush()!.text;
+      };
+      expect(line("€", "5")).toBe("€5");
+      expect(line("-", "5", " graden")).toBe("-5 graden");
+      expect(line(" '", "t", " is")).toBe("'t is");
+      expect(line("Yes", ' "', "Hello", '"')).toBe('Yes "Hello"');
+      expect(line("Yes", " —", " so")).toBe("Yes — so");
+    });
   });
 
   test("silence cut out of stitched backlog audio still splits utterances", () => {
