@@ -13,6 +13,7 @@ const KEYS: Record<InvalidateKey, QueryKey[]> = {
   phones: [orpc.phones.key(), orpc.status.key()],
   settings: [orpc.settings.key(), orpc.me.key()],
   people: [orpc.people.key(), orpc.timeline.key()],
+  voice: [orpc.voice.key()],
 };
 
 export type RealtimeState = "connecting" | "open" | "reconnecting";

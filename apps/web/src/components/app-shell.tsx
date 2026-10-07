@@ -9,6 +9,7 @@ import {
   Contact,
   LogOut,
   Menu,
+  Mic,
   SlidersHorizontal,
   Smartphone,
   Users,
@@ -29,6 +30,7 @@ const NAV = [
   { to: "/notifications", label: "Notifications", icon: Bell, exact: false },
   { to: "/people", label: "People", icon: Contact, exact: false },
   { to: "/devices", label: "Devices", icon: Smartphone, exact: false },
+  { to: "/voice", label: "Voice", icon: Mic, exact: false },
   { to: "/agent", label: "Agent", icon: Bot, exact: false },
   { to: "/settings", label: "Settings", icon: SlidersHorizontal, exact: false },
 ] as const;
