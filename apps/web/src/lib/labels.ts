@@ -19,14 +19,14 @@ export const statusLabel: Record<NotificationStatus, string> = {
   sent: "Sent",
   delivered: "Delivered",
   failed: "Failed",
-  suppressed: "Suppressed",
+  suppressed: "Not sent",
 };
 
 const reasons: Record<string, string> = {
-  quiet_hours: "quiet hours",
-  in_conversation: "in a conversation",
-  rate_limited: "hourly cap reached",
-  replaced: "replaced by a newer one",
+  quiet_hours: "silent: quiet hours",
+  in_conversation: "silent: in a conversation",
+  hourly_limit: "silent: hourly limit",
+  hard_limit: "over 30 in an hour",
   source_disabled: "source turned off",
   apns_not_configured: "APNs not configured",
   no_phones: "no phones registered",
@@ -47,7 +47,6 @@ export const interruptionLabel: Record<NotificationItem["interruptionLevel"], st
 
 export const sourceLabel: Record<NotificationItem["source"], string> = {
   system: "System",
-  rule: "Rule",
   agent: "Agent",
 };
 
@@ -61,7 +60,7 @@ export const buttonActionLabel: Record<ButtonAction, string> = {
   none: "Do nothing",
   bookmark: "Bookmark this moment",
   mute: "Mute / unmute microphone",
-  ack_nudge: "Acknowledge latest nudge",
+  ack_nudge: "Acknowledge the latest agent notification",
 };
 
 export const buttonActions = Object.keys(buttonActionLabel) as ButtonAction[];

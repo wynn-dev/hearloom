@@ -1,15 +1,15 @@
 import { readFileSync } from "node:fs";
 import { schema } from "@hearloom/db";
 import type { HapticPattern, NotificationSource } from "@hearloom/shared";
-import { and, eq, gte, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, ne, sql } from "drizzle-orm";
 import { db } from "../db";
 import { env } from "../env";
 import { isPhoneOnline, sendToPhone } from "../ingest/phones";
-import { liveState, onConversationEnd } from "../live/state";
+import { liveState } from "../live/state";
 import { invalidate } from "../realtime";
 import { getSettings } from "../settings";
 import { ApnsClient, type ApnsNotification } from "./apns";
-import { type DeliverWhen, decide, type InterruptionLevel } from "./policy";
+import { decide, type InterruptionLevel } from "./policy";
 
 const { notifications, notificationDeliveries, phones } = schema;
 type NotificationRow = typeof notifications.$inferSelect;
@@ -23,8 +23,7 @@ export interface NotifyInput {
   deepLink?: string;
   interruptionLevel?: InterruptionLevel;
   collapseKey?: string;
-  threadId?: string;
-  deliverWhen?: DeliverWhen;
+  /** Buzz the pendant. Defaults to true for time-sensitive; never for notifications delivered silently. */
   haptic?: boolean;
   metadata?: Record<string, unknown>;
 }
@@ -73,10 +72,21 @@ function waitForAck(notificationId: string, phoneId: string): Promise<boolean> {
   });
 }
 
-/** Create a notification and run it through policy + delivery. */
+/** Create a notification, apply policy (which can only make it quieter or refuse it) and deliver it now. */
 export async function notify(input: NotifyInput): Promise<NotificationRow> {
-  const interruptionLevel = input.interruptionLevel ?? "active";
-  const deliverWhen = input.deliverWhen ?? "now";
+  const settings = await getSettings(input.userId);
+  const requested = input.interruptionLevel ?? "active";
+  const decision = decide({
+    settings,
+    source: input.source,
+    level: requested,
+    now: new Date(),
+    ...(input.source === "system"
+      ? { sentLastHour: 0, audibleLastHour: 0 }
+      : await sentInLastHour(input.userId)),
+    inConversation: liveState(input.userId).inConversation,
+  });
+  const level = decision.action === "send" ? decision.level : requested;
   const [row] = await db
     .insert(notifications)
     .values({
@@ -86,36 +96,31 @@ export async function notify(input: NotifyInput): Promise<NotificationRow> {
       title: input.title.slice(0, 200),
       body: input.body.slice(0, 4000),
       deepLink: sanitizeDeepLink(input.deepLink) ?? null,
-      interruptionLevel,
+      interruptionLevel: level,
       collapseKey: input.collapseKey ?? null,
-      threadId: input.threadId ?? null,
-      deliverWhen,
-      haptic: input.haptic ?? false,
+      // Time-sensitive buzzes the pendant unless the caller says otherwise; silent never does.
+      haptic: level !== "passive" && (input.haptic ?? level === "time-sensitive"),
+      status: decision.action === "refuse" ? "suppressed" : "pending",
+      statusReason: decision.action === "refuse" ? decision.reason : decision.quietedBy,
       metadata: input.metadata ?? {},
     })
     .returning();
   if (!row) throw new Error("failed to create notification");
-
-  if (row.collapseKey) {
-    // A newer notification replaces any older one still waiting with the same key.
-    await db
-      .update(notifications)
-      .set({ status: "suppressed", statusReason: "replaced" })
-      .where(
-        and(
-          eq(notifications.userId, row.userId),
-          eq(notifications.collapseKey, row.collapseKey),
-          inArray(notifications.status, ["pending", "held"]),
-          ne(notifications.id, row.id),
-        ),
-      );
-  }
-  return route(row);
+  const result =
+    decision.action === "refuse" ? row : await deliver(row, settings.notifications.pendantHaptic);
+  invalidate(row.userId, ["notifications"]);
+  return result;
 }
 
-async function sentInLastHour(userId: string): Promise<number> {
+/** Non-system notifications sent in the last hour, and how many of them made a sound. */
+async function sentInLastHour(
+  userId: string,
+): Promise<{ sentLastHour: number; audibleLastHour: number }> {
   const [r] = await db
-    .select({ n: sql<number>`count(*)::int` })
+    .select({
+      sentLastHour: sql<number>`count(*)::int`,
+      audibleLastHour: sql<number>`(count(*) filter (where ${notifications.interruptionLevel} = 'active'))::int`,
+    })
     .from(notifications)
     .where(
       and(
@@ -125,7 +130,7 @@ async function sentInLastHour(userId: string): Promise<number> {
         gte(notifications.sentAt, new Date(Date.now() - 3600_000)),
       ),
     );
-  return r?.n ?? 0;
+  return r ?? { sentLastHour: 0, audibleLastHour: 0 };
 }
 
 async function setStatus(
@@ -140,31 +145,27 @@ async function setStatus(
   return row!;
 }
 
-async function route(row: NotificationRow): Promise<NotificationRow> {
-  const settings = await getSettings(row.userId);
-  const decision = decide({
-    settings,
-    source: row.source,
-    interruptionLevel: row.interruptionLevel,
-    deliverWhen: row.deliverWhen,
-    now: new Date(),
-    sentLastHour: row.source === "system" ? 0 : await sentInLastHour(row.userId),
-    inConversation: liveState(row.userId).inConversation,
-  });
-  let result: NotificationRow;
-  if (decision.action === "suppress") {
-    result = await setStatus(row.id, { status: "suppressed", statusReason: decision.reason });
-  } else if (decision.action === "hold") {
-    result = await setStatus(row.id, {
-      status: "held",
-      statusReason: decision.reason,
-      scheduledFor: decision.until,
-    });
-  } else {
-    result = await deliver(row, settings.notifications.pendantHaptic);
+export type PhoneOutcome = "acked" | "apns" | "socket" | "failed";
+
+/**
+ * One copy per phone. Apple push goes first: it reaches a suspended app, and nothing follows it, so a
+ * late socket ack can't put a second banner on the phone. The live socket is the fallback when push
+ * isn't set up or fails, and the only way to buzz the pendant.
+ */
+export async function deliverToPhone(channels: {
+  push: (() => Promise<boolean>) | null;
+  socket: (() => Promise<"acked" | "unacked" | "failed">) | null;
+  buzz: (() => void) | null;
+}): Promise<PhoneOutcome> {
+  if (channels.push && (await channels.push())) {
+    channels.buzz?.();
+    return "apns";
   }
-  invalidate(row.userId, ["notifications"]);
-  return result;
+  if (channels.socket) {
+    const sent = await channels.socket();
+    if (sent !== "failed") return sent === "acked" ? "acked" : "socket";
+  }
+  return "failed";
 }
 
 async function deliver(row: NotificationRow, pendantHaptic: boolean): Promise<NotificationRow> {
@@ -182,134 +183,89 @@ async function deliver(row: NotificationRow, pendantHaptic: boolean): Promise<No
     title: row.title,
     body: row.body,
     category: row.source === "system" ? "HL_SYSTEM" : "HL_NUDGE",
-    threadId: row.threadId,
     deepLink: row.deepLink,
     interruptionLevel: row.interruptionLevel,
     collapseKey: row.collapseKey,
   };
+  const record = (
+    phoneId: string,
+    delivery: Omit<typeof notificationDeliveries.$inferInsert, "notificationId" | "phoneId">,
+  ) => db.insert(notificationDeliveries).values({ notificationId: row.id, phoneId, ...delivery });
 
   const outcomes = await Promise.all(
-    targets.map(async (phone): Promise<"acked" | "apns" | "failed"> => {
-      // 1) Live socket: fastest, and the only path that can buzz the pendant.
-      if (isPhoneOnline(phone.id)) {
-        const ackP = waitForAck(row.id, phone.id);
-        const sent = sendToPhone(phone.id, {
-          t: "notify",
-          id: row.id,
-          title: row.title,
-          body: row.body,
-          category: apnsMsg.category,
-          deepLink: row.deepLink ?? undefined,
-          threadId: row.threadId ?? undefined,
-          interruptionLevel: row.interruptionLevel,
-          haptic,
-        });
-        if (sent && (await ackP)) {
-          await db.insert(notificationDeliveries).values({
-            notificationId: row.id,
-            phoneId: phone.id,
-            channel: "socket",
-            status: "acked",
-          });
-          return "acked";
-        }
-        pendingAcks.delete(ackKey(row.id, phone.id));
-      }
-      // 2) APNs fallback.
-      if (!apns || !phone.apnsToken || !phone.apnsEnv) {
-        await db.insert(notificationDeliveries).values({
-          notificationId: row.id,
-          phoneId: phone.id,
+    targets.map(async (phone) => {
+      const { apnsToken, apnsEnv } = phone;
+      const online = isPhoneOnline(phone.id);
+      const outcome = await deliverToPhone({
+        push:
+          apns && apnsToken && apnsEnv
+            ? async () => {
+                const res = await apns.send(apnsToken, apnsEnv, apnsMsg);
+                await record(phone.id, {
+                  channel: "apns",
+                  status: res.ok ? "sent" : "failed",
+                  apnsId: res.apnsId ?? null,
+                  error: res.ok ? null : `${res.status} ${res.reason ?? ""}`.trim(),
+                });
+                if (res.unregistered) {
+                  await db.update(phones).set({ apnsToken: null }).where(eq(phones.id, phone.id));
+                }
+                return res.ok;
+              }
+            : null,
+        socket: online
+          ? async () => {
+              const ackP = waitForAck(row.id, phone.id);
+              const sent = sendToPhone(phone.id, {
+                t: "notify",
+                id: row.id,
+                title: row.title,
+                body: row.body,
+                category: apnsMsg.category,
+                deepLink: row.deepLink ?? undefined,
+                interruptionLevel: row.interruptionLevel,
+                haptic,
+              });
+              if (!sent) {
+                pendingAcks.delete(ackKey(row.id, phone.id));
+                return "failed";
+              }
+              const acked = await ackP;
+              await record(phone.id, { channel: "socket", status: acked ? "acked" : "sent" });
+              return acked ? "acked" : "unacked";
+            }
+          : null,
+        buzz:
+          haptic && online
+            ? () => void sendToPhone(phone.id, { t: "haptic", pattern: haptic })
+            : null,
+      });
+      if (outcome === "failed" && !(apns && apnsToken && apnsEnv)) {
+        await record(phone.id, {
           channel: "apns",
           status: "failed",
           error: apns ? "no_push_token" : "apns_not_configured",
         });
-        return "failed";
       }
-      const res = await apns.send(phone.apnsToken, phone.apnsEnv, apnsMsg);
-      await db.insert(notificationDeliveries).values({
-        notificationId: row.id,
-        phoneId: phone.id,
-        channel: "apns",
-        status: res.ok ? "sent" : "failed",
-        apnsId: res.apnsId ?? null,
-        error: res.ok ? null : `${res.status} ${res.reason ?? ""}`.trim(),
-      });
-      if (res.unregistered) {
-        await db.update(phones).set({ apnsToken: null }).where(eq(phones.id, phone.id));
-      }
-      return res.ok ? "apns" : "failed";
+      return outcome;
     }),
   );
 
   const now = new Date();
   if (outcomes.includes("acked")) {
-    return setStatus(row.id, {
-      status: "delivered",
-      statusReason: null,
-      sentAt: now,
-      deliveredAt: now,
-    });
+    return setStatus(row.id, { status: "delivered", sentAt: now, deliveredAt: now });
   }
-  if (outcomes.includes("apns")) {
-    return setStatus(row.id, { status: "sent", statusReason: null, sentAt: now });
+  if (outcomes.includes("apns") || outcomes.includes("socket")) {
+    return setStatus(row.id, { status: "sent", sentAt: now });
   }
   return setStatus(row.id, { status: "failed", statusReason: "all_channels_failed" });
-}
-
-/** Re-run held notifications whose hold has expired (quiet hours) or whose condition cleared. */
-let releasing: Promise<void> | null = null;
-
-/**
- * Re-run held notifications whose hold has expired (quiet hours) or whose condition cleared.
- * Runs one at a time, and each row is claimed atomically (held → pending) so the timer and the
- * conversation-end hook can never deliver the same notification twice.
- */
-export function releaseHeld(userId?: string): Promise<void> {
-  const run = (releasing ?? Promise.resolve()).then(() => releaseHeldNow(userId));
-  releasing = run.catch(() => {});
-  return run;
-}
-
-async function releaseHeldNow(userId?: string): Promise<void> {
-  const now = new Date();
-  const rows = await db
-    .select()
-    .from(notifications)
-    .where(
-      and(
-        eq(notifications.status, "held"),
-        userId ? eq(notifications.userId, userId) : undefined,
-        or(
-          lte(notifications.scheduledFor, now),
-          and(
-            isNull(notifications.scheduledFor),
-            eq(notifications.statusReason, "in_conversation"),
-          ),
-        ),
-      ),
-    );
-  for (const row of rows) {
-    if (row.statusReason === "in_conversation" && liveState(row.userId).inConversation) continue;
-    try {
-      const [claimed] = await db
-        .update(notifications)
-        .set({ status: "pending", statusReason: null })
-        .where(and(eq(notifications.id, row.id), eq(notifications.status, "held")))
-        .returning();
-      if (claimed) await route(claimed);
-    } catch (err) {
-      // One bad row (or user) must not block everyone else's notifications.
-      console.error(`[notify] releasing ${row.id} failed`, err);
-    }
-  }
 }
 
 /** Mark the phone's display/feedback on a notification. */
 export async function recordFeedback(
   userId: string,
   id: string,
-  action: "opened" | "useful" | "not_useful" | "snoozed" | "reply",
+  action: "opened" | "useful" | "not_useful" | "reply",
   replyText?: string,
 ): Promise<void> {
   const patch: Partial<typeof notifications.$inferInsert> =
@@ -325,19 +281,6 @@ export async function recordFeedback(
   invalidate(userId, ["notifications"]);
 }
 
-let schedulerTimer: ReturnType<typeof setInterval> | null = null;
-
-export function startNotificationScheduler(): void {
-  schedulerTimer ??= setInterval(() => {
-    void releaseHeld().catch((err) => console.error("[notify] release failed", err));
-  }, 30_000);
-  onConversationEnd((userId) => {
-    void releaseHeld(userId).catch((err) => console.error("[notify] release failed", err));
-  });
-}
-
 export function stopNotifications(): void {
-  if (schedulerTimer) clearInterval(schedulerTimer);
-  schedulerTimer = null;
   apns?.close();
 }

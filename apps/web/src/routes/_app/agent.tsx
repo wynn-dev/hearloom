@@ -26,7 +26,7 @@ function AgentPage() {
     <>
       <PageHeader
         title="Agent"
-        description="Let an AI agent (e.g. Hermes running Claude) read your memory over MCP and send you nudges."
+        description="Let an AI agent (e.g. Hermes running Claude) read your memory over MCP and send you notifications."
       />
       <div className="flex flex-col gap-4">
         <Tokens />
@@ -66,7 +66,7 @@ function Tokens() {
       <CardHeader
         icon={<KeyRound aria-hidden />}
         title="Access tokens"
-        description="Tokens for the MCP endpoint. Read lets the agent search and read your timeline; notify also lets it send notifications (still subject to quiet hours and the hourly cap); write lets it title, summarize and re-classify episodes (never undoing your own edits)."
+        description="Tokens for the MCP endpoint. Read lets the agent search and read your timeline; notify also lets it send notifications (silent during quiet hours, conversations and past your hourly limit); write lets it title, summarize and re-classify episodes (never undoing your own edits)."
       />
       <CardBody className="flex flex-col gap-4">
         <form

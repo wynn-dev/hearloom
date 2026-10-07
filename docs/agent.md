@@ -20,7 +20,7 @@ any time.
 | `list_people` | known voices, last heard |
 | `changes_since` | episodes started, ended or changed, and bookmarks since a cursor — cheap wake-up check |
 | `get_audio_clip_url` | short-lived signed URLs to the Ogg Opus audio |
-| `send_notification` | push to the phone (and pendant buzz); policy still applies: quiet hours, hourly cap, "after the conversation" |
+| `send_notification` | push to the phone now; see [Notifications](#notifications) |
 
 With the `write` scope the agent can also curate the timeline (shown to the user; the user's own
 edits always win, and automatic segmentation never undoes the agent's):
@@ -40,6 +40,22 @@ speech (the TV during a chat over it) are marked `(media)`:
 09:30:20 [door slam]
 09:31–09:45 {music}
 ```
+
+## Notifications
+
+`send_notification` delivers immediately. Hearloom never holds, queues or retries a notification: the
+agent picks the moment (with `get_current_context`), and a held message would go stale. Policy can only
+make it quieter:
+
+- **Silent** (no sound, no pendant buzz; it still lands in the notification list) during quiet hours,
+  while the user is in a conversation, or once the user's hourly limit of notifications with sound
+  (default 4) is used up.
+- **Time-sensitive** rings through conversations and the hourly limit (and buzzes the pendant), never
+  through quiet hours.
+- **Refused** past 30 agent notifications in an hour, or when the user turned agent notifications off.
+
+The tool result says which happened, e.g.
+`Notification 01a1…: delivered silently (no sound or buzz): quiet hours until 07:30.`
 
 ## Webhooks
 
@@ -73,4 +89,4 @@ cron job whose pre-check calls `changes_since`.
 
 Transcripts are **untrusted input** — anyone near the pendant (or a TV) can say "ignore previous
 instructions…". Run Hermes isolated (Docker or a separate macOS user), give it only the MCP URL, use a
-read-only token unless you want nudges, and keep its shell/browser toolsets off.
+read-only token unless you want it to send notifications, and keep its shell/browser toolsets off.

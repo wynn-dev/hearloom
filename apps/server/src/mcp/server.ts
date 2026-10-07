@@ -1,5 +1,5 @@
 import { schema } from "@hearloom/db";
-import { EPISODE_KIND_LABEL, episodeKindSchema } from "@hearloom/shared";
+import { EPISODE_KIND_LABEL, episodeKindSchema, type Settings } from "@hearloom/shared";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { and, asc, desc, eq, gte, ilike, isNull, lt, lte, or, sql } from "drizzle-orm";
@@ -23,7 +23,7 @@ import { chunkUrl } from "../http/media";
 import { livePipeline } from "../live/host";
 import { liveState } from "../live/state";
 import { notify } from "../notify/gateway";
-import { inQuietHours } from "../notify/policy";
+import { HARD_LIMIT_PER_HOUR, inQuietHours } from "../notify/policy";
 import { invalidate } from "../realtime";
 import { getSettings } from "../settings";
 import {
@@ -97,6 +97,28 @@ async function loadSounds(userId: string, from: Date, to: Date) {
     )
     .orderBy(asc(soundEvents.startAt))
     .limit(2000);
+}
+
+/** What happened to a notification, in words an agent can act on. */
+function describeOutcome(
+  n: { status: string; statusReason: string | null },
+  settings: Settings,
+): string {
+  const silently = "delivered silently (no sound or buzz)";
+  switch (n.statusReason) {
+    case "source_disabled":
+      return "not sent: the user turned off agent notifications.";
+    case "hard_limit":
+      return `not sent: ${HARD_LIMIT_PER_HOUR} notifications in the last hour is the maximum. Fold the rest into one notification later.`;
+    case "quiet_hours":
+      return `${silently}: quiet hours until ${settings.quietHours.end}.`;
+    case "in_conversation":
+      return `${silently}: the user is in a conversation.`;
+    case "hourly_limit":
+      return `${silently}: the user's limit of ${settings.notifications.maxPerHour} notifications with sound per hour is used up.`;
+  }
+  if (n.status === "failed") return `not delivered (${n.statusReason ?? "unknown error"}).`;
+  return `${n.status}.`;
 }
 
 /** Build an MCP server scoped to one user and the token's scopes. */
@@ -565,21 +587,25 @@ function buildServer(userId: string, scopes: Scope[]): McpServer {
       "send_notification",
       {
         description:
-          "Send the user a push notification (shown on their phone; can buzz the pendant). Hearloom enforces quiet hours, an hourly cap and can hold it until the current conversation ends. Keep it short and useful.",
+          "Send the user a push notification now (phone, and a pendant buzz when time-sensitive). Hearloom never holds or retries it, so pick the moment yourself (see get_current_context). " +
+          "It is delivered silently (no sound, no buzz) during quiet hours, while the user is in a conversation, or past their hourly limit of notifications with sound; the result says when. " +
+          `Time-sensitive rings through conversations and the hourly limit, never through quiet hours. More than ${HARD_LIMIT_PER_HOUR} in an hour are refused. ` +
+          "Keep it short, and fold related items into one notification.",
         inputSchema: {
           title: z.string().min(1).max(120),
           body: z.string().min(1).max(1000),
-          category: z.string().max(40).default("nudge"),
-          urgency: z.enum(["passive", "active", "time-sensitive"]).default("active"),
-          deliver: z.enum(["now", "after_conversation"]).default("after_conversation"),
+          urgency: z
+            .enum(["passive", "active", "time-sensitive"])
+            .default("active")
+            .describe(
+              "passive: silent, just lands in the list. active: normal sound. time-sensitive: breaks through Focus and buzzes the pendant; only for things that matter within minutes.",
+            ),
           deepLink: z.string().optional().describe("In-app path, e.g. /timeline"),
-          threadId: z.string().max(64).optional(),
-          vibratePendant: z.boolean().default(false),
           rationale: z
             .string()
             .max(500)
             .optional()
-            .describe("Why this is worth interrupting for (shown in the log)"),
+            .describe("Why this is worth the user's attention (shown in the log)"),
         },
         annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
       },
@@ -587,19 +613,14 @@ function buildServer(userId: string, scopes: Scope[]): McpServer {
         const row = await notify({
           userId,
           source: "agent",
-          category: input.category,
+          category: "agent",
           title: input.title,
           body: input.body,
           interruptionLevel: input.urgency,
-          deliverWhen: input.deliver,
           deepLink: input.deepLink,
-          threadId: input.threadId,
-          haptic: input.vibratePendant,
           metadata: input.rationale ? { rationale: input.rationale } : {},
         });
-        return text(
-          `Notification ${row.id}: ${row.status}${row.statusReason ? ` (${row.statusReason})` : ""}`,
-        );
+        return text(`Notification ${row.id}: ${describeOutcome(row, await getSettings(userId))}`);
       },
     );
   }

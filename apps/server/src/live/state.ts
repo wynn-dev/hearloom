@@ -19,7 +19,6 @@ export interface LiveState {
 }
 
 const states = new Map<string, LiveState>();
-const conversationEndListeners = new Set<(userId: string) => void>();
 
 export function liveState(userId: string): LiveState {
   let s = states.get(userId);
@@ -37,12 +36,7 @@ export function liveState(userId: string): LiveState {
 }
 
 export function updateLiveState(userId: string, patch: Partial<LiveState>): void {
-  const s = liveState(userId);
-  const wasInConversation = s.inConversation;
-  Object.assign(s, patch);
-  if (wasInConversation && !s.inConversation) {
-    for (const fn of conversationEndListeners) fn(userId);
-  }
+  Object.assign(liveState(userId), patch);
 }
 
 /** Talking with someone, listening to a talk, or speech not classified yet: keep it quiet. */
@@ -63,9 +57,4 @@ export function resetConversationState(): void {
   for (const [userId, s] of states) {
     if (s.activity || s.inConversation) setActivity(userId, null);
   }
-}
-
-export function onConversationEnd(fn: (userId: string) => void): () => void {
-  conversationEndListeners.add(fn);
-  return () => conversationEndListeners.delete(fn);
 }

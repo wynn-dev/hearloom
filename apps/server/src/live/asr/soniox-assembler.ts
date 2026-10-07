@@ -50,6 +50,14 @@ export class SessionClock {
   }
 }
 
+/** Text with no letters or digits (also matches ""). */
+const NO_WORDS = /^[^\p{L}\p{N}]*$/u;
+/**
+ * A token that only closes what came before it: "." "?" "," "—", closing quotes and brackets, with
+ * no space before it. Straight quotes and hyphens are left out: they can also open text ("-5", "'t").
+ */
+const CLOSING = /^[.,!?;:…。，！？、)\]}”’»–—]+$/u;
+
 /**
  * Groups final Soniox tokens into utterances: a new utterance starts on the `<end>` endpoint
  * token, a speaker change, a pause longer than `maxGapMs` (wall clock), where the audio we sent
@@ -78,6 +86,21 @@ export class SonioxAssembler {
         continue;
       }
       if (/^<\w+>$/.test(t.text)) continue;
+      if (CLOSING.test(t.text)) {
+        // Closing punctuation belongs to the words before it, whatever speaker or time Soniox gave
+        // it: it takes theirs, so it can't hide a split or stretch the line. If that line was
+        // already emitted, it's dropped rather than starting the next one.
+        const prev = this.current[this.current.length - 1];
+        if (prev) {
+          this.current.push({
+            ...t,
+            speaker: prev.speaker,
+            start_ms: prev.end_ms,
+            end_ms: prev.end_ms,
+          });
+        }
+        continue;
+      }
       if (this.splitsBefore(t)) {
         const u = this.emit();
         if (u) out.push(u);
@@ -114,7 +137,8 @@ export class SonioxAssembler {
       .map((t) => t.text)
       .join("")
       .trim();
-    if (!text) return null;
+    // No words at all (e.g. a lone symbol): not worth a line of its own.
+    if (NO_WORDS.test(text)) return null;
     const first = toks[0]!;
     const last = toks[toks.length - 1]!;
     const langs = new Map<string, number>();
