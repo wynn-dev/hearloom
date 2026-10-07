@@ -12,7 +12,6 @@ import { useTheme } from "@/lib/theme";
 const ACTIONS: { value: ButtonAction; label: string }[] = [
   { value: "bookmark", label: "Bookmark" },
   { value: "mute", label: "Mute" },
-  { value: "ack_nudge", label: "Ack notification" },
   { value: "none", label: "None" },
 ];
 
@@ -135,7 +134,6 @@ export default function Settings() {
                 />
               }
             />
-            <Row label="With sound per hour" value={String(s.notifications.maxPerHour)} />
             <Row label="Timezone" value={s.timezone} />
             <Text style={{ color: t.muted, fontSize: 13 }}>More options in the web console.</Text>
           </Card>

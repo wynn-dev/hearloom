@@ -29,17 +29,7 @@ function diff(base: Settings, draft: Settings): SettingsPatch {
     const after = draft[section] as Record<string, unknown>;
     const changed: Record<string, unknown> = {};
     for (const key of Object.keys(after)) {
-      if (key === "sources") continue;
       if (after[key] !== before[key]) changed[key] = after[key];
-    }
-    if (section === "notifications") {
-      type Source = keyof Settings["notifications"]["sources"];
-      const sources: Partial<Record<Source, boolean>> = {};
-      for (const key of Object.keys(draft.notifications.sources) as Source[]) {
-        const value = draft.notifications.sources[key];
-        if (value !== base.notifications.sources[key]) sources[key] = value;
-      }
-      if (Object.keys(sources).length > 0) changed.sources = sources;
     }
     if (Object.keys(changed).length > 0) (patch as Record<string, unknown>)[section] = changed;
   }
@@ -53,7 +43,6 @@ function validate(s: Settings): Partial<Record<string, string>> {
   if (!s.timezone || !isValidTimeZone(s.timezone)) errors.timezone = "Unknown time zone";
   if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(s.quietHours.start)) errors.quietStart = "Use HH:MM";
   if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(s.quietHours.end)) errors.quietEnd = "Use HH:MM";
-  if (!intIn(s.notifications.maxPerHour, 0, 60)) errors.maxPerHour = "0–60";
   if (!intIn(s.alerts.disconnectedAfterMin, 1, 240)) errors.disconnected = "1–240 minutes";
   if (!intIn(s.alerts.lowBatteryPercent, 0, 100)) errors.lowBattery = "0–100%";
   return errors;
@@ -241,7 +230,7 @@ function SettingsForm({ server }: { server: Settings }) {
         <CardHeader
           icon={<Moon aria-hidden />}
           title="Quiet hours"
-          description="Notifications arrive silently, with no sound or buzz. Only a test notification rings through."
+          description="Alerts arrive silently, with no sound or buzz. Only a test notification rings through."
         />
         <CardBody className="divide-y divide-line">
           <SettingRow title="Enable quiet hours" htmlFor="quiet-enabled">
@@ -290,47 +279,20 @@ function SettingsForm({ server }: { server: Settings }) {
         <CardHeader
           icon={<BellRing aria-hidden />}
           title="Notifications"
-          description="Which sources may notify you, and how often."
+          description="Alerts about capture health, on your phone."
         />
         <CardBody className="divide-y divide-line">
           <SettingRow
-            title="With sound per hour"
-            htmlFor="max-per-hour"
-            description={
-              errors.maxPerHour ? (
-                <ErrorText>{errors.maxPerHour}</ErrorText>
-              ) : (
-                "Agent notifications past this many in an hour arrive silently. Time-sensitive ones and system alerts don't count."
-              )
-            }
+            title="System alerts"
+            description="Pendant disconnected, low battery, test notifications."
+            htmlFor="notifications-enabled"
           >
-            <NumberInput
-              id="max-per-hour"
-              value={draft.notifications.maxPerHour}
-              min={0}
-              max={60}
-              invalid={!!errors.maxPerHour}
-              onChange={(maxPerHour) => setIn("notifications", { maxPerHour })}
+            <Switch
+              id="notifications-enabled"
+              checked={draft.notifications.enabled}
+              onChange={(enabled) => setIn("notifications", { enabled })}
             />
           </SettingRow>
-          {(
-            [
-              ["system", "System alerts", "Pendant disconnected, low battery, test notifications."],
-              ["agent", "Agent", "Notifications from your agent."],
-            ] as const
-          ).map(([key, title, description]) => (
-            <SettingRow key={key} title={title} description={description} htmlFor={`src-${key}`}>
-              <Switch
-                id={`src-${key}`}
-                checked={draft.notifications.sources[key]}
-                onChange={(on) =>
-                  setIn("notifications", {
-                    sources: { ...draft.notifications.sources, [key]: on },
-                  })
-                }
-              />
-            </SettingRow>
-          ))}
           <SettingRow
             title="Vibrate the pendant"
             htmlFor="pendant-haptic"

@@ -27,11 +27,6 @@ export default function Notifications() {
       void q.refetch();
     }, [q.refetch]),
   );
-  const feedback = useMutation({
-    mutationFn: (v: { id: string; action: "useful" | "not_useful" }) =>
-      rpc.notifications.feedback(v),
-    onSuccess: () => qc.invalidateQueries({ queryKey: orpc.notifications.key() }),
-  });
   const test = useMutation({
     mutationFn: () => rpc.notifications.sendTest({}),
     onSuccess: () => qc.invalidateQueries({ queryKey: orpc.notifications.key() }),
@@ -78,26 +73,7 @@ export default function Notifications() {
             <Body>{n.body}</Body>
             <Text style={{ color: t.muted, fontSize: 12 }}>
               {n.source} · {n.category} · {timeAgo(n.createdAt.getTime())}
-              {n.replyText ? ` · you replied: “${n.replyText}”` : ""}
             </Text>
-            {n.source !== "system" ? (
-              <View style={{ flexDirection: "row", gap: 8 }}>
-                <View style={{ flex: 1 }}>
-                  <Button
-                    title={n.feedback === "useful" ? "✓ Useful" : "Useful"}
-                    kind="secondary"
-                    onPress={() => feedback.mutate({ id: n.id, action: "useful" })}
-                  />
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Button
-                    title={n.feedback === "not_useful" ? "✓ Not useful" : "Not useful"}
-                    kind="secondary"
-                    onPress={() => feedback.mutate({ id: n.id, action: "not_useful" })}
-                  />
-                </View>
-              </View>
-            ) : null}
           </Card>
         )}
       />

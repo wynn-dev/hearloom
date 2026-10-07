@@ -4,12 +4,12 @@ import { DarkTheme, DefaultTheme, Stack, ThemeProvider, useRouter } from "expo-r
 import * as SplashScreen from "expo-splash-screen";
 import { useEffect } from "react";
 import { useColorScheme } from "react-native";
-import { feedbackFor, notificationData } from "@/lib/push";
+import { notificationData } from "@/lib/push";
 import { queryClient, SessionProvider, useSession } from "@/lib/session-context";
 
 SplashScreen.preventAutoHideAsync();
 
-/** Routes notification taps/actions: report feedback to the server and follow in-app deep links. */
+/** Routes notification taps: tell the server it was opened and follow in-app deep links. */
 function NotificationResponses() {
   const { state } = useSession();
   const router = useRouter();
@@ -17,12 +17,11 @@ function NotificationResponses() {
   useEffect(() => {
     if (!last || state.status !== "signedIn") return;
     const data = notificationData(last.notification);
-    const fb = feedbackFor(last);
     if (data.hlId) {
-      void state.rpc.notifications.feedback({ id: data.hlId, ...fb }).catch(() => {});
+      void state.rpc.notifications.opened({ id: data.hlId }).catch(() => {});
       void queryClient.invalidateQueries();
     }
-    if (fb.action === "opened" && data.deepLink?.startsWith("/")) {
+    if (data.deepLink?.startsWith("/")) {
       router.push(data.deepLink === "/" ? "/" : (data.deepLink as never));
     }
     void Notifications.clearLastNotificationResponseAsync();

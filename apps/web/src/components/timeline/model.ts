@@ -287,8 +287,6 @@ export function deviceEventText(e: DeviceEvent): string {
       return "Microphone muted";
     case "unmuted":
       return "Microphone unmuted";
-    case "ack_nudge":
-      return "Notification acknowledged on the pendant";
     case "button": {
       const press = { 1: "tap", 2: "double tap", 5: "hold" }[Number(value)] ?? String(value ?? "");
       return `Pendant button ${press}`.trim();

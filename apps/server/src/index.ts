@@ -1,7 +1,7 @@
 import type { RealtimeEvent } from "@hearloom/api";
 import type { ServerWebSocket } from "bun";
 import { getSession } from "./auth";
-import { db, sql } from "./db";
+import { sql } from "./db";
 import { env } from "./env";
 import { relayChanges } from "./events";
 import { app } from "./http/app";
