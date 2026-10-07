@@ -261,19 +261,20 @@ async function deliver(row: NotificationRow, pendantHaptic: boolean): Promise<No
   return setStatus(row.id, { status: "failed", statusReason: "all_channels_failed" });
 }
 
-/** Mark the phone's display/feedback on a notification. */
+/** Record the user's response to a notification; the agent reads these via changes_since. */
 export async function recordFeedback(
   userId: string,
   id: string,
   action: "opened" | "useful" | "not_useful" | "reply",
   replyText?: string,
 ): Promise<void> {
+  const now = new Date();
   const patch: Partial<typeof notifications.$inferInsert> =
     action === "opened"
-      ? { openedAt: new Date() }
+      ? { openedAt: now, respondedAt: now }
       : action === "reply"
-        ? { replyText: replyText ?? "", openedAt: new Date() }
-        : { feedback: action };
+        ? { replyText: replyText ?? "", openedAt: now, respondedAt: now }
+        : { feedback: action, respondedAt: now };
   await db
     .update(notifications)
     .set(patch)

@@ -18,7 +18,7 @@ any time.
 | `list_episodes` / `get_episode` | what was happening — conversation, talk, media (TV, radio), ambient, solo, or a long stretch of sound without speech (music, a commute) — with participants; full transcript in parts of 400 lines |
 | `list_sound_events` | non-speech sounds (AudioSet labels) |
 | `list_people` | known voices, last heard |
-| `changes_since` | episodes started, ended or changed, and bookmarks since a cursor — cheap wake-up check |
+| `changes_since` | episodes started, ended or changed, bookmarks, and responses to your notifications since a cursor — cheap wake-up check |
 | `get_audio_clip_url` | short-lived signed URLs to the Ogg Opus audio |
 | `send_notification` | push to the phone now; see [Notifications](#notifications) |
 
@@ -56,6 +56,15 @@ make it quieter:
 
 The tool result says which happened, e.g.
 `Notification 01a1…: delivered silently (no sound or buzz): quiet hours until 07:30.`
+
+How the user responded comes back through `changes_since`: opened (a tap, or the pendant's "acknowledge"
+button), useful / not useful, or a typed reply:
+
+```
+notification responses: 2
+  01a1… 09:31 "Leave for the train": useful
+  01a2… 09:40 "Call your mom?": replied "done already"
+```
 
 ## Webhooks
 
