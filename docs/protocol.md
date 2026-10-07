@@ -91,8 +91,11 @@ Every notification (system alerts and the agent) goes through one gateway
 1. **Policy** — never delays: source toggles and a hard ceiling (30 agent notifications an hour) refuse;
    quiet hours in the user's timezone, an ongoing conversation and the hourly limit with sound only make
    it `passive` (silent). See `docs/agent.md`.
-2. **Delivery** — over the live ingest socket when the phone is connected (fast, and the only way to buzz
-   the pendant); if the phone doesn't `notify_ack` within 4 s, fall back to APNs.
+2. **Delivery** — one copy per phone. APNs first (it reaches a suspended app); a pendant buzz goes
+   separately as a `haptic` message on the live socket, the only way to reach the pendant. When APNs
+   isn't configured or fails, the notification goes over the live socket instead (`notify`, buzz
+   included), and a `notify_ack` within 4 s marks it delivered. Nothing is sent twice, so a late ack
+   can't cause a duplicate banner.
 3. **Audit** — every attempt is stored in `notification_deliveries`; feedback (useful / not useful /
    snooze / reply) is stored on the notification.
 

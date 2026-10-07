@@ -20,7 +20,7 @@ Omi pendant ──BLE (Opus 16 kHz, 20 ms frames)──▶ iPhone app
                                                          │  acks; resend from last ack; offline backlog
                                                          ▼
 Server (Bun) ── fsync'd spool → Ogg chunks (disk/S3) ── Postgres 18
-   │  auth, typed API (oRPC), realtime, notifications (socket → APNs), MCP
+   │  auth, typed API (oRPC), realtime, notifications (APNs → socket), MCP
    ├── live pipeline (child process): decode → VAD → ASR (Soniox) → speakers → sounds → conversations
    └── job queue (pg-boss) ──▶ worker: refine finished conversations (diarizer sidecar)
 Web console (Vite/TanStack) ── same-origin to server        Hermes agent ── MCP + signed webhooks
@@ -89,9 +89,9 @@ transcribed (it's logged; the audio is still stored). Everything else runs on th
 
 One gateway for system alerts and agent notifications. Nothing is held or queued: the agent decides when
 to speak, and policy can only lower the volume (silent during quiet hours, a conversation, or past the
-hourly limit with sound) or refuse past a hard ceiling of 30 an hour → delivery over the live socket
-(fast; can buzz the pendant) with APNs fallback → audit trail and feedback (useful / not useful / snooze /
-reply).
+hourly limit with sound) or refuse past a hard ceiling of 30 an hour → one copy per phone: APNs first,
+the live socket as fallback (and for the pendant buzz) → audit trail and feedback (useful / not useful /
+snooze / reply).
 
 ## Agent interface
 
