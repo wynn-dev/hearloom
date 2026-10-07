@@ -77,10 +77,12 @@ attachRealtimeServer(server as never);
 startNotificationScheduler();
 livePipeline.start();
 setFrameListener((meta, frames) => livePipeline.push(meta, frames));
-// Finished conversations get an offline refine pass (worker process).
-livePipeline.onConversationEnded((userId, conversationId) => {
+// Finished blocks get an offline refine pass (worker process).
+livePipeline.onBlockClosed((_userId, blockId) => {
   if (env.REFINE === "on")
-    void enqueueRefine(conversationId).catch((err) => console.error("[jobs] enqueue failed", err));
+    void enqueueRefine(blockId).catch((err) => console.error("[jobs] enqueue failed", err));
+});
+livePipeline.onConversationEnded((userId, conversationId) => {
   void sql`select started_at, ended_at from conversations where id = ${conversationId}`.then(
     ([c]) => {
       if (!c) return;

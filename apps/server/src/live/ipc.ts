@@ -15,5 +15,6 @@ export type ChildMessage =
       patch: { inConversation?: boolean; conversationId?: string | null };
     }
   | { t: "conversation_ended"; userId: string; conversationId: string }
+  | { t: "block_closed"; userId: string; blockId: string }
   | { t: "enrolled"; requestId: string; ok: true; sampleSeconds: number }
   | { t: "enrolled"; requestId: string; ok: false; error: string };

@@ -7,6 +7,7 @@ import type { ChildMessage, HostMessage } from "./ipc";
 import { resetConversationState, updateLiveState } from "./state";
 
 type ConversationEndedHandler = (userId: string, conversationId: string) => void;
+type BlockClosedHandler = (userId: string, blockId: string) => void;
 
 /**
  * Supervises the live pipeline child process: forwards stored frames, applies state updates,
@@ -19,6 +20,7 @@ export class LivePipelineHost {
   private backoffMs = 1000;
   private stopped = false;
   private readonly onEnded = new Set<ConversationEndedHandler>();
+  private readonly onBlock = new Set<BlockClosedHandler>();
   private pending = new Map<string, { resolve: (s: number) => void; reject: (e: Error) => void }>();
 
   start(): void {
@@ -31,6 +33,11 @@ export class LivePipelineHost {
 
   onConversationEnded(fn: ConversationEndedHandler): void {
     this.onEnded.add(fn);
+  }
+
+  /** A block of speech is complete (refine it). */
+  onBlockClosed(fn: BlockClosedHandler): void {
+    this.onBlock.add(fn);
   }
 
   push(meta: StreamMeta, frames: AudioFrame[]): void {
@@ -143,6 +150,9 @@ export class LivePipelineHost {
       case "conversation_ended":
         for (const fn of this.onEnded) fn(msg.userId, msg.conversationId);
         invalidate(msg.userId, ["timeline"]);
+        return;
+      case "block_closed":
+        for (const fn of this.onBlock) fn(msg.userId, msg.blockId);
         return;
     }
   }

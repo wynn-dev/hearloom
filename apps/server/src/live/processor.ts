@@ -15,7 +15,7 @@ import { SonioxSession } from "./asr/soniox";
 import { SessionClock, SonioxAssembler, type SonioxToken } from "./asr/soniox-assembler";
 import { SonioxError, transcribeFile } from "./asr/soniox-async";
 import type { Utterance } from "./asr/types";
-import type { ConversationTracker } from "./conversations";
+import type { BlockTracker } from "./blocks";
 import { PcmHistory } from "./pcm";
 import { type SoundEvent, SoundEventSmoother } from "./sounds";
 import type { SpeakerDirectory } from "./speakers";
@@ -34,7 +34,7 @@ export interface LiveDeps {
   tagger: SoundTagger | null;
   embedder: SpeakerEmbedder | null;
   speakers: SpeakerDirectory | null;
-  conversations: ConversationTracker;
+  blocks: BlockTracker;
   /** null = no transcription. */
   soniox: { apiKey: string; model: string; asyncModel: string; languageHints: string[] } | null;
   /** Ask the server to refresh clients' views for this user. */
@@ -76,7 +76,7 @@ interface Segment {
 
 /**
  * Backlog speech waiting to be transcribed in one Soniox async request. While it exists, the user's
- * backlog conversations are held open (ConversationTracker.hold).
+ * backlog blocks are held open (BlockTracker.hold).
  */
 interface BacklogBatch {
   segments: Segment[];
@@ -112,7 +112,7 @@ function toPcm16(samples: Float32Array): Int16Array {
 
 /**
  * Turns one capture stream's Opus frames into timeline rows: utterances (with speakers and
- * conversations) and sound events. All times are absolute (unix ms).
+ * blocks) and sound events. All times are absolute (unix ms).
  */
 export class StreamProcessor {
   private decoder: OpusDecoder;
@@ -309,7 +309,7 @@ export class StreamProcessor {
       );
       if (!this.backlog) {
         this.backlog = { segments: [], samples: 0, addedAt: 0 };
-        this.deps.conversations.hold(this.stream.userId);
+        this.deps.blocks.hold(this.stream.userId);
       }
       this.backlog.segments.push({ startAt: from, endAt: from + samples.length / 16, samples });
       this.backlog.samples += samples.length;
@@ -332,7 +332,7 @@ export class StreamProcessor {
       .catch((err) => this.deps.log(`soniox backlog: ${err}`))
       .finally(() => {
         this.backlogInFlightSamples = 0;
-        this.deps.conversations.release(this.stream.userId);
+        this.deps.blocks.release(this.stream.userId);
       });
   }
 
@@ -420,8 +420,8 @@ export class StreamProcessor {
     fresh: boolean,
   ): Promise<void> {
     const { userId } = this.stream;
-    const conv = await this.deps.conversations.place(userId, u.startAt, u.endAt, fresh);
-    let speakerKey = u.speakerKey ? conv.clusters.alias(u.speakerKey) : null;
+    const placed = await this.deps.blocks.place(userId, u.startAt, u.endAt, fresh);
+    let speakerKey = u.speakerKey ? placed.clusters.alias(u.speakerKey) : null;
     let personId: string | null = null;
     let isWearer: boolean | null = null;
     if (audio && audio.length >= MIN_EMBED_SAMPLES && this.deps.embedder) {
@@ -431,13 +431,14 @@ export class StreamProcessor {
         personId = match.personId;
         isWearer = match.isSelf;
       }
-      // Without an engine-provided speaker label, cluster voices within the conversation.
-      speakerKey ??= conv.clusters.assign(emb);
+      // Without an engine-provided speaker label, cluster voices within the chain.
+      speakerKey ??= placed.clusters.assign(emb);
     }
-    this.deps.conversations.note(userId, conv.id, u.lang, personId ?? speakerKey);
+    this.deps.blocks.note(userId, placed.chainId, u.lang, personId ?? speakerKey);
     await this.deps.db.insert(schema.utterances).values({
       userId,
-      conversationId: conv.id,
+      conversationId: placed.chainId,
+      blockId: placed.blockId,
       streamId: this.stream.id,
       startAt: new Date(u.startAt),
       endAt: new Date(Math.max(u.endAt, u.startAt)),

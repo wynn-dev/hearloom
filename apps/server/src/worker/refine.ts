@@ -1,15 +1,29 @@
 import type { Db } from "@hearloom/db";
 import { schema } from "@hearloom/db";
-import { cosine, SPEAKER_MODEL_ID, type SpeakerEmbedder } from "@hearloom/inference";
-import { and, eq, inArray, isNull } from "drizzle-orm";
-import { concatPieces, loadStreamPieces } from "../audio/load";
-import type { Diarizer, DiarSegment } from "./diarizer";
+import type { BlockSpeaker } from "@hearloom/db/schema";
+import { cosine, SPEAKER_MODEL_ID } from "@hearloom/inference";
+import { and, eq, gt, inArray, isNotNull, isNull } from "drizzle-orm";
+import { type AudioPiece, concatPieces, loadStreamPieces } from "../audio/load";
+import type { DiarSegment } from "./diarizer";
+
+export interface Embedder {
+  embed(audio: Float32Array): Float32Array;
+}
+
+export interface BlockDiarizer {
+  diarize(samples: Float32Array): Promise<DiarSegment[]>;
+}
 
 export interface RefineDeps {
   db: Db;
-  embedder: SpeakerEmbedder | null;
-  diarizer: Diarizer | null;
+  embedder: Embedder | null;
+  diarizer: BlockDiarizer | null;
+  /** Voice similarity that names a speaker after an enrolled person. */
   matchThreshold: number;
+  /** Voice similarity that makes two clusters the same speaker (across blocks of a chain). */
+  clusterThreshold: number;
+  /** Decoded audio of a stream between two times; defaults to the stored chunks. */
+  loadPieces?: (streamId: string, fromMs: number, toMs: number) => Promise<AudioPiece[]>;
   log(message: string): void;
 }
 
@@ -30,8 +44,19 @@ interface Turn {
   endAt: number;
 }
 
-/** Longest stretch refined in one pass (diarizer memory); longer ones are split. */
+/**
+ * Longest stretch diarized in one pass (diarizer memory). Blocks are far shorter; only blocks
+ * migrated from long conversations need splitting.
+ */
 const MAX_WINDOW_MS = 3 * 3600_000;
+/**
+ * The previous block's speech in the CONTEXT_MS before this block, diarized together with it: a
+ * cluster that shares this speech with a previous speaker takes over its key, so keys carry across
+ * a chain. (After a longer pause, or across capture streams, keys carry over by voice instead.)
+ */
+export const CONTEXT_MS = 90_000;
+/** Shared speech (in the context) needed to take over a previous speaker's key. */
+const ANCHOR_MIN_MS = 2000;
 
 /** Speaker whose turns overlap [a, b] the most (or the nearest turn). */
 function speakerFor(turns: Turn[], a: number, b: number): string | null {
@@ -66,65 +91,263 @@ export function windows<T extends { startAt: Date; endAt: Date }>(rows: T[], max
   return out;
 }
 
+const keyNumber = (key: string) => Number(/^S(\d+)$/.exec(key)?.[1] ?? 0);
+
+/** A speaker the chain already knows (from its refined blocks). */
+export interface KnownSpeaker {
+  key: string;
+  centroid: Float32Array;
+  personId: string | null;
+  isSelf: boolean | null;
+}
+
+/** What a diarizer cluster of this block looks like, for deciding its key. */
+export interface ClusterFacts {
+  label: string;
+  /** Milliseconds of speech shared with the previous block's speakers (by key), in the context. */
+  anchors: Map<string, number>;
+  /** Voice embedding of its speech in this block, if long enough. */
+  embedding: Float32Array | null;
+  /** Live speaker keys of the utterances it covers, with counts. */
+  liveKeys: Map<string, number>;
+}
+
+export type KeySource = "anchor" | "voice" | "live" | "new";
+
 /**
- * Refine a finished conversation: re-diarize the whole conversation offline (consistent speakers),
- * identify voices against enrolled people, and replace the live rows with re-attributed copies
- * (the text is kept; rows without audio stay as they are).
+ * Key per cluster, in order of trust: the previous block's speaker it shares the most speech with
+ * in the context; a known voice of the chain; the live key most of its utterances had (so keys
+ * don't change when a block is refined, unless that key is already the chain's); else the next
+ * free key. One key per cluster: two clusters of one block are two people (the diarizer told them
+ * apart), so the best matches are taken first and a key once taken is not given again.
  */
-export async function refineConversation(
-  deps: RefineDeps,
-  conversationId: string,
-): Promise<string> {
+export function assignKeys(
+  clusters: ClusterFacts[],
+  known: KnownSpeaker[],
+  usedKeys: Iterable<string>,
+  threshold: number,
+): Map<string, { key: string; source: KeySource; known?: KnownSpeaker }> {
+  const out = new Map<string, { key: string; source: KeySource; known?: KnownSpeaker }>();
+  const taken = new Set<string>();
+  const knownKeys = new Set(known.map((k) => k.key));
+  const take = (label: string, key: string, source: KeySource, k?: KnownSpeaker) => {
+    out.set(label, { key, source, known: k });
+    taken.add(key);
+  };
+
+  const anchors: { label: string; key: string; ms: number }[] = [];
+  for (const c of clusters) {
+    const total = [...c.anchors.values()].reduce((a, b) => a + b, 0);
+    for (const [key, ms] of c.anchors) {
+      if (ms >= ANCHOR_MIN_MS && ms >= total / 2) anchors.push({ label: c.label, key, ms });
+    }
+  }
+  for (const a of anchors.sort((x, y) => y.ms - x.ms)) {
+    if (out.has(a.label) || taken.has(a.key)) continue;
+    take(
+      a.label,
+      a.key,
+      "anchor",
+      known.find((k) => k.key === a.key),
+    );
+  }
+
+  const voices: { label: string; k: KnownSpeaker; score: number }[] = [];
+  for (const c of clusters) {
+    if (out.has(c.label) || !c.embedding) continue;
+    for (const k of known) {
+      if (k.centroid.length === 0) continue;
+      const score = cosine(c.embedding, k.centroid);
+      if (score >= threshold) voices.push({ label: c.label, k, score });
+    }
+  }
+  for (const v of voices.sort((x, y) => y.score - x.score)) {
+    if (out.has(v.label) || taken.has(v.k.key)) continue;
+    take(v.label, v.k.key, "voice", v.k);
+  }
+
+  let next = Math.max(0, ...[...usedKeys, ...knownKeys].map(keyNumber));
+  for (const c of clusters) {
+    if (out.has(c.label)) continue;
+    const live = [...c.liveKeys]
+      .filter(([key]) => !taken.has(key) && !knownKeys.has(key))
+      .sort((a, b) => b[1] - a[1])[0]?.[0];
+    if (live) take(c.label, live, "live");
+    else take(c.label, `S${++next}`, "new");
+  }
+  return out;
+}
+
+/** One block's speaker, as input to consolidation. */
+export interface ChainSpeaker extends BlockSpeaker {
+  blockId: string;
+}
+
+/**
+ * Keys of a finished chain that are the same voice: renames (key → key it merges into). Keys
+ * merge when their voices are similar, they never speak in the same block (there, the diarizer
+ * already told them apart) and they aren't named after different people. `heardIn`: the blocks
+ * each key speaks in (from the utterances; voices are only stored for some).
+ */
+export function consolidate(
+  speakers: ChainSpeaker[],
+  threshold: number,
+  heardIn: Map<string, Set<string>> = new Map(),
+): Map<string, string> {
+  interface Group {
+    keys: Set<string>;
+    blocks: Set<string>;
+    people: Set<string>;
+    seconds: number;
+    centroid: Float32Array;
+  }
+  const groups = new Map<string, Group>();
+  for (const s of speakers) {
+    if (s.centroid.length === 0) continue;
+    const g = groups.get(s.key);
+    const c = Float32Array.from(s.centroid);
+    if (!g) {
+      groups.set(s.key, {
+        keys: new Set([s.key]),
+        blocks: new Set([s.blockId]),
+        people: new Set(s.personId ? [s.personId] : []),
+        seconds: s.seconds,
+        centroid: c,
+      });
+      continue;
+    }
+    for (let i = 0; i < g.centroid.length; i++) {
+      g.centroid[i] =
+        (g.centroid[i]! * g.seconds + (c[i] ?? 0) * s.seconds) / (g.seconds + s.seconds || 1);
+    }
+    g.seconds += s.seconds;
+    g.blocks.add(s.blockId);
+    if (s.personId) g.people.add(s.personId);
+  }
+  for (const [key, g] of groups) for (const b of heardIn.get(key) ?? []) g.blocks.add(b);
+  const keys = [...groups.keys()];
+  const pairs: [string, string, number][] = [];
+  for (let i = 0; i < keys.length; i++) {
+    for (let j = i + 1; j < keys.length; j++) {
+      const score = cosine(groups.get(keys[i]!)!.centroid, groups.get(keys[j]!)!.centroid);
+      if (score >= threshold) pairs.push([keys[i]!, keys[j]!, score]);
+    }
+  }
+  pairs.sort((a, b) => b[2] - a[2]);
+  /** Key → the group it currently belongs to. */
+  const owner = new Map(keys.map((k) => [k, groups.get(k)!]));
+  for (const [a, b] of pairs) {
+    const ga = owner.get(a)!;
+    const gb = owner.get(b)!;
+    if (ga === gb) continue;
+    if ([...ga.blocks].some((x) => gb.blocks.has(x))) continue;
+    if (new Set([...ga.people, ...gb.people]).size > 1) continue;
+    for (const k of gb.keys) {
+      ga.keys.add(k);
+      owner.set(k, ga);
+    }
+    for (const x of gb.blocks) ga.blocks.add(x);
+    for (const p of gb.people) ga.people.add(p);
+    ga.seconds += gb.seconds;
+  }
+  const renames = new Map<string, string>();
+  for (const g of new Set(owner.values())) {
+    if (g.keys.size < 2) continue;
+    const members = [...g.keys].map((k) => ({ k, s: groups.get(k)!.seconds }));
+    members.sort((x, y) => y.s - x.s || keyNumber(x.k) - keyNumber(y.k));
+    for (const { k } of members.slice(1)) renames.set(k, members[0]!.k);
+  }
+  return renames;
+}
+
+/** Merge per-cluster profiles that ended up with the same key (seconds-weighted). */
+function mergeProfiles(list: BlockSpeaker[]): BlockSpeaker[] {
+  const byKey = new Map<string, BlockSpeaker>();
+  for (const p of list) {
+    const cur = byKey.get(p.key);
+    if (!cur) {
+      byKey.set(p.key, { ...p, centroid: [...p.centroid] });
+      continue;
+    }
+    const total = cur.seconds + p.seconds || 1;
+    if (cur.centroid.length === 0) cur.centroid = [...p.centroid];
+    else if (p.centroid.length > 0) {
+      cur.centroid = cur.centroid.map(
+        (v, i) => (v * cur.seconds + (p.centroid[i] ?? 0) * p.seconds) / total,
+      );
+    }
+    cur.seconds += p.seconds;
+    cur.personId ??= p.personId;
+    cur.isSelf ??= p.isSelf;
+  }
+  return [...byKey.values()];
+}
+
+export interface RefineResult {
+  message: string;
+  /** The block's chain (its conversation), if the block exists. */
+  chainId: string | null;
+  /** The block is refined now (by this run). */
+  refined: boolean;
+  /** Live rows replaced. */
+  replaced: number;
+}
+
+/**
+ * Refine a finished block: re-diarize it offline together with the end of the previous block
+ * (consistent speaker keys across the chain), identify voices against enrolled people, and replace
+ * the live rows with re-attributed copies (the text is kept; rows without audio stay as they are).
+ */
+export async function refineBlock(deps: RefineDeps, blockId: string): Promise<RefineResult> {
   try {
-    return await refineNow(deps, conversationId);
+    return await refineNow(deps, blockId);
   } catch (err) {
     // Don't leave it "refining" forever if this was the last attempt; a retry sets it again.
     await deps.db
-      .update(schema.conversations)
+      .update(schema.blocks)
       .set({ status: "closed" })
-      .where(
-        and(
-          eq(schema.conversations.id, conversationId),
-          eq(schema.conversations.status, "refining"),
-        ),
-      )
+      .where(and(eq(schema.blocks.id, blockId), eq(schema.blocks.status, "refining")))
       .catch(() => {});
     throw err;
   }
 }
 
-async function refineNow(deps: RefineDeps, conversationId: string): Promise<string> {
+async function refineNow(deps: RefineDeps, blockId: string): Promise<RefineResult> {
   const { db } = deps;
-  const [conv] = await db
-    .select()
-    .from(schema.conversations)
-    .where(eq(schema.conversations.id, conversationId));
-  if (!conv) return "missing";
-  if (!conv.endedAt) throw new Error("conversation still open");
-  if (conv.status === "refined") return "already refined";
+  const [block] = await db.select().from(schema.blocks).where(eq(schema.blocks.id, blockId));
+  if (!block) return { message: "missing", chainId: null, refined: false, replaced: 0 };
+  const result = (message: string, refined: boolean, replaced = 0): RefineResult => ({
+    message,
+    chainId: block.chainId,
+    refined,
+    replaced,
+  });
+  if (!block.endedAt) throw new Error("block still open");
+  if (block.status === "refined") return result("already refined", false);
   const { diarizer } = deps;
-  if (!diarizer) return "nothing to do (diarizer not built)";
+  if (!diarizer) return result("nothing to do (diarizer not built)", false);
+  await db.update(schema.blocks).set({ status: "refining" }).where(eq(schema.blocks.id, blockId));
+  /**
+   * Refined, unless backlog added speech meanwhile (it sets the block back to closed and queues
+   * another pass). Returns whether it is refined now.
+   */
+  const markRefined = async (tx: Pick<Db, "update"> = db, speakers?: BlockSpeaker[]) =>
+    (
+      await tx
+        .update(schema.blocks)
+        .set({ status: "refined", ...(speakers ? { speakers } : {}) })
+        .where(and(eq(schema.blocks.id, blockId), eq(schema.blocks.status, "refining")))
+        .returning({ id: schema.blocks.id })
+    ).length > 0;
+  const again = "more speech arrived meanwhile; another pass will run";
 
   const live = await db
     .select()
     .from(schema.utterances)
-    .where(
-      and(
-        eq(schema.utterances.conversationId, conversationId),
-        isNull(schema.utterances.supersededAt),
-      ),
-    );
+    .where(and(eq(schema.utterances.blockId, blockId), isNull(schema.utterances.supersededAt)));
   if (live.length === 0) {
-    await db
-      .update(schema.conversations)
-      .set({ status: "refined" })
-      .where(eq(schema.conversations.id, conversationId));
-    return "empty";
+    return (await markRefined()) ? result("empty", true) : result(again, false);
   }
-  await db
-    .update(schema.conversations)
-    .set({ status: "refining" })
-    .where(eq(schema.conversations.id, conversationId));
 
   const people = await db
     .select({
@@ -136,10 +359,61 @@ async function refineNow(deps: RefineDeps, conversationId: string): Promise<stri
     .innerJoin(schema.people, eq(schema.people.id, schema.voiceprints.personId))
     .where(
       and(
-        eq(schema.voiceprints.userId, conv.userId),
+        eq(schema.voiceprints.userId, block.userId),
         eq(schema.voiceprints.model, SPEAKER_MODEL_ID),
       ),
     );
+
+  // What the chain already knows: voices of its other refined blocks, the keys in use, and the
+  // previous block's speakers at the start of this one.
+  const chain = await db
+    .select({
+      id: schema.blocks.id,
+      startedAt: schema.blocks.startedAt,
+      status: schema.blocks.status,
+      speakers: schema.blocks.speakers,
+    })
+    .from(schema.blocks)
+    .where(eq(schema.blocks.chainId, block.chainId));
+  const others = chain.filter((b) => b.id !== blockId);
+  const known: KnownSpeaker[] = mergeProfiles(others.flatMap((b) => b.speakers)).map((s) => ({
+    key: s.key,
+    centroid: Float32Array.from(s.centroid),
+    personId: s.personId,
+    isSelf: s.isSelf,
+  }));
+  const usedKeys = (
+    await db
+      .selectDistinct({ key: schema.utterances.speakerKey })
+      .from(schema.utterances)
+      .where(
+        and(
+          inArray(
+            schema.utterances.blockId,
+            chain.map((b) => b.id),
+          ),
+          isNull(schema.utterances.supersededAt),
+          isNotNull(schema.utterances.speakerKey),
+        ),
+      )
+  ).map((r) => r.key!);
+  const prev = others
+    .filter((b) => b.status === "refined" && b.startedAt < block.startedAt)
+    .sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime())[0];
+  const context = prev
+    ? await db
+        .select()
+        .from(schema.utterances)
+        .where(
+          and(
+            eq(schema.utterances.blockId, prev.id),
+            isNull(schema.utterances.supersededAt),
+            isNotNull(schema.utterances.speakerKey),
+            gt(schema.utterances.endAt, new Date(block.startedAt.getTime() - CONTEXT_MS)),
+          ),
+        )
+    : [];
+  const load = deps.loadPieces ?? ((s, f, t) => loadStreamPieces(db, s, f, t));
 
   const created: (NewUtterance & {
     streamId: string;
@@ -153,12 +427,12 @@ async function refineNow(deps: RefineDeps, conversationId: string): Promise<stri
     string,
     { personId: string | null; isSelf: boolean | null; key: string }
   >();
-  let anonymous = 0;
+  const profiles: BlockSpeaker[] = [];
   /** Live rows re-derived by this pass (only these are superseded). */
   const replaced: typeof live = [];
 
-  // Usually one stream per conversation; reconnects can split it. Rows without a stream (no audio)
-  // stay as they are.
+  // Usually one stream per block; reconnects can split it. Rows without a stream (no audio) stay
+  // as they are.
   const byStream = new Map<string, typeof live>();
   for (const u of live) {
     if (!u.streamId) continue;
@@ -169,64 +443,140 @@ async function refineNow(deps: RefineDeps, conversationId: string): Promise<stri
   );
 
   for (const [pass, { streamId, utts }] of passes.entries()) {
-    const from = Math.min(...utts.map((u) => u.startAt.getTime())) - 300;
+    const blockFrom = Math.min(...utts.map((u) => u.startAt.getTime())) - 300;
     const to = Math.max(...utts.map((u) => u.endAt.getTime())) + 300;
-    const pieces = await loadStreamPieces(db, streamId, from, to);
+    const ctx = context.filter(
+      (c) =>
+        c.streamId === streamId &&
+        c.endAt.getTime() > blockFrom - CONTEXT_MS &&
+        c.startAt.getTime() < to,
+    );
+    const from = ctx.length
+      ? Math.max(blockFrom - CONTEXT_MS, Math.min(...ctx.map((c) => c.startAt.getTime())) - 300)
+      : blockFrom;
+    const pieces = await load(streamId, from, to);
     if (pieces.length === 0) continue; // audio gone: keep the live rows
     const { samples, toAbs, toOffset } = concatPieces(pieces);
+    const blockOffset = from < blockFrom ? toOffset(blockFrom) : 0;
     const firstNew = created.length;
-    /** Cluster keys are per pass: diarizer labels restart in every pass. */
+    /** Cluster labels are per pass: diarizer labels restart in every pass. */
     const tag = `${pass}:`;
     replaced.push(...utts);
 
-    // 1) Offline diarization over the whole conversation.
+    // 1) Offline diarization over the block (and the context before it).
     const segs: DiarSegment[] = await diarizer.diarize(samples);
     const turns: Turn[] = segs.map((s) => ({
       speaker: s.speaker,
       startAt: toAbs(s.start),
       endAt: toAbs(s.end),
     }));
-    // 2) Name each cluster by matching its voice against enrolled people.
-    for (const speaker of new Set(segs.map((s) => s.speaker))) {
-      const key = `${tag}${speaker}`;
+
+    // 2) Each utterance takes the speaker it overlaps most.
+    const labelOf = new Map(
+      utts.map((u) => [u.id, speakerFor(turns, u.startAt.getTime(), u.endAt.getTime())]),
+    );
+    const labels = [...new Set([...labelOf.values()].filter((l): l is string => l !== null))];
+
+    // 3) Facts per cluster: shared speech with the previous block's speakers, its voice in this
+    // block, and the live keys of its utterances.
+    const facts: ClusterFacts[] = [];
+    const seconds = new Map<string, number>();
+    for (const label of labels) {
+      const anchors = new Map<string, number>();
+      for (const t of turns) {
+        if (t.speaker !== label) continue;
+        for (const c of ctx) {
+          const o = Math.min(t.endAt, c.endAt.getTime()) - Math.max(t.startAt, c.startAt.getTime());
+          if (o > 0) anchors.set(c.speakerKey!, (anchors.get(c.speakerKey!) ?? 0) + o);
+        }
+      }
       let audio = new Float32Array(0);
-      for (const s of segs.filter((x) => x.speaker === speaker)) {
-        const part = samples.subarray(Math.floor(s.start * 16000), Math.floor(s.end * 16000));
+      let total = 0;
+      for (const s of segs) {
+        if (s.speaker !== label) continue;
+        const a = Math.max(blockOffset, Math.floor(s.start * 16000));
+        const b = Math.floor(s.end * 16000);
+        if (b <= a) continue;
+        total += (b - a) / 16000;
+        if (audio.length > 30 * 16000) continue;
+        const part = samples.subarray(a, b);
         const next = new Float32Array(audio.length + part.length);
         next.set(audio);
         next.set(part, audio.length);
         audio = next;
-        if (audio.length > 30 * 16000) break;
+      }
+      seconds.set(label, total);
+      const liveKeys = new Map<string, number>();
+      for (const u of utts) {
+        if (labelOf.get(u.id) === label && u.speakerKey)
+          liveKeys.set(u.speakerKey, (liveKeys.get(u.speakerKey) ?? 0) + 1);
+      }
+      facts.push({
+        label,
+        anchors,
+        embedding: deps.embedder && audio.length >= 16000 ? deps.embedder.embed(audio) : null,
+        liveKeys,
+      });
+    }
+
+    // 4) Keys (carried over where the voice is the chain's), and names from enrolled voices.
+    const keys = assignKeys(facts, known, usedKeys, deps.clusterThreshold);
+    for (const f of facts) {
+      const { key, source, known: was } = keys.get(f.label)!;
+      let inherited: { personId: string | null; isSelf: boolean | null } | undefined = was;
+      if (source === "anchor" && !was?.personId) {
+        // No stored name for the key: the name most of its context lines had.
+        const votes = new Map<string, { n: number; isSelf: boolean | null }>();
+        for (const c of ctx) {
+          if (c.speakerKey !== key || !c.personId) continue;
+          const v = votes.get(c.personId) ?? { n: 0, isSelf: c.isWearer };
+          v.n++;
+          votes.set(c.personId, v);
+        }
+        const [top] = [...votes].sort((a, b) => b[1].n - a[1].n);
+        if (top) inherited = { personId: top[0], isSelf: top[1].isSelf };
       }
       let match: { personId: string; isSelf: boolean } | null = null;
-      if (deps.embedder && audio.length >= 16000) {
-        const emb = deps.embedder.embed(audio);
+      if (f.embedding) {
         let best = deps.matchThreshold;
         for (const p of people) {
-          const score = cosine(emb, p.embedding);
+          const score = cosine(f.embedding, p.embedding);
           if (score >= best) {
             best = score;
             match = { personId: p.id, isSelf: p.isSelf };
           }
         }
       }
-      // Fresh key either way: shown when an utterance's own voice check drops the name.
-      speakerPerson.set(key, {
-        personId: match?.personId ?? null,
-        isSelf: match ? match.isSelf : null,
-        key: `S${++anonymous}`,
-      });
+      const who = {
+        personId: match?.personId ?? inherited?.personId ?? null,
+        isSelf: match ? match.isSelf : (inherited?.isSelf ?? null),
+        key,
+      };
+      speakerPerson.set(`${tag}${f.label}`, who);
+      // Every key is stored (without a voice if there is none), so later blocks don't hand it to
+      // someone else.
+      const profile = {
+        key,
+        personId: who.personId,
+        isSelf: who.isSelf,
+        centroid: f.embedding ? Array.from(f.embedding) : [],
+        seconds: seconds.get(f.label) ?? 0,
+      };
+      profiles.push(profile);
+      // Later passes of this block (long migrated blocks) match against it too.
+      known.push({ ...profile, centroid: f.embedding ?? new Float32Array(0) });
+      usedKeys.push(key);
     }
 
-    // 3) Keep the live text; each utterance takes the speaker it overlaps most.
+    // 5) Keep the live text, re-attributed.
     for (const u of utts) {
-      const s = speakerFor(turns, u.startAt.getTime(), u.endAt.getTime());
+      const label = labelOf.get(u.id);
       created.push({
         startAt: u.startAt.getTime(),
         endAt: u.endAt.getTime(),
         text: u.text,
         lang: u.lang,
-        speaker: s ? `${tag}${s}` : null,
+        speaker: label ? `${tag}${label}` : null,
         confidence: u.confidence,
         provider: u.provider,
         model: u.model,
@@ -262,16 +612,13 @@ async function refineNow(deps: RefineDeps, conversationId: string): Promise<stri
   }
 
   if (replaced.length === 0) {
-    await db
-      .update(schema.conversations)
-      .set({ status: "closed" })
-      .where(eq(schema.conversations.id, conversationId));
-    return "no stored audio to refine";
+    // Nothing to re-derive (no stored audio): the live rows are final.
+    return (await markRefined()) ? result("no stored audio to refine", true) : result(again, false);
   }
 
   const now = new Date();
   const replacedIds = replaced.map((u) => u.id);
-  await db.transaction(async (tx) => {
+  const refined = await db.transaction(async (tx) => {
     // Rows edited since we read them (e.g. a speaker identified from the timeline): start over, so
     // the edit and the new voiceprint are taken into account.
     const current = await tx
@@ -285,7 +632,7 @@ async function refineNow(deps: RefineDeps, conversationId: string): Promise<stri
       .for("update");
     const before = new Map(replaced.map((u) => [u.id, u.personId]));
     if (current.some((c) => c.supersededAt !== null || c.personId !== before.get(c.id))) {
-      throw new Error("conversation changed while refining; retrying");
+      throw new Error("block changed while refining; retrying");
     }
     // Only the rows re-derived above: rows added meanwhile (backlog) or without audio stay live.
     await tx
@@ -305,8 +652,9 @@ async function refineNow(deps: RefineDeps, conversationId: string): Promise<stri
                   key: cluster?.key ?? null,
                 };
           return {
-            userId: conv.userId,
-            conversationId,
+            userId: block.userId,
+            conversationId: block.chainId,
+            blockId,
             streamId: u.streamId,
             startAt: new Date(u.startAt),
             endAt: new Date(Math.max(u.endAt, u.startAt)),
@@ -324,28 +672,103 @@ async function refineNow(deps: RefineDeps, conversationId: string): Promise<stri
         }),
       );
     }
-    const speakers = new Set(
-      created
-        .map((u) =>
-          u.own
-            ? u.own.personId
-            : u.speaker
-              ? u.own === null
-                ? u.speaker
-                : (speakerPerson.get(u.speaker)?.personId ?? u.speaker)
-              : null,
-        )
-        .filter(Boolean),
+    // The rows above are refined either way; the block only if nothing was added meanwhile.
+    const merged = mergeProfiles(profiles);
+    if (await markRefined(tx, merged)) return true;
+    await tx.update(schema.blocks).set({ speakers: merged }).where(eq(schema.blocks.id, blockId));
+    return false;
+  });
+  const kept = live.length - replaced.length;
+  const speakers = new Set([...speakerPerson.values()].map((s) => s.key)).size;
+  const done = `refined: ${replaced.length} live → ${created.length} utterances, ${speakers} speakers${kept ? ` (${kept} kept: no audio)` : ""}`;
+  return result(refined ? done : `${done}; ${again}`, refined, replaced.length);
+}
+
+/**
+ * Once a chain has ended and all its blocks are refined: merge speaker keys that split across
+ * blocks (same voice, see `consolidate`) and mark its conversation refined. Returns whether the
+ * conversation is refined now.
+ */
+export async function finishChain(
+  deps: RefineDeps,
+  chainId: string,
+): Promise<{ finished: boolean; message: string }> {
+  const { db } = deps;
+  const [conv] = await db
+    .select()
+    .from(schema.conversations)
+    .where(eq(schema.conversations.id, chainId));
+  if (!conv?.endedAt) return { finished: false, message: "chain still open" };
+  if (conv.status === "refined") return { finished: false, message: "already finished" };
+  const chain = await db.select().from(schema.blocks).where(eq(schema.blocks.chainId, chainId));
+  if (chain.length === 0 || chain.some((b) => b.status !== "refined")) {
+    return { finished: false, message: "blocks still to refine" };
+  }
+  const ids = chain.map((b) => b.id);
+  const heard = await db
+    .selectDistinct({ blockId: schema.utterances.blockId, key: schema.utterances.speakerKey })
+    .from(schema.utterances)
+    .where(
+      and(
+        inArray(schema.utterances.blockId, ids),
+        isNull(schema.utterances.supersededAt),
+        isNotNull(schema.utterances.speakerKey),
+      ),
     );
+  const heardIn = new Map<string, Set<string>>();
+  for (const h of heard) {
+    const set = heardIn.get(h.key!) ?? new Set<string>();
+    set.add(h.blockId!);
+    heardIn.set(h.key!, set);
+  }
+  const renames = consolidate(
+    chain.flatMap((b) => b.speakers.map((s) => ({ ...s, blockId: b.id }))),
+    deps.clusterThreshold,
+    heardIn,
+  );
+  await db.transaction(async (tx) => {
+    for (const [from, to] of renames) {
+      await tx
+        .update(schema.utterances)
+        .set({ speakerKey: to })
+        .where(
+          and(
+            inArray(schema.utterances.blockId, ids),
+            eq(schema.utterances.speakerKey, from),
+            isNull(schema.utterances.supersededAt),
+          ),
+        );
+    }
+    for (const b of chain) {
+      if (!b.speakers.some((s) => renames.has(s.key))) continue;
+      await tx
+        .update(schema.blocks)
+        .set({
+          speakers: mergeProfiles(
+            b.speakers.map((s) => ({ ...s, key: renames.get(s.key) ?? s.key })),
+          ),
+        })
+        .where(eq(schema.blocks.id, b.id));
+    }
+    const rows = await tx
+      .select({
+        personId: schema.utterances.personId,
+        speakerKey: schema.utterances.speakerKey,
+        lang: schema.utterances.lang,
+      })
+      .from(schema.utterances)
+      .where(and(inArray(schema.utterances.blockId, ids), isNull(schema.utterances.supersededAt)));
     await tx
       .update(schema.conversations)
       .set({
         status: "refined",
-        speakerCount: speakers.size,
-        languages: [...new Set(created.map((u) => u.lang).filter((l): l is string => Boolean(l)))],
+        speakerCount: new Set(rows.map((r) => r.personId ?? r.speakerKey).filter(Boolean)).size,
+        languages: [...new Set(rows.map((r) => r.lang).filter((l): l is string => Boolean(l)))],
       })
-      .where(eq(schema.conversations.id, conversationId));
+      .where(eq(schema.conversations.id, chainId));
   });
-  const kept = live.length - replaced.length;
-  return `refined: ${replaced.length} live → ${created.length} utterances, ${speakerPerson.size} speakers${kept ? ` (${kept} kept: no audio)` : ""}`;
+  return {
+    finished: true,
+    message: `conversation refined (${chain.length} blocks${renames.size ? `, ${renames.size} keys merged` : ""})`,
+  };
 }
