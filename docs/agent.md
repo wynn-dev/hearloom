@@ -69,13 +69,14 @@ Use the console → **Agent → Connect Hermes**. It walks through the setup and
    **The secret is write-only.**
    - Only the `agent.generateWebhookSecret` response ever contains it.
    - `settings.get`, `settings.update` and `me.get` return `agent.webhookSecretSet` and
-     `webhookSecretHint` instead. The hint is the last 4 characters, and only for secrets of 16
-     characters or more.
+     `webhookSecretHint` instead. The hint is the last 4 characters before any base64 `=` padding,
+     and only for secrets of 16 characters or more.
    - `settings.update` still accepts `agent.webhookSecret`.
    - The server keeps the full secret for signing.
 3. **Where Hermes runs:** this machine (`http://127.0.0.1:8644/webhooks/hearloom-voice`), another host
    (`http://<host>:8644/webhooks/hearloom-voice`), or a full URL.
-4. **Copy blocks** for `~/.hermes/.env`, `~/.hermes/config.yaml` and the commands, below.
+4. **Copy blocks** for `~/.hermes/.env`, the two entries to merge into `~/.hermes/config.yaml`, and
+   the commands, below.
 5. **Check**, ending with **Send test command**.
 
 ```bash
@@ -85,19 +86,27 @@ HEARLOOM_MCP_TOKEN=hl_…
 # plus TELEGRAM_HOME_CHANNEL=<chat id>, or /sethome in the chat with the bot
 ```
 
+**Merge these into `~/.hermes/config.yaml`; don't append them.** Most configs already have a top-level
+`platforms:` (Telegram), and maybe `mcp_servers:`. A second copy of either is a duplicate key: Hermes's
+YAML loader (ruamel) refuses the whole file, and Hermes quietly keeps its last good config, so there's no
+Hearloom MCP, no route, and nothing listening on 8644. Each block is the indented entry to paste under
+its top-level key (add the key first if your file doesn't have it).
+
 ```yaml
-# ~/.hermes/config.yaml
-mcp_servers:
+# Under the top-level "mcp_servers:" line:
   hearloom:
     url: "https://your-mac.your-tailnet.ts.net/mcp"   # PUBLIC_URL + /mcp
     headers:
       Authorization: "Bearer ${HEARLOOM_MCP_TOKEN}"
+```
 
-platforms:
+```yaml
+# Under the top-level "platforms:" line, next to telegram:.
+# Already have platforms.webhook? Add only the hearloom-voice: entry under its extra.routes.
   webhook:
     enabled: true
     extra:
-      port: 8644
+      port: 8644                 # where Hermes listens (not a proxy's port)
       routes:
         hearloom-voice:
           events: ["voice.command"]

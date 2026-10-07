@@ -220,19 +220,34 @@ Facts below were checked against the Hermes docs (messaging/webhooks) and its so
    home channel with `TELEGRAM_HOME_CHANNEL=<chat id>`, or run `/sethome` in the Telegram chat with
    the bot.
 2. In `~/.hermes/config.yaml`: the Hearloom MCP server (`mcp_servers.hearloom`) and a **static**
-   route. It must be static because `toolsets` can't be set with `hermes webhook subscribe`:
+   route. It must be static because `toolsets` can't be set with `hermes webhook subscribe`.
+
+   **Merge these into `~/.hermes/config.yaml`; don't append them.** Most configs already have a top-level
+   `platforms:` (Telegram), and maybe `mcp_servers:`. A second copy of either is a duplicate key: Hermes's
+   YAML loader (ruamel) refuses the whole file, and Hermes quietly keeps its last good config, so there's no
+   Hearloom MCP, no route, and nothing listening on 8644. Each block is the indented entry to paste under
+   its top-level key (add the key first if your file doesn't have it).
 
    ```yaml
-   platforms:
+   # Under the top-level "mcp_servers:" line:
+     hearloom:
+       url: "https://your-mac.your-tailnet.ts.net/mcp"   # PUBLIC_URL + /mcp
+       headers:
+         Authorization: "Bearer ${HEARLOOM_MCP_TOKEN}"
+   ```
+
+   ```yaml
+   # Under the top-level "platforms:" line, next to telegram:.
+   # Already have platforms.webhook? Add only the hearloom-voice: entry under its extra.routes.
      webhook:
        enabled: true
        extra:
-         port: 8644
+         port: 8644                 # where Hermes listens (not a proxy's port)
          routes:
            hearloom-voice:
              events: ["voice.command"]
-             secret: "whsec_…"          # the same as Hearloom → Agent
-             skills: ["hearloom"]       # the guidance lives in the skill
+             secret: "whsec_…"           # the same as Hearloom → Agent
+             skills: ["hearloom"]
              prompt: "Hearloom voice command, spoken at {spokenAt} (lang {lang}, name heard as \"{heardAs}\", speaker score {speaker.score}): <<<{command}>>>"
              deliver: telegram          # no chat_id: your home channel
              mirror_to_session: true    # so you can answer "yes, do it" in Telegram

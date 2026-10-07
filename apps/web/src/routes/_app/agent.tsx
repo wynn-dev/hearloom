@@ -27,7 +27,7 @@ import {
   HERMES_RESTRICTED_TOOLSETS,
   type HermesWhere,
   hermesCommandsSnippet,
-  hermesConfigSnippet,
+  hermesConfigSnippets,
   hermesEnvSnippet,
   hermesWebhookUrl,
   normalizeHost,
@@ -63,7 +63,9 @@ function ConnectHermes() {
   const settings = useQuery(orpc.settings.get.queryOptions());
   const config = useQuery(orpc.agent.config.queryOptions());
   const tokens = useQuery(orpc.agent.tokens.list.queryOptions());
-  const [token, setToken] = useState<string | null>(null);
+  /** The token created in this visit (shown once), cleared if it's revoked. */
+  const [created, setCreated] = useState<{ id: string; token: string } | null>(null);
+  const token = created?.token ?? null;
   const [secret, setSecret] = useState<string | null>(null);
   const save = useMutation(
     orpc.settings.update.mutationOptions({
@@ -92,7 +94,7 @@ function ConnectHermes() {
       />
       <CardBody className="flex flex-col gap-6">
         <Step n={1} title="Create an access token">
-          <TokenStep created={token} onCreated={setToken} />
+          <TokenStep created={created} onChange={setCreated} />
         </Step>
 
         <Step n={2} title="Webhook secret">
@@ -192,10 +194,10 @@ function ShownOnce({ label, value }: { label: string; value: string }) {
 
 function TokenStep({
   created,
-  onCreated,
+  onChange,
 }: {
-  created: string | null;
-  onCreated: (token: string) => void;
+  created: { id: string; token: string } | null;
+  onChange: (created: { id: string; token: string } | null) => void;
 }) {
   const tokens = useQuery(orpc.agent.tokens.list.queryOptions());
   const tz = useTimeZone() ?? "UTC";
@@ -208,14 +210,22 @@ function TokenStep({
   const create = useMutation(
     orpc.agent.tokens.create.mutationOptions({
       onSuccess: (res) => {
-        onCreated(res.token);
+        onChange({ id: res.info.id, token: res.token });
         refresh();
       },
       onError: (err) =>
         toast({ tone: "bad", title: "Couldn't create token", description: errorMessage(err) }),
     }),
   );
-  const revoke = useMutation(orpc.agent.tokens.revoke.mutationOptions({ onSuccess: refresh }));
+  const revoke = useMutation(
+    orpc.agent.tokens.revoke.mutationOptions({
+      onSuccess: (_, { id }) => {
+        // A revoked token must not stay on screen or in the .env block as if it still worked.
+        if (id === created?.id) onChange(null);
+        refresh();
+      },
+    }),
+  );
 
   return (
     <>
@@ -240,7 +250,7 @@ function TokenStep({
       {created ? (
         <ShownOnce
           label="Copy this token now — it won't be shown again. It's also filled in below."
-          value={created}
+          value={created.token}
         />
       ) : null}
       {tokens.error ? (
@@ -536,6 +546,7 @@ function ConfigStep({
   mcpUrl: string;
   webhookUrl: string;
 }) {
+  const blocks = hermesConfigSnippets({ mcpUrl, webhookUrl, secret });
   return (
     <>
       <CopyBlock
@@ -547,9 +558,16 @@ function ConfigStep({
             : "The token is only filled in right after you create it. Paste yours, or create a new one in step 1."
         }
       />
+      <p className="text-xs text-ink-3">
+        <strong className="font-medium text-ink-2">Merge</strong> the next two into{" "}
+        <code>~/.hermes/config.yaml</code>; don't append them. A second top-level{" "}
+        <code>mcp_servers:</code> or <code>platforms:</code> is a duplicate key, and Hermes then
+        ignores the whole file and keeps its last good config.
+      </p>
+      <CopyBlock title="2. Under mcp_servers: in ~/.hermes/config.yaml" text={blocks.mcpServer} />
       <CopyBlock
-        title="2. Add to ~/.hermes/config.yaml"
-        text={hermesConfigSnippet({ mcpUrl, webhookUrl, secret })}
+        title="3. Under platforms: in ~/.hermes/config.yaml"
+        text={blocks.webhookPlatform}
         note={
           secret
             ? undefined
@@ -559,7 +577,7 @@ function ConfigStep({
         }
       />
       <CopyBlock
-        title="3. Install the Hearloom skill and restart Hermes"
+        title="4. Install the Hearloom skill and restart Hermes"
         text={hermesCommandsSnippet()}
       />
     </>
@@ -620,7 +638,7 @@ function Checklist({
     { label: "An access token exists", done: hasToken },
     { label: "A webhook secret is saved", done: hasSecret },
     { label: "The webhook URL is saved", done: hasUrl },
-    { label: "~/.hermes/.env and ~/.hermes/config.yaml updated with the blocks above" },
+    { label: "~/.hermes/.env updated, and the two blocks merged into ~/.hermes/config.yaml" },
     { label: "The hearloom skill installed, and the gateway restarted" },
   ];
   return (

@@ -96,18 +96,22 @@ export function parseHermesWebhookUrl(url: string): HermesWhere {
   return { kind: "custom", url };
 }
 
-/** Route name and listening port to put in Hermes's config, taken from the webhook URL. */
+const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+/**
+ * Route name and listening port to put in Hermes's config, taken from the webhook URL. The URL's port
+ * is Hermes's own only when Hearloom reaches Hermes directly: a URL the card built (this machine,
+ * another host) or a loopback one. A custom URL elsewhere may be a proxy, so Hermes keeps 8644.
+ */
 export function hermesRouteOf(webhookUrl: string): { route: string; port: number } {
   let route = HERMES_ROUTE;
   let port = HERMES_WEBHOOK_PORT;
   try {
     const u = new URL(webhookUrl);
     const m = u.pathname.match(/^\/webhooks\/([A-Za-z0-9_-]+)\/?$/);
-    if (m) {
-      route = m[1]!;
-      // A different port in the URL is Hermes's own only if Hearloom talks to it directly.
-      if (u.port) port = Number(u.port);
-    }
+    if (m) route = m[1]!;
+    const direct = parseHermesWebhookUrl(webhookUrl).kind !== "custom" || LOOPBACK.has(u.hostname);
+    if (m && direct && u.port) port = Number(u.port);
   } catch {
     // Not a URL yet: the defaults.
   }
@@ -144,25 +148,32 @@ export function hermesEnvSnippet(opts: { token: string | null }): string {
   ].join("\n");
 }
 
-/** The `mcp_servers` and webhook route blocks for `~/.hermes/config.yaml`. */
-export function hermesConfigSnippet(opts: {
+/**
+ * The two pieces to merge into `~/.hermes/config.yaml`, each to paste under a top-level key the file
+ * may already have (Telegram users have `platforms:`). Appending a second `platforms:` or
+ * `mcp_servers:` would be a duplicate key: Hermes refuses the file and quietly keeps its last good
+ * config. So each block is the indented entry only, valid YAML on its own, with where to put it.
+ */
+export function hermesConfigSnippets(opts: {
   mcpUrl: string;
   webhookUrl: string;
   secret: string | null;
-}): string {
+}): { mcpServer: string; webhookPlatform: string } {
   const { route, port } = hermesRouteOf(opts.webhookUrl);
-  return `# ~/.hermes/config.yaml
-mcp_servers:
+  const mcpServer = `# ~/.hermes/config.yaml: paste under the top-level "mcp_servers:" line.
+# No mcp_servers: yet? Add that line (no indent) first.
   hearloom:
     url: ${yamlString(opts.mcpUrl)}
     headers:
       Authorization: "Bearer \${HEARLOOM_MCP_TOKEN}"
-
-platforms:
+`;
+  const webhookPlatform = `# ~/.hermes/config.yaml: paste under the top-level "platforms:" line (next to telegram:).
+# No platforms: yet? Add that line (no indent) first.
+# Already have platforms.webhook? Add only the ${route}: entry under its extra.routes.
   webhook:
     enabled: true
     extra:
-      port: ${port}
+      port: ${port}                 # where Hermes listens (not a proxy's port)
       routes:
         ${route}:
           events: ["voice.command"]
@@ -174,6 +185,7 @@ platforms:
           # Full access: the Telegram chat's tools minus clarify and computer_use. Restricted: ${flowList(HERMES_RESTRICTED_TOOLSETS)}
           toolsets: ${flowList(HERMES_VOICE_TOOLSETS, "                    ")}
 `;
+  return { mcpServer, webhookPlatform };
 }
 
 /** Install the skill, then restart the gateway to load the config. */

@@ -127,6 +127,14 @@ test("publicSettings: the webhook secret is write-only", () => {
     webhookSecretSet: false,
     webhookSecretHint: null,
   });
+  // The hint skips base64 padding: generated secrets all end in "=".
+  expect(
+    publicSettings(
+      resolveSettings({
+        agent: { webhookSecret: "whsec_ymkG+jErdthmowvlVFOlsjJeA9bFMl6V7OWaAwsYa8I=" },
+      }),
+    ).agent.webhookSecretHint,
+  ).toBe("Ya8I");
   // Too short to hint at.
   expect(publicSettings(resolveSettings({ agent: { webhookSecret: "s3cret" } })).agent).toEqual({
     webhookUrl: "",

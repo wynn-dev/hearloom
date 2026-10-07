@@ -147,11 +147,13 @@ test("agent.generateWebhookSecret saves a new secret and returns it once", async
   const first = await client.agent.generateWebhookSecret();
   expect(isValidWebhookSecret(first.secret)).toBe(true);
   expect(first.secret.startsWith("whsec_")).toBe(true);
+  expect(first.secret.endsWith("=")).toBe(true);
   // The settings in the same response are redacted like any other.
   expect(first.settings.agent).toEqual({
     webhookUrl: "http://127.0.0.1:8644/webhooks/x",
     webhookSecretSet: true,
-    webhookSecretHint: first.secret.slice(-4),
+    // Generated secrets end in "=" padding; the hint is the 4 characters before it.
+    webhookSecretHint: first.secret.slice(-5, -1),
   });
   expect(JSON.stringify(first.settings)).not.toContain(first.secret);
   expect((await getSettings(userId)).agent.webhookSecret).toBe(first.secret);

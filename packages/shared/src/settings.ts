@@ -128,7 +128,10 @@ export const publicSettingsSchema = settingsSchema.extend({
   agent: z.object({
     webhookUrl: agentFields.webhookUrl,
     webhookSecretSet: z.boolean(),
-    /** The last 4 characters, to tell secrets apart; null when unset or too short to hint at. */
+    /**
+     * The last 4 characters (before base64 `=` padding), to tell secrets apart; null when unset or too
+     * short to hint at.
+     */
     webhookSecretHint: z.string().nullable(),
   }),
 });
@@ -144,7 +147,9 @@ export function publicSettings(s: Settings): PublicSettings {
     agent: {
       webhookUrl,
       webhookSecretSet: webhookSecret !== "",
-      webhookSecretHint: webhookSecret.length >= HINT_MIN_LENGTH ? webhookSecret.slice(-4) : null,
+      // Before any base64 padding, which would make every generated secret end in "=".
+      webhookSecretHint:
+        webhookSecret.length >= HINT_MIN_LENGTH ? webhookSecret.replace(/=+$/, "").slice(-4) : null,
     },
   };
 }
