@@ -126,6 +126,7 @@ async function describeEpisodes(
   rows: EpisodeRow[],
   utts: {
     startAt: Date;
+    isWearer: boolean | null;
     personId: string | null;
     speakerKey: string | null;
     lang: string | null;
@@ -146,7 +147,9 @@ async function describeEpisodes(
       title: ep.title,
       summary: ep.summary,
       refined: refined.has(ep.id),
-      speakerCount: new Set(inside.map((u) => u.personId ?? u.speakerKey).filter(Boolean)).size,
+      speakerCount: new Set(
+        inside.map((u) => (u.isWearer ? "me" : (u.personId ?? u.speakerKey))).filter(Boolean),
+      ).size,
       languages: [...new Set(inside.map((u) => u.lang).filter((l): l is string => Boolean(l)))],
     };
   });
