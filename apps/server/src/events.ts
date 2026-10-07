@@ -1,6 +1,5 @@
 import type { RealtimeEvent } from "@hearloom/api";
 import type { Sql } from "postgres";
-import { type AgentEvent, emitAgentEvent } from "./agent/webhooks";
 import { invalidate } from "./realtime";
 
 type Key = Extract<RealtimeEvent, { t: "invalidate" }>["keys"][number];
@@ -11,13 +10,8 @@ type Key = Extract<RealtimeEvent, { t: "invalidate" }>["keys"][number];
  */
 const CHANNEL = "hearloom_events";
 
-export async function publishChange(
-  sql: Sql,
-  userId: string,
-  keys: Key[],
-  agentEvent?: AgentEvent,
-): Promise<void> {
-  await sql.notify(CHANNEL, JSON.stringify({ userId, keys, agentEvent }));
+export async function publishChange(sql: Sql, userId: string, keys: Key[]): Promise<void> {
+  await sql.notify(CHANNEL, JSON.stringify({ userId, keys }));
 }
 
 export async function relayChanges(sql: Sql): Promise<void> {
@@ -25,13 +19,8 @@ export async function relayChanges(sql: Sql): Promise<void> {
     CHANNEL,
     (payload) => {
       try {
-        const { userId, keys, agentEvent } = JSON.parse(payload) as {
-          userId: string;
-          keys: Key[];
-          agentEvent?: AgentEvent;
-        };
+        const { userId, keys } = JSON.parse(payload) as { userId: string; keys: Key[] };
         invalidate(userId, keys);
-        if (agentEvent) emitAgentEvent(userId, agentEvent);
       } catch {}
     },
     // Events missed while reconnecting can't be recovered: refresh everything instead.

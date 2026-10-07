@@ -10,7 +10,6 @@ const { db, client } = createDb(process.env.DATABASE_URL, { max: 2 });
 const userId = `test-${crypto.randomUUID()}`;
 const activity: (Activity | null)[] = [];
 const ended: string[] = [];
-const checkpoints: number[] = [];
 const tracker = (selfKnown = true) =>
   new EpisodeTracker(
     db,
@@ -18,7 +17,6 @@ const tracker = (selfKnown = true) =>
       activity: (_u, a) => activity.push(a),
       ended: (_u, id) => ended.push(id),
       changed: () => {},
-      checkpoint: (_u, _id, at) => checkpoints.push(at),
     },
     async () => selfKnown,
   );
@@ -213,18 +211,6 @@ test("a restart ends episodes left open at their last speech", async () => {
   expect(ended).toContain(ep!.id);
   const [row] = await db.select().from(schema.episodes).where(eq(schema.episodes.id, ep!.id));
   expect(row!.endedAt!.getTime()).toBe(t0 + 4_000);
-});
-
-test("a long episode reports a checkpoint every 15 minutes", async () => {
-  const t = tracker();
-  const t0 = Date.UTC(2026, 8, 5, 9, 0);
-  checkpoints.length = 0;
-  const chain = crypto.randomUUID();
-  await t.chainStarted(userId, chain, t0);
-  for (const s of turns(t0, t0 + 40 * MINUTE, ["prof"])) t.speech(userId, s);
-  for (let m = 1; m <= 40; m++) await t.tick(t0 + m * MINUTE + 30_000);
-  expect(checkpoints).toEqual([t0 + 15 * MINUTE, t0 + 30 * MINUTE]);
-  await t.chainEnded(userId, chain, t0, t0 + 40 * MINUTE);
 });
 
 test("a long sound state without speech becomes a sound episode around existing ones", async () => {

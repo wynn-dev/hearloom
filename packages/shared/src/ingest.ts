@@ -134,6 +134,7 @@ export const clientMessageSchema = z.discriminatedUnion("t", [
   }),
   z.object({
     t: z.literal("event"),
+    // `ack_nudge`: sent by app builds from before agent notifications were removed; ignored.
     kind: z.enum(["battery", "charging", "button", "bookmark", "muted", "unmuted", "ack_nudge"]),
     value: z.union([z.number(), z.string(), z.boolean()]).optional(),
     peripheralId: z.string().optional(),
@@ -171,7 +172,6 @@ export type ServerMessage =
       body: string;
       category: string;
       deepLink?: string;
-      threadId?: string;
       interruptionLevel: "passive" | "active" | "time-sensitive";
       haptic?: HapticPattern;
     }

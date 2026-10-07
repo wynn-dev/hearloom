@@ -6,7 +6,6 @@ import {
   EpisodeEditError,
   episodesAt,
   episodesIn,
-  episodesRefinedBy,
   mediaVoices,
   mergeEpisodes,
   refinedIds,
@@ -139,11 +138,9 @@ test("an ended episode is refined once every block it overlaps is", async () => 
   const b2 = await block(310, 322);
   expect((await refinedIds(db, userId, [e])).has(e.id)).toBe(false);
   await db.update(schema.blocks).set({ status: "refined" }).where(eq(schema.blocks.id, b1.id));
-  expect((await episodesRefinedBy(db, b1.id))?.episodes).toEqual([]);
+  expect((await refinedIds(db, userId, [e])).has(e.id)).toBe(false);
   await db.update(schema.blocks).set({ status: "refined" }).where(eq(schema.blocks.id, b2.id));
-  expect((await episodesRefinedBy(db, b2.id))?.episodes).toEqual([
-    { id: e.id, kind: "conversation" },
-  ]);
+  expect((await refinedIds(db, userId, [e])).has(e.id)).toBe(true);
 });
 
 test("the episode a moment falls in", async () => {

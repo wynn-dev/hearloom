@@ -1,10 +1,10 @@
 import { schema } from "@hearloom/db";
-import { EPISODE_KIND_LABEL, episodeKindSchema, type Settings } from "@hearloom/shared";
+import { EPISODE_KIND_LABEL, episodeKindSchema } from "@hearloom/shared";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { and, asc, desc, eq, gte, ilike, isNull, lt, lte, or, sql } from "drizzle-orm";
 import { z } from "zod";
-import { type Scope, verifyToken } from "../agent/tokens";
+import { verifyToken } from "../agent/tokens";
 import { db } from "../db";
 import { env } from "../env";
 import {
@@ -22,45 +22,41 @@ import {
 import { chunkUrl } from "../http/media";
 import { livePipeline } from "../live/host";
 import { liveState } from "../live/state";
-import { notify } from "../notify/gateway";
-import { HARD_LIMIT_PER_HOUR, inQuietHours } from "../notify/policy";
 import { invalidate } from "../realtime";
 import { getSettings } from "../settings";
-import {
-  clock,
-  day,
-  episodeHeader,
-  episodeLabel,
-  MEDIA_NOTE,
-  renderLines,
-  speakerName,
-} from "./render";
+import { clock, day, episodeHeader, MEDIA_NOTE, renderLines, speakerName } from "./render";
 
-const {
-  utterances,
-  people,
-  soundEvents,
-  episodes,
-  bookmarks,
-  audioChunks,
-  wearables,
-  blocks,
-  notifications,
-} = schema;
+const { utterances, people, soundEvents, bookmarks, audioChunks, wearables, blocks } = schema;
 /** Lines per get_episode page. */
 const PAGE_LINES = 400;
 
-const MAX_RANGE_MS = 7 * 24 * 3600_000;
+const HOUR_MS = 3600_000;
 const text = (t: string) => ({ content: [{ type: "text" as const, text: t }] });
-const iso = z.string().describe("ISO 8601 date-time, e.g. 2026-10-06T09:00:00+02:00");
+const MAX_TIME = Date.UTC(10_000, 0, 1);
+/** Postgres refuses some times JS parses (negative or 6-digit years): keep to 1970–9999. */
+const iso = z
+  .string()
+  .refine((s) => {
+    const t = Date.parse(s);
+    return t >= 0 && t < MAX_TIME;
+  }, "not a valid date-time (years 1970–9999)")
+  .describe("ISO 8601 date-time, e.g. 2026-10-06T09:00:00+02:00");
 
-function range(from: string, to?: string): { from: Date; to: Date } {
+/** `from`–`to` (default now), at most `max` long. Throws a message for the agent otherwise. */
+function range(
+  from: string,
+  to: string | undefined,
+  max: { ms: number; label: string } = { ms: 7 * 24 * HOUR_MS, label: "7 days" },
+): { from: Date; to: Date } {
   const f = new Date(from);
   const t = to ? new Date(to) : new Date();
-  if (Number.isNaN(f.getTime()) || Number.isNaN(t.getTime())) throw new Error("invalid date");
-  if (t.getTime() - f.getTime() > MAX_RANGE_MS) throw new Error("range too large (max 7 days)");
+  if (t < f) throw new Error("`to` is before `from`");
+  if (t.getTime() - f.getTime() > max.ms) throw new Error(`range too large (max ${max.label})`);
   return { from: f, to: t };
 }
+
+/** Match `s` literally in LIKE/ILIKE patterns. */
+const likeLiteral = (s: string) => s.replace(/[\\%_]/g, "\\$&");
 
 /** Utterances with speaker names; voices from a TV or radio are marked (`media`). */
 async function loadUtterances(userId: string, where: ReturnType<typeof and>, limit = 2000) {
@@ -108,39 +104,8 @@ async function loadSounds(userId: string, from: Date, to: Date) {
     .limit(2000);
 }
 
-/** What happened to a notification, in words an agent can act on. */
-function describeOutcome(
-  n: { status: string; statusReason: string | null },
-  settings: Settings,
-): string {
-  const silently = "delivered silently (no sound or buzz)";
-  switch (n.statusReason) {
-    case "source_disabled":
-      return "not sent: the user turned off agent notifications.";
-    case "hard_limit":
-      return `not sent: ${HARD_LIMIT_PER_HOUR} notifications in the last hour is the maximum. Fold the rest into one notification later.`;
-    case "quiet_hours":
-      return `${silently}: quiet hours until ${settings.quietHours.end}.`;
-    case "in_conversation":
-      return `${silently}: the user is in a conversation.`;
-    case "hourly_limit":
-      return `${silently}: the user's limit of ${settings.notifications.maxPerHour} notifications with sound per hour is used up.`;
-  }
-  if (n.status === "failed") return `not delivered (${n.statusReason ?? "unknown error"}).`;
-  return `${n.status}.`;
-}
-
-/** How the user responded to a notification. */
-function describeResponse(n: { feedback: string | null; replyText: string | null }): string {
-  const parts = [
-    n.feedback === "useful" ? "useful" : n.feedback === "not_useful" ? "not useful" : null,
-    n.replyText ? `replied ${JSON.stringify(n.replyText)}` : null,
-  ].filter(Boolean);
-  return parts.length ? parts.join(", ") : "opened";
-}
-
-/** Build an MCP server scoped to one user and the token's scopes. */
-function buildServer(userId: string, scopes: Scope[]): McpServer {
+/** Build an MCP server scoped to one user. */
+function buildServer(userId: string): McpServer {
   const server = new McpServer(
     { name: "hearloom", version: "0.1.0" },
     {
@@ -158,12 +123,11 @@ function buildServer(userId: string, scopes: Scope[]): McpServer {
     "get_current_context",
     {
       description:
-        "What is happening right now: local time, the current episode (a conversation, a talk, TV…) and with whom, whether the user is busy, pendant status, quiet hours, recent speech and sounds. Call this before deciding whether to interrupt the user.",
+        "What is happening right now: local time, the current episode (a conversation, a talk, TV…) and with whom, pendant status, and the last 5 minutes of speech and sounds.",
       annotations: readOnly,
     },
     async () => {
-      const settings = await getSettings(userId);
-      const tz = settings.timezone;
+      const tz = (await getSettings(userId)).timezone;
       const now = new Date();
       const state = liveState(userId);
       const since = new Date(now.getTime() - 5 * 60_000);
@@ -183,8 +147,6 @@ function buildServer(userId: string, scopes: Scope[]): McpServer {
             ? `${EPISODE_KIND_LABEL[state.activity.kind]} since ${clock(new Date(state.activity.since), tz, false)}${speakers.length ? ` (${speakers.join(", ")})` : ""} · episode ${state.activity.episodeId}`
             : "no speech going on"
         }`,
-        `Busy (in a conversation or a talk): ${state.inConversation ? "yes" : "no"}`,
-        `Quiet hours now: ${inQuietHours(now, settings) ? "yes" : "no"} (${settings.quietHours.start}–${settings.quietHours.end}${settings.quietHours.enabled ? "" : ", disabled"})`,
         `Pendant: ${state.wearableConnected ? "connected" : "not connected"}${state.muted ? ", MUTED" : ""}${pendant?.batteryLevel != null ? `, battery ${pendant.batteryLevel}%` : ""}`,
         `Last audio: ${state.lastAudioAt ? `${Math.round((now.getTime() - state.lastAudioAt) / 1000)} s ago` : "unknown"}`,
         "",
@@ -214,19 +176,17 @@ function buildServer(userId: string, scopes: Scope[]): McpServer {
       annotations: readOnly,
     },
     async ({ query, from, to, speaker, limit }) => {
+      if (from && to && new Date(to) < new Date(from)) return text("`to` is before `from`.");
       const tz = (await getSettings(userId)).timezone;
       const tsq = sql`(websearch_to_tsquery('english', ${query}) || websearch_to_tsquery('dutch', ${query}) || websearch_to_tsquery('simple', ${query}))`;
       const conds = [
-        or(
-          sql`${utterances.search} @@ ${tsq}`,
-          ilike(utterances.text, `%${query.replace(/[%_]/g, "")}%`),
-        ),
+        or(sql`${utterances.search} @@ ${tsq}`, ilike(utterances.text, `%${likeLiteral(query)}%`)),
         from ? gte(utterances.startAt, new Date(from)) : undefined,
         to ? lte(utterances.startAt, new Date(to)) : undefined,
         speaker
           ? speaker.toLowerCase() === "me"
             ? eq(utterances.isWearer, true)
-            : ilike(people.name, speaker)
+            : ilike(people.name, likeLiteral(speaker))
           : undefined,
       ];
       const rows = await db
@@ -468,60 +428,6 @@ function buildServer(userId: string, scopes: Scope[]): McpServer {
   );
 
   server.registerTool(
-    "changes_since",
-    {
-      description:
-        "What is new since a cursor (ISO time): episodes that started, ended or changed, bookmarks, and how the user responded to your notifications (opened, useful / not useful, replies). Returns a new cursor. Cheap; use it in scheduled checks to decide whether to wake up.",
-      inputSchema: { cursor: iso },
-      annotations: readOnly,
-    },
-    async ({ cursor }) => {
-      const since = new Date(cursor);
-      const now = new Date();
-      const tz = (await getSettings(userId)).timezone;
-      const eps = await db
-        .select()
-        .from(episodes)
-        .where(and(eq(episodes.userId, userId), gte(episodes.updatedAt, since)))
-        .orderBy(asc(episodes.startedAt))
-        .limit(100);
-      const marks = await db
-        .select()
-        .from(bookmarks)
-        .where(and(eq(bookmarks.userId, userId), gte(bookmarks.createdAt, since)));
-      const responses = await db
-        .select()
-        .from(notifications)
-        .where(
-          and(
-            eq(notifications.userId, userId),
-            eq(notifications.source, "agent"),
-            gte(notifications.respondedAt, since),
-          ),
-        )
-        .orderBy(asc(notifications.respondedAt))
-        .limit(100);
-      return text(
-        [
-          `cursor: ${now.toISOString()}`,
-          `episodes changed: ${eps.length}`,
-          ...eps.map(
-            (e) =>
-              `  ${e.id} ${day(e.startedAt, tz)} ${clock(e.startedAt, tz, false)}–${e.endedAt ? clock(e.endedAt, tz, false) : "now"} ${episodeLabel(e)}`,
-          ),
-          `bookmarks: ${marks.length}`,
-          ...marks.map((b) => `  ${clock(b.at, tz)}${b.note ? ` ${b.note}` : ""}`),
-          `notification responses: ${responses.length}`,
-          ...responses.map(
-            (n) =>
-              `  ${n.id} ${clock(n.respondedAt!, tz, false)} "${n.title}": ${describeResponse(n)}`,
-          ),
-        ].join("\n"),
-      );
-    },
-  );
-
-  server.registerTool(
     "get_audio_clip_url",
     {
       description:
@@ -530,9 +436,7 @@ function buildServer(userId: string, scopes: Scope[]): McpServer {
       annotations: readOnly,
     },
     async ({ from, to }) => {
-      const f = new Date(from);
-      const t = new Date(to);
-      if (t.getTime() - f.getTime() > 3600_000) return text("Range too large (max 1 hour).");
+      const { from: f, to: t } = range(from, to, { ms: HOUR_MS, label: "1 hour" });
       const rows = await db
         .select()
         .from(audioChunks)
@@ -556,109 +460,61 @@ function buildServer(userId: string, scopes: Scope[]): McpServer {
     },
   );
 
-  if (scopes.includes("write")) {
-    const write = { readOnlyHint: false, destructiveHint: false, openWorldHint: false } as const;
-    /** Run an edit as the agent; report what the episode looks like now, or why not. */
-    const edit = async (run: () => Promise<EpisodeRow | EpisodeRow[]>) => {
-      let rows: EpisodeRow[];
-      try {
-        const out = await run();
-        rows = Array.isArray(out) ? out : [out];
-      } catch (err) {
-        if (err instanceof EpisodeEditError) return text(`Not changed: ${err.message}.`);
-        throw err;
-      }
-      livePipeline.episodesChanged(userId);
-      invalidate(userId, ["timeline"]);
-      const tz = (await getSettings(userId)).timezone;
-      return text(rows.map((e) => episodeHeader(e, tz)).join("\n"));
-    };
+  // Episode edits: the user's own edits always win (see mayEdit).
+  const write = { readOnlyHint: false, destructiveHint: false, openWorldHint: false } as const;
+  /** Run an edit as the agent; report what the episode looks like now, or why not. */
+  const edit = async (run: () => Promise<EpisodeRow | EpisodeRow[]>) => {
+    let rows: EpisodeRow[];
+    try {
+      const out = await run();
+      rows = Array.isArray(out) ? out : [out];
+    } catch (err) {
+      if (err instanceof EpisodeEditError) return text(`Not changed: ${err.message}.`);
+      throw err;
+    }
+    livePipeline.episodesChanged(userId);
+    invalidate(userId, ["timeline"]);
+    const tz = (await getSettings(userId)).timezone;
+    return text(rows.map((e) => episodeHeader(e, tz)).join("\n"));
+  };
 
-    server.registerTool(
-      "update_episode",
-      {
-        description:
-          "Give an episode a title or summary (shown in the user's timeline), or correct its kind (e.g. it was the TV, not a conversation). The user's own edits can't be overridden. Pass null to clear a title or summary.",
-        inputSchema: {
-          id: z.string().uuid(),
-          title: z.string().max(200).nullable().optional(),
-          summary: z.string().max(4000).nullable().optional(),
-          kind: episodeKindSchema.exclude(["unknown"]).optional(),
-        },
-        annotations: write,
+  server.registerTool(
+    "update_episode",
+    {
+      description:
+        "Give an episode a title or summary (shown in the user's timeline), or correct its kind (e.g. it was the TV, not a conversation). The user's own edits can't be overridden. Pass null to clear a title or summary.",
+      inputSchema: {
+        id: z.string().uuid(),
+        title: z.string().max(200).nullable().optional(),
+        summary: z.string().max(4000).nullable().optional(),
+        kind: episodeKindSchema.exclude(["unknown"]).optional(),
       },
-      ({ id, ...patch }) => edit(() => updateEpisode(db, userId, id, patch, "agent")),
-    );
+      annotations: write,
+    },
+    ({ id, ...patch }) => edit(() => updateEpisode(db, userId, id, patch, "agent")),
+  );
 
-    server.registerTool(
-      "split_episode",
-      {
-        description:
-          "Split an ended episode in two at a time inside it (e.g. where a meeting turned into a chat). Both parts keep its kind; use update_episode to change one.",
-        inputSchema: { id: z.string().uuid(), at: iso },
-        annotations: write,
-      },
-      ({ id, at }) => {
-        const time = new Date(at);
-        if (Number.isNaN(time.getTime())) return text("Not changed: `at` isn't a valid time.");
-        return edit(() => splitEpisode(db, userId, id, time, "agent"));
-      },
-    );
+  server.registerTool(
+    "split_episode",
+    {
+      description:
+        "Split an ended episode in two at a time inside it (e.g. where a meeting turned into a chat). Both parts keep its kind; use update_episode to change one.",
+      inputSchema: { id: z.string().uuid(), at: iso },
+      annotations: write,
+    },
+    ({ id, at }) => edit(() => splitEpisode(db, userId, id, new Date(at), "agent")),
+  );
 
-    server.registerTool(
-      "merge_episodes",
-      {
-        description:
-          "Merge two neighbouring ended episodes into one (e.g. a lecture interrupted by a break). The longer one's kind wins.",
-        inputSchema: { ids: z.tuple([z.string().uuid(), z.string().uuid()]) },
-        annotations: write,
-      },
-      ({ ids }) => edit(() => mergeEpisodes(db, userId, ids, "agent")),
-    );
-  }
-
-  if (scopes.includes("notify")) {
-    server.registerTool(
-      "send_notification",
-      {
-        description:
-          "Send the user a push notification now (phone, and a pendant buzz when time-sensitive). Hearloom never holds or retries it, so pick the moment yourself (see get_current_context). " +
-          "It is delivered silently (no sound, no buzz) during quiet hours, while the user is in a conversation, or past their hourly limit of notifications with sound; the result says when. " +
-          `Time-sensitive rings through conversations and the hourly limit, never through quiet hours. More than ${HARD_LIMIT_PER_HOUR} in an hour are refused. ` +
-          "Keep it short, and fold related items into one notification.",
-        inputSchema: {
-          title: z.string().min(1).max(120),
-          body: z.string().min(1).max(1000),
-          urgency: z
-            .enum(["passive", "active", "time-sensitive"])
-            .default("active")
-            .describe(
-              "passive: silent, just lands in the list. active: normal sound. time-sensitive: breaks through Focus and buzzes the pendant; only for things that matter within minutes.",
-            ),
-          deepLink: z.string().optional().describe("In-app path, e.g. /timeline"),
-          rationale: z
-            .string()
-            .max(500)
-            .optional()
-            .describe("Why this is worth the user's attention (shown in the log)"),
-        },
-        annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
-      },
-      async (input) => {
-        const row = await notify({
-          userId,
-          source: "agent",
-          category: "agent",
-          title: input.title,
-          body: input.body,
-          interruptionLevel: input.urgency,
-          deepLink: input.deepLink,
-          metadata: input.rationale ? { rationale: input.rationale } : {},
-        });
-        return text(`Notification ${row.id}: ${describeOutcome(row, await getSettings(userId))}`);
-      },
-    );
-  }
+  server.registerTool(
+    "merge_episodes",
+    {
+      description:
+        "Merge two neighbouring ended episodes into one (e.g. a lecture interrupted by a break). The longer one's kind wins.",
+      inputSchema: { ids: z.tuple([z.string().uuid(), z.string().uuid()]) },
+      annotations: write,
+    },
+    ({ ids }) => edit(() => mergeEpisodes(db, userId, ids, "agent")),
+  );
 
   return server;
 }
@@ -672,8 +528,7 @@ export async function handleMcp(req: Request): Promise<Response> {
       headers: { "content-type": "application/json", "www-authenticate": "Bearer" },
     });
   }
-  if (!auth.scopes.includes("read")) return new Response("token lacks read scope", { status: 403 });
-  const server = buildServer(auth.userId, auth.scopes);
+  const server = buildServer(auth.userId);
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
     enableJsonResponse: true,

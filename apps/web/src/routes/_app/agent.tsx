@@ -1,18 +1,14 @@
-import { EPISODE_KIND_DESCRIPTION, EPISODE_KIND_LABEL, EPISODE_KINDS } from "@hearloom/shared";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { Bot, Copy, KeyRound, Trash2, Webhook } from "lucide-react";
 import { useEffect, useId, useState } from "react";
 import { RelTime } from "../../components/bits";
-import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
 import { Card, CardBody, CardHeader, PageHeader } from "../../components/ui/card";
 import { ConfirmButton } from "../../components/ui/dialog";
 import { Field, Input } from "../../components/ui/input";
 import { EmptyState, ErrorNotice, LoadingRows } from "../../components/ui/misc";
-import { Switch } from "../../components/ui/switch";
 import { useToast } from "../../components/ui/toast";
-import { cn } from "../../lib/cn";
 import { useTimeZone } from "../../lib/me";
 import { errorMessage, orpc } from "../../lib/orpc";
 import { useNow } from "../../lib/time";
@@ -26,12 +22,11 @@ function AgentPage() {
     <>
       <PageHeader
         title="Agent"
-        description="Let an AI agent (e.g. Hermes running Claude) read your memory over MCP and send you notifications."
+        description="Let an AI agent (e.g. Hermes running Claude) read your memory and tidy up your episodes over MCP."
       />
       <div className="flex flex-col gap-4">
         <Tokens />
         <WebhookCard />
-        <HermesSnippet />
       </div>
     </>
   );
@@ -44,8 +39,6 @@ function Tokens() {
   const queryClient = useQueryClient();
   const tokens = useQuery(orpc.agent.tokens.list.queryOptions());
   const [name, setName] = useState("Hermes");
-  const [notifyScope, setNotifyScope] = useState(true);
-  const [writeScope, setWriteScope] = useState(true);
   const [created, setCreated] = useState<string | null>(null);
   const nameId = useId();
   const refresh = () => void queryClient.invalidateQueries({ queryKey: orpc.agent.tokens.key() });
@@ -66,38 +59,19 @@ function Tokens() {
       <CardHeader
         icon={<KeyRound aria-hidden />}
         title="Access tokens"
-        description="Tokens for the MCP endpoint. Read lets the agent search and read your timeline; notify also lets it send notifications (silent during quiet hours, conversations and past your hourly limit); write lets it title, summarize and re-classify episodes (never undoing your own edits)."
+        description="Tokens for the MCP endpoint. A token lets the agent search and read your timeline, and title, summarize, split, merge and re-classify episodes (never undoing your own edits)."
       />
       <CardBody className="flex flex-col gap-4">
         <form
           className="flex flex-wrap items-end gap-3"
           onSubmit={(e) => {
             e.preventDefault();
-            create.mutate({
-              name,
-              scopes: [
-                "read",
-                ...(notifyScope ? (["notify"] as const) : []),
-                ...(writeScope ? (["write"] as const) : []),
-              ],
-            });
+            create.mutate({ name });
           }}
         >
           <Field label="Name" htmlFor={nameId} className="w-56">
             <Input id={nameId} value={name} onChange={(e) => setName(e.target.value)} />
           </Field>
-          <div className="flex h-8.5 items-center gap-2 text-[13px] text-ink-2">
-            <Switch
-              checked={notifyScope}
-              onChange={setNotifyScope}
-              label="Can send notifications"
-            />
-            <span aria-hidden>Can send notifications</span>
-          </div>
-          <div className="flex h-8.5 items-center gap-2 text-[13px] text-ink-2">
-            <Switch checked={writeScope} onChange={setWriteScope} label="Can edit episodes" />
-            <span aria-hidden>Can edit episodes</span>
-          </div>
           <Button
             variant="primary"
             type="submit"
@@ -138,14 +112,6 @@ function Tokens() {
               <li key={t.id} className="flex items-center gap-3 px-3 py-2 text-[13px]">
                 <span className="font-medium">{t.name}</span>
                 <code className="text-xs text-ink-3">{t.prefix}…</code>
-                {t.scopes.map((s) => (
-                  <Badge
-                    key={s}
-                    tone={s === "notify" ? "warn" : s === "write" ? "info" : "neutral"}
-                  >
-                    {s}
-                  </Badge>
-                ))}
                 <span className="ml-auto text-xs text-ink-3">
                   {t.lastUsedAt ? (
                     <>
@@ -170,6 +136,7 @@ function Tokens() {
             ))}
           </ul>
         )}
+        <HermesSnippet />
       </CardBody>
     </Card>
   );
@@ -199,28 +166,12 @@ function WebhookCard() {
         toast({ tone: "bad", title: "Couldn't save", description: errorMessage(err) }),
     }),
   );
-  const test = useMutation(
-    orpc.agent.testWebhook.mutationOptions({
-      onSuccess: (r) =>
-        toast(
-          r.ok
-            ? { tone: "good", title: `Webhook answered ${r.status}` }
-            : {
-                tone: "bad",
-                title: "Webhook failed",
-                description: `${r.status || ""} ${r.error ?? ""}`.trim(),
-              },
-        ),
-    }),
-  );
-  const events = settings.data?.agent.events;
-
   return (
     <Card>
       <CardHeader
         icon={<Webhook aria-hidden />}
         title="Webhook"
-        description="Hearloom POSTs small events (ids and times only) so the agent can react — e.g. read an episode when it ends. Signed with X-Hearloom-Signature: sha256=HMAC(secret, timestamp.body)."
+        description="Where Hearloom sends events for the agent, e.g. a Hermes webhook route. Signed with Standard Webhooks headers (webhook-id, webhook-timestamp, webhook-signature); use the same secret as the route. A whsec_ secret is a base64 key."
       />
       <CardBody className="flex flex-col gap-3">
         <div className="grid gap-3 sm:grid-cols-2">
@@ -241,55 +192,6 @@ function WebhookCard() {
             />
           </Field>
         </div>
-        {events ? (
-          <div className="flex flex-col gap-3 text-[13px] text-ink-2">
-            <fieldset className="flex flex-wrap items-center gap-1.5">
-              <legend className="mb-1.5 text-xs font-medium text-ink-2">
-                Episode ended, for these kinds
-              </legend>
-              {EPISODE_KINDS.map((kind) => {
-                const on = events.episodeEnded[kind];
-                return (
-                  <button
-                    key={kind}
-                    type="button"
-                    aria-pressed={on}
-                    title={EPISODE_KIND_DESCRIPTION[kind]}
-                    onClick={() =>
-                      save.mutate({ agent: { events: { episodeEnded: { [kind]: !on } } } })
-                    }
-                    className={cn(
-                      "inline-flex h-7 cursor-pointer items-center rounded-full border px-2.5 text-xs transition-colors",
-                      on
-                        ? "border-accent/40 bg-accent-soft text-accent-ink"
-                        : "border-line bg-surface text-ink-3 hover:text-ink-2",
-                    )}
-                  >
-                    {kind === "unknown" ? "Unclassified" : EPISODE_KIND_LABEL[kind]}
-                  </button>
-                );
-              })}
-            </fieldset>
-            <div className="flex flex-wrap gap-4">
-              {(
-                [
-                  ["episodeRefined", "Episode refined (speakers identified)"],
-                  ["episodeCheckpoint", "Every 15 min of a long episode"],
-                  ["bookmark", "Bookmark"],
-                ] as const
-              ).map(([key, label]) => (
-                <div key={key} className="flex items-center gap-2">
-                  <Switch
-                    checked={events[key]}
-                    label={label}
-                    onChange={(v) => save.mutate({ agent: { events: { [key]: v } } })}
-                  />
-                  <span aria-hidden>{label}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        ) : null}
         <div className="flex gap-2">
           <Button
             variant="primary"
@@ -300,13 +202,6 @@ function WebhookCard() {
           >
             Save
           </Button>
-          <Button
-            loading={test.isPending}
-            onClick={() => test.mutate({})}
-            disabled={!settings.data?.agent.webhookUrl}
-          >
-            Send test event
-          </Button>
         </div>
       </CardBody>
     </Card>
@@ -314,29 +209,21 @@ function WebhookCard() {
 }
 
 function HermesSnippet() {
-  const origin = location.origin;
   const snippet = `mcp_servers:
   hearloom:
-    url: ${origin}/mcp
+    url: ${location.origin}/mcp
     headers:
-      Authorization: "Bearer \${HEARLOOM_MCP_TOKEN}"
-    tools:
-      include: [get_current_context, search_transcripts, get_timeline, list_episodes,
-                get_episode, list_sound_events, list_people, changes_since,
-                get_audio_clip_url, send_notification, update_episode,
-                split_episode, merge_episodes]`;
+      Authorization: "Bearer \${HEARLOOM_MCP_TOKEN}"`;
   return (
-    <Card>
-      <CardHeader
-        icon={<Bot aria-hidden />}
-        title="Connect Hermes"
-        description="Add Hearloom as a Streamable-HTTP MCP server in Hermes (~/.hermes/config.yaml), with the token in HEARLOOM_MCP_TOKEN. Run Hermes isolated (Docker or a separate macOS user): transcripts are untrusted input."
-      />
-      <CardBody>
-        <pre className="overflow-x-auto rounded-md bg-surface-2 p-3 font-mono text-xs leading-relaxed">
-          {snippet}
-        </pre>
-      </CardBody>
-    </Card>
+    <div className="flex flex-col gap-2 text-[13px] text-ink-2">
+      <p>
+        Connect Hermes: add Hearloom as a Streamable-HTTP MCP server in ~/.hermes/config.yaml, with
+        the token in HEARLOOM_MCP_TOKEN. Run Hermes isolated (Docker or a separate macOS user):
+        transcripts are untrusted input.
+      </p>
+      <pre className="overflow-x-auto rounded-md bg-surface-2 p-3 font-mono text-xs leading-relaxed">
+        {snippet}
+      </pre>
+    </div>
   );
 }

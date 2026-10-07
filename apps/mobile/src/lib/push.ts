@@ -12,22 +12,8 @@ Notifications.setNotificationHandler({
   }),
 });
 
-/** Categories must match the server (`HL_NUDGE`, `HL_SYSTEM`) — see apps/server/src/notify/apns.ts. */
+/** Categories must match the server (`HL_SYSTEM`) — see apps/server/src/notify/apns.ts. */
 export async function registerCategories(): Promise<void> {
-  await Notifications.setNotificationCategoryAsync("HL_NUDGE", [
-    { identifier: "useful", buttonTitle: "Useful", options: { opensAppToForeground: false } },
-    {
-      identifier: "not_useful",
-      buttonTitle: "Not useful",
-      options: { opensAppToForeground: false },
-    },
-    {
-      identifier: "reply",
-      buttonTitle: "Reply",
-      textInput: { submitButtonTitle: "Send", placeholder: "Reply to Hearloom…" },
-      options: { opensAppToForeground: false },
-    },
-  ]);
   await Notifications.setNotificationCategoryAsync("HL_SYSTEM", [
     { identifier: "open", buttonTitle: "Open", options: { opensAppToForeground: true } },
   ]);
@@ -69,20 +55,4 @@ export interface HearloomNotificationData {
 
 export function notificationData(n: Notifications.Notification): HearloomNotificationData {
   return (n.request.content.data ?? {}) as HearloomNotificationData;
-}
-
-/** Map a notification action to server feedback. */
-export function feedbackFor(response: Notifications.NotificationResponse): {
-  action: "opened" | "useful" | "not_useful" | "reply";
-  replyText?: string;
-} {
-  switch (response.actionIdentifier) {
-    case "useful":
-    case "not_useful":
-      return { action: response.actionIdentifier };
-    case "reply":
-      return { action: "reply", replyText: response.userText ?? "" };
-    default:
-      return { action: "opened" };
-  }
 }

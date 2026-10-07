@@ -7,7 +7,6 @@
 import { createDb } from "@hearloom/db";
 import { hasModel, MODEL_FILES, SpeakerEmbedder } from "@hearloom/inference";
 import { env, modelsDir } from "../env";
-import { episodesRefinedBy, refinedEpisodesOfChain } from "../episodes/store";
 import { publishChange } from "../events";
 import {
   enqueueRefine,
@@ -49,29 +48,6 @@ async function refine(blockId: string): Promise<void> {
   if (done.finished) console.log(`[worker] chain ${r.chainId}: ${done.message}`);
   if (!r.refined && !done.finished) return;
   await publishChange(client, userId, ["timeline", "people"]);
-  // Episodes whose speech is all refined now.
-  const refined = r.refined ? await episodesRefinedBy(db, blockId) : null;
-  for (const ep of refined?.episodes ?? []) {
-    await publishChange(client, userId, ["timeline"], {
-      type: "episode.refined",
-      episodeId: ep.id,
-      kind: ep.kind,
-      again: false,
-    });
-  }
-  // Merging speaker keys across the chain renamed speakers its episodes were refined with.
-  if (done.renamed > 0) {
-    const chain = await refinedEpisodesOfChain(db, r.chainId);
-    for (const ep of chain?.episodes ?? []) {
-      if (refined?.episodes.some((x) => x.id === ep.id)) continue;
-      await publishChange(client, userId, ["timeline"], {
-        type: "episode.refined",
-        episodeId: ep.id,
-        kind: ep.kind,
-        again: true,
-      });
-    }
-  }
 }
 
 /**

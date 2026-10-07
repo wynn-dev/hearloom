@@ -1,5 +1,4 @@
 import { z } from "zod";
-import type { EpisodeKind } from "./episodes";
 
 const hhmm = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "expected HH:MM");
 
@@ -19,23 +18,20 @@ export const timeZoneSchema = z
   .max(64)
   .refine(isValidTimeZone, "unknown time zone");
 
-export const buttonActionSchema = z.enum(["none", "bookmark", "mute", "ack_nudge"]);
+export const buttonActionSchema = z.enum(["none", "bookmark", "mute"]);
 export type ButtonAction = z.infer<typeof buttonActionSchema>;
-
-export const notificationSourceSchema = z.enum(["system", "agent"]);
-export type NotificationSource = z.infer<typeof notificationSourceSchema>;
 
 /*
  * Each section is defined twice from the same field validators: with defaults (stored settings) and
  * without (patches). Zod fills `.default()` values even inside `.partial()`, so a patch built from
  * the defaulted schema would silently reset every field the client didn't send.
  */
+/** System alerts arrive silently (no sound or buzz) in this window; only the test notification rings. */
 const quietHoursFields = { enabled: z.boolean(), start: hhmm, end: hhmm };
-const sourcesFields = { system: z.boolean(), agent: z.boolean() };
 const notificationsFields = {
-  /** Cap for non-system notifications in any rolling hour. */
-  maxPerHour: z.number().int().min(0).max(60),
-  /** Vibrate the pendant when a nudge arrives over the live connection. */
+  /** System alerts (pendant disconnected, low battery, test). Off: they're recorded, not sent. */
+  enabled: z.boolean(),
+  /** Vibrate the pendant for time-sensitive notifications over the live connection. */
   pendantHaptic: z.boolean(),
 };
 
@@ -50,28 +46,19 @@ const alertsFields = {
   lowBatteryPercent: z.number().int().min(0).max(100),
 };
 
-/** Outbound events to an agent (e.g. Hermes) — HMAC-signed webhooks. */
+/** Where Hearloom POSTs events for the agent (e.g. a Hermes webhook route), and the signing secret. */
 const agentFields = {
   webhookUrl: z.union([z.url(), z.literal("")]),
+  /** Standard Webhooks key: `whsec_<base64>`, or any other string (used as raw bytes). */
   webhookSecret: z.string().max(256),
 };
-/** Send `episode.ended` for episodes of this kind. */
-const episodeEndedFields = {
-  conversation: z.boolean(),
-  talk: z.boolean(),
-  media: z.boolean(),
-  ambient: z.boolean(),
-  solo: z.boolean(),
-  sound: z.boolean(),
-  unknown: z.boolean(),
-} satisfies Record<EpisodeKind, z.ZodBoolean>;
-const agentEventsFields = {
-  /** `episode.refined`: an ended episode's speakers have been refined. */
-  episodeRefined: z.boolean(),
-  /** `episode.checkpoint`: every 15 minutes of a long episode (for kinds `episodeEnded` sends). */
-  episodeCheckpoint: z.boolean(),
-  bookmark: z.boolean(),
-};
+
+/** `whsec_` secrets are base64 keys; receivers such as Hermes refuse ones that don't decode. */
+export function isValidWebhookSecret(secret: string): boolean {
+  if (!secret.startsWith("whsec_")) return true;
+  const key = secret.slice("whsec_".length);
+  return key.length > 0 && key.length % 4 === 0 && /^[A-Za-z0-9+/]+={0,2}$/.test(key);
+}
 
 export const settingsSchema = z.object({
   /** IANA zone used for quiet hours and day boundaries. Set from the phone on first login. */
@@ -85,13 +72,7 @@ export const settingsSchema = z.object({
     .prefault({}),
   notifications: z
     .object({
-      maxPerHour: notificationsFields.maxPerHour.default(4),
-      sources: z
-        .object({
-          system: sourcesFields.system.default(true),
-          agent: sourcesFields.agent.default(true),
-        })
-        .prefault({}),
+      enabled: notificationsFields.enabled.default(true),
       pendantHaptic: notificationsFields.pendantHaptic.default(true),
     })
     .prefault({}),
@@ -99,7 +80,7 @@ export const settingsSchema = z.object({
     .object({
       tap: buttonFields.tap.default("bookmark"),
       doubleTap: buttonFields.doubleTap.default("mute"),
-      hold: buttonFields.hold.default("ack_nudge"),
+      hold: buttonFields.hold.default("none"),
     })
     .prefault({}),
   alerts: z
@@ -112,24 +93,6 @@ export const settingsSchema = z.object({
     .object({
       webhookUrl: agentFields.webhookUrl.default(""),
       webhookSecret: agentFields.webhookSecret.default(""),
-      events: z
-        .object({
-          episodeEnded: z
-            .object({
-              conversation: episodeEndedFields.conversation.default(true),
-              talk: episodeEndedFields.talk.default(true),
-              media: episodeEndedFields.media.default(false),
-              ambient: episodeEndedFields.ambient.default(false),
-              solo: episodeEndedFields.solo.default(false),
-              sound: episodeEndedFields.sound.default(false),
-              unknown: episodeEndedFields.unknown.default(true),
-            })
-            .prefault({}),
-          episodeRefined: agentEventsFields.episodeRefined.default(false),
-          episodeCheckpoint: agentEventsFields.episodeCheckpoint.default(false),
-          bookmark: agentEventsFields.bookmark.default(true),
-        })
-        .prefault({}),
     })
     .prefault({}),
 });
@@ -140,18 +103,17 @@ export type Settings = z.infer<typeof settingsSchema>;
 export const settingsPatchSchema = z.object({
   timezone: timeZoneSchema.optional(),
   quietHours: z.object(quietHoursFields).partial().optional(),
-  notifications: z
-    .object({ ...notificationsFields, sources: z.object(sourcesFields).partial() })
-    .partial()
-    .optional(),
+  notifications: z.object(notificationsFields).partial().optional(),
   button: z.object(buttonFields).partial().optional(),
   alerts: z.object(alertsFields).partial().optional(),
   agent: z
     .object({
       ...agentFields,
-      events: z
-        .object({ ...agentEventsFields, episodeEnded: z.object(episodeEndedFields).partial() })
-        .partial(),
+      // Checked on save only: a stored secret that fails this must not reset all settings.
+      webhookSecret: agentFields.webhookSecret.refine(
+        isValidWebhookSecret,
+        "a whsec_ secret must be followed by base64",
+      ),
     })
     .partial()
     .optional(),
@@ -163,25 +125,29 @@ export function resolveSettings(stored: unknown): Settings {
   return parsed.success ? parsed.data : settingsSchema.parse({});
 }
 
-/** Settings stored before episodes: "conversation ended" turned off → no episode.ended at all. */
+type Stored = {
+  notifications?: { enabled?: unknown; sources?: { system?: unknown } };
+  button?: Record<string, unknown>;
+};
+
+/**
+ * Settings stored before agent notifications were removed: the pendant's "acknowledge notification"
+ * action becomes "none", and the system-alerts switch moves from `sources.system` to `enabled`.
+ * (Unknown keys such as `maxPerHour` or `agent.events` are dropped by the schema.)
+ */
 function upgrade(stored: unknown): unknown {
-  const events = (stored as { agent?: { events?: Record<string, unknown> } }).agent?.events;
-  if (!events || events.episodeEnded !== undefined || events.conversationEnded !== false) {
-    return stored;
-  }
-  const off = {
-    conversation: false,
-    talk: false,
-    media: false,
-    ambient: false,
-    solo: false,
-    sound: false,
-  };
-  const s = stored as { agent: Record<string, unknown> };
-  return {
-    ...s,
-    agent: { ...s.agent, events: { ...events, episodeEnded: { ...off, unknown: false } } },
-  };
+  const s = stored as Stored;
+  const button = s.button
+    ? Object.fromEntries(
+        Object.entries(s.button).map(([k, v]) => [k, v === "ack_nudge" ? "none" : v]),
+      )
+    : undefined;
+  const system = s.notifications?.sources?.system;
+  const notifications =
+    s.notifications && s.notifications.enabled === undefined && typeof system === "boolean"
+      ? { ...s.notifications, enabled: system }
+      : s.notifications;
+  return { ...s, button, notifications };
 }
 
 export function mergeSettings(current: Settings, patch: SettingsPatch): Settings {
@@ -189,24 +155,9 @@ export function mergeSettings(current: Settings, patch: SettingsPatch): Settings
     ...current,
     ...(patch.timezone ? { timezone: patch.timezone } : {}),
     quietHours: { ...current.quietHours, ...patch.quietHours },
-    notifications: {
-      ...current.notifications,
-      ...patch.notifications,
-      sources: { ...current.notifications.sources, ...patch.notifications?.sources },
-    },
+    notifications: { ...current.notifications, ...patch.notifications },
     button: { ...current.button, ...patch.button },
     alerts: { ...current.alerts, ...patch.alerts },
-    agent: {
-      ...current.agent,
-      ...patch.agent,
-      events: {
-        ...current.agent.events,
-        ...patch.agent?.events,
-        episodeEnded: {
-          ...current.agent.events.episodeEnded,
-          ...patch.agent?.events?.episodeEnded,
-        },
-      },
-    },
+    agent: { ...current.agent, ...patch.agent },
   });
 }

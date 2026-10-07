@@ -1,10 +1,9 @@
 import type { NotificationItem } from "@hearloom/api";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { BellRing, MessageSquareReply } from "lucide-react";
+import { BellRing } from "lucide-react";
 import { type FormEvent, memo, useState } from "react";
 import { cn } from "../lib/cn";
 import {
-  feedbackLabel,
   interruptionLabel,
   type NotificationStatus,
   reasonLabel,
@@ -86,21 +85,6 @@ export const NotificationRow = memo(function NotificationRow({
           </>
         )}
       </div>
-      {!compact && (n.feedback || n.replyText) ? (
-        <div className="mt-1 flex flex-wrap items-center gap-2 text-xs">
-          {n.feedback ? (
-            <Badge tone={n.feedback === "useful" ? "good" : "neutral"}>
-              {feedbackLabel[n.feedback]}
-            </Badge>
-          ) : null}
-          {n.replyText ? (
-            <span className="inline-flex min-w-0 items-center gap-1.5 rounded-md bg-surface-2 px-2 py-1 text-ink-2">
-              <MessageSquareReply className="size-3.5 shrink-0 text-ink-3" aria-hidden />
-              <span className="min-w-0">“{n.replyText}”</span>
-            </span>
-          ) : null}
-        </div>
-      ) : null}
     </article>
   );
 });

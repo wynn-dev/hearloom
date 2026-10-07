@@ -1,76 +1,58 @@
 import { createHmac } from "node:crypto";
-import type { EpisodeKind, Settings } from "@hearloom/shared";
 import { getSettings } from "../settings";
 
-export type AgentEvent =
-  | {
-      type: "episode.ended";
-      episodeId: string;
-      kind: EpisodeKind;
-      title: string | null;
-      startedAt: string;
-      endedAt: string;
-    }
-  | {
-      type: "episode.refined";
-      episodeId: string;
-      kind: EpisodeKind;
-      /** Sent again when a later pass merges speaker labels across the episode's chain. */
-      again: boolean;
-    }
-  | {
-      type: "episode.checkpoint";
-      episodeId: string;
-      kind: EpisodeKind;
-      title: string | null;
-      startedAt: string;
-      /** Time of the checkpoint: the episode is still going on. */
-      at: string;
-    }
-  | { type: "bookmark"; at: string; source: string; note: string | null }
-  | { type: "test"; message: string };
+/** An event for the user's agent. Receivers dedupe on `id`, so a retry must reuse it. */
+export interface WebhookEvent {
+  id: string;
+  type: string;
+  [field: string]: unknown;
+}
 
-/** Is this event turned on in the user's settings? */
-function enabled(settings: Settings, event: AgentEvent): boolean {
-  const { events } = settings.agent;
-  switch (event.type) {
-    case "episode.ended":
-      return events.episodeEnded[event.kind];
-    case "episode.refined":
-      return events.episodeRefined && events.episodeEnded[event.kind];
-    case "episode.checkpoint":
-      return events.episodeCheckpoint && events.episodeEnded[event.kind];
-    case "bookmark":
-      return events.bookmark;
-    case "test":
-      return true;
-  }
+export interface WebhookResult {
+  ok: boolean;
+  /** HTTP status; 0 when no request was made or it failed before a response. */
+  status: number;
+  error: string | null;
 }
 
 /**
- * POST an event to the user's agent webhook. Signed like many webhook providers:
- *   X-Hearloom-Signature: sha256=<hex HMAC-SHA256(secret, `${timestamp}.${body}`)>
- *   X-Hearloom-Timestamp: <unix seconds>
- * Bodies only reference ids/times — the agent fetches content over MCP with its token.
+ * Standard Webhooks (https://www.standardwebhooks.com) signature, as Hermes checks it:
+ * `v1,<base64 HMAC-SHA256(key, "{id}.{timestamp}.{body}")>`. The key is the base64 part of a
+ * `whsec_…` secret, or the secret's UTF-8 bytes otherwise.
  */
-export async function sendAgentEvent(
+export function webhookSignature(
+  secret: string,
+  id: string,
+  timestamp: number,
+  body: string,
+): string {
+  const key = secret.startsWith("whsec_")
+    ? Buffer.from(secret.slice("whsec_".length), "base64")
+    : Buffer.from(secret, "utf8");
+  return `v1,${createHmac("sha256", key).update(`${id}.${timestamp}.${body}`).digest("base64")}`;
+}
+
+/**
+ * POST an event to the user's agent webhook (settings `agent.webhookUrl`), signed with
+ * `agent.webhookSecret` when one is set. One attempt; the caller decides about retries.
+ * The body is the event plus `userId` and `sentAt`.
+ */
+export async function sendWebhook(
   userId: string,
-  event: AgentEvent,
-): Promise<{ ok: boolean; status: number; error: string | null }> {
-  const settings = await getSettings(userId);
-  const { agent } = settings;
+  event: WebhookEvent,
+  opts: { timeoutMs?: number } = {},
+): Promise<WebhookResult> {
+  const { agent } = await getSettings(userId);
   if (!agent.webhookUrl) return { ok: false, status: 0, error: "no webhook configured" };
-  if (!enabled(settings, event)) return { ok: false, status: 0, error: "event disabled" };
   const body = JSON.stringify({ ...event, userId, sentAt: new Date().toISOString() });
-  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const timestamp = Math.floor(Date.now() / 1000);
   const headers: Record<string, string> = {
     "content-type": "application/json",
-    "x-hearloom-event": event.type,
-    "x-hearloom-timestamp": timestamp,
+    "webhook-id": event.id,
+    "webhook-timestamp": String(timestamp),
   };
   if (agent.webhookSecret) {
-    headers["x-hearloom-signature"] =
-      `sha256=${createHmac("sha256", agent.webhookSecret).update(`${timestamp}.${body}`).digest("hex")}`;
+    headers["webhook-signature"] = webhookSignature(agent.webhookSecret, event.id, timestamp, body);
   }
   try {
     const res = await fetch(agent.webhookUrl, {
@@ -79,7 +61,7 @@ export async function sendAgentEvent(
       body,
       // Don't follow redirects (could point anywhere) or relay response bodies to the caller.
       redirect: "manual",
-      signal: AbortSignal.timeout(10_000),
+      signal: AbortSignal.timeout(opts.timeoutMs ?? 10_000),
     });
     await res.body?.cancel();
     return {
@@ -90,13 +72,4 @@ export async function sendAgentEvent(
   } catch (err) {
     return { ok: false, status: 0, error: err instanceof Error ? err.message : String(err) };
   }
-}
-
-/** Fire-and-forget variant for pipeline events. */
-export function emitAgentEvent(userId: string, event: AgentEvent): void {
-  void sendAgentEvent(userId, event).then((r) => {
-    if (!r.ok && r.error !== "no webhook configured" && r.error !== "event disabled") {
-      console.warn(`[agent] webhook ${event.type} failed: ${r.status} ${r.error}`);
-    }
-  });
 }

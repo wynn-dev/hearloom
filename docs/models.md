@@ -49,8 +49,7 @@ A child process of the server (`apps/server/src/live`) receives every stored bat
    young episode (< 5 min) is re-labelled and an older one is cut at the longest pause. Without the
    user's voiceprint, speech that isn't clearly media or a talk counts as a conversation. Backlog
    chains are segmented the same way once their upload is quiet. Kinds and boundaries set by the
-   user or an agent are never changed by these rules. Conversation, talk and unclassified speech
-   make the user busy (agent notifications are delivered silently); media, ambient and solo don't.
+   user or an agent are never changed by these rules.
    A sound state of 15 minutes or more (music, traffic…) that no episode covers becomes a `sound`
    episode. Speaker keys are per chain, so a voice that speaks in a media episode is marked as a
    media voice in the rest of the chain too (the TV while people talk over it).
@@ -105,7 +104,6 @@ When a block closes the server queues a job (pg-boss, in Postgres).
    identified), the job retries.
 7. Once the chain has ended and all its blocks are refined, merges keys that are the same voice
    but were split across blocks (never two keys heard in one block, or named after different people)
-   and marks the chain `refined`. An episode is refined once every block it overlaps is
-   (`episode.refined`).
+   and marks the chain `refined`. An episode is refined once every block it overlaps is.
 
 20 s of audio diarizes in ~0.3–1.3 s on an M5 Pro.

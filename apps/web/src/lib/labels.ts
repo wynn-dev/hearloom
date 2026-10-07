@@ -22,6 +22,8 @@ export const statusLabel: Record<NotificationStatus, string> = {
 
 const reasons: Record<string, string> = {
   quiet_hours: "silent: quiet hours",
+  disabled: "alerts turned off",
+  // Older agent notifications.
   in_conversation: "silent: in a conversation",
   hourly_limit: "silent: hourly limit",
   hard_limit: "over 30 in an hour",
@@ -49,16 +51,10 @@ export const sourceLabel: Record<NotificationItem["source"], string> = {
   agent: "Agent",
 };
 
-export const feedbackLabel: Record<NonNullable<NotificationItem["feedback"]>, string> = {
-  useful: "Marked useful",
-  not_useful: "Marked not useful",
-};
-
 export const buttonActionLabel: Record<ButtonAction, string> = {
   none: "Do nothing",
   bookmark: "Bookmark this moment",
   mute: "Mute / unmute microphone",
-  ack_nudge: "Acknowledge the latest agent notification",
 };
 
 export const buttonActions = Object.keys(buttonActionLabel) as ButtonAction[];

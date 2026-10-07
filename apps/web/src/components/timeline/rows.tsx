@@ -309,7 +309,6 @@ function deviceIcon(e: DeviceEvent): ReactNode {
       return <MicOff />;
     case "unmuted":
       return <Mic />;
-    case "ack_nudge":
     case "button":
       return <Hand />;
     default:

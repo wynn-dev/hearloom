@@ -63,7 +63,7 @@ JSON control messages, client → server:
 | `hello` | `v, slot, phoneId, stream{id, codec, sampleRate, frameMs, startedAt}, wearable?` | bind a stream to a slot |
 | `bye` | `slot, endedAt` | user stopped capture on purpose (no "disconnected" alerts) |
 | `wearable` | `wearable, connected, at` | pendant connected/disconnected, device info |
-| `event` | `kind, value?, peripheralId?, at` | `battery`, `charging`, `button`, `bookmark`, `muted`, `unmuted`, `ack_nudge` |
+| `event` | `kind, value?, peripheralId?, at` | `battery`, `charging`, `button`, `bookmark`, `muted`, `unmuted` (older apps also send `ack_nudge`, ignored) |
 | `notify_ack` | `id` | the phone displayed a notification received over the socket |
 | `ping` | `at` | keepalive / clock check |
 
@@ -75,7 +75,7 @@ Server → client:
 | `welcome` | `slot, streamId, ackedSeq, serverTime, config` | resume point + phone config |
 | `ack` | `slot, seq` | durable through `seq` |
 | `config` | `config` | settings changed (button mapping, pendant haptics) |
-| `notify` | `id, title, body, category, deepLink?, threadId?, interruptionLevel, haptic?` | show now; reply with `notify_ack` |
+| `notify` | `id, title, body, category, deepLink?, interruptionLevel, haptic?` | show now; reply with `notify_ack` |
 | `haptic` | `pattern` | buzz the pendant |
 | `error` | `code, message, fatal?, slot?` | `fatal` (`unknown_phone`, `protocol_version`) closes the socket and the phone retries only after a long pause; with `slot` it concerns one stream (`seq_gap`: resend from the ack; `codec`, `stream`: stream refused) and the socket stays open |
 | `pong` | `at, serverTime` | |
@@ -85,19 +85,17 @@ resulting semantic events (`bookmark`, `muted`, …).
 
 ## 3. Notifications
 
-Every notification (system alerts and the agent) goes through one gateway
-(`apps/server/src/notify`):
+Every notification is a system alert (pendant disconnected, low battery, test) and goes through one
+gateway (`apps/server/src/notify`):
 
-1. **Policy** — never delays: source toggles and a hard ceiling (30 agent notifications an hour) refuse;
-   quiet hours in the user's timezone, an ongoing conversation and the hourly limit with sound only make
-   it `passive` (silent). See `docs/agent.md`.
+1. **Policy** — never delays: alerts turned off are refused; quiet hours in the user's timezone make it
+   `passive` (silent), except a time-sensitive alert (the test button).
 2. **Delivery** — one copy per phone. APNs first (it reaches a suspended app); a pendant buzz goes
    separately as a `haptic` message on the live socket, the only way to reach the pendant. When APNs
    isn't configured or fails, the notification goes over the live socket instead (`notify`, buzz
    included), and a `notify_ack` within 4 s marks it delivered. Nothing is sent twice, so a late ack
    can't cause a duplicate banner.
-3. **Audit** — every attempt is stored in `notification_deliveries`; feedback (useful / not useful /
-   reply) is stored on the notification.
+3. **Audit** — every attempt is stored in `notification_deliveries`; a tap on the phone sets `opened_at`.
 
-APNs categories: `HL_NUDGE` (actions: Useful, Not useful, Reply) and `HL_SYSTEM`. Deep links are
+APNs category: `HL_SYSTEM` (action: Open). Deep links are
 in-app paths only.

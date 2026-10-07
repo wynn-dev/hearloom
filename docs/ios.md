@@ -14,7 +14,7 @@ that don't use the UIScene lifecycle.
     upload and deleted only after the server acknowledges it.
   - `IngestClient` — the `/ingest` WebSocket (see `docs/protocol.md`), with backoff, network-change
     retries and keepalive pings.
-  - Pendant button actions (bookmark / mute / acknowledge notification) run locally, so mute works offline.
+  - Pendant button actions (bookmark / mute) run locally, so mute works offline.
   - Notifications arrive over APNs. When the server can't push (APNs not configured or failing) they come
     over the socket and are shown with `LocalNotifier` (same categories and data as APNs pushes). The
     pendant buzz always comes over the socket.

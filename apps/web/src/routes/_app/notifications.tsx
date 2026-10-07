@@ -39,7 +39,7 @@ function NotificationsPage() {
     <>
       <PageHeader
         title="Notifications"
-        description="Every agent notification and alert, with how it was delivered and why."
+        description="Every alert, with how it was delivered and why."
       />
       <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_20rem]">
         <Card>
@@ -63,8 +63,8 @@ function NotificationsPage() {
             <LoadingRows rows={6} />
           ) : items.length === 0 ? (
             <EmptyState icon={<BellOff />} title="No notifications yet">
-              Alerts (pendant disconnected, low battery) and agent notifications will show up here.
-              Send a test to check delivery.
+              Alerts (pendant disconnected, low battery) will show up here. Send a test to check
+              delivery.
             </EmptyState>
           ) : (
             <>
