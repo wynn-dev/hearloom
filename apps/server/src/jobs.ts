@@ -24,13 +24,16 @@ export async function jobs(): Promise<PgBoss> {
     const b = new PgBoss({ connectionString: env.DATABASE_URL, schema: "pgboss", max: 2 });
     b.on("error", (err) => console.error("[jobs]", err));
     await b.start();
-    for (const name of Object.values(QUEUES)) await b.createQueue(name);
+    // Per block, at most one job waiting and one running: audio that arrives while a block is
+    // being refined still gets its own pass.
+    await b.createQueue(QUEUES.refine, { policy: "stately" });
+    await b.createQueue(QUEUES.refineLegacy);
     boss = b;
   }
   return boss;
 }
 
-/** Queue a refine pass for a finished block (deduplicated per block). */
+/** Queue a refine pass for a finished block (no-op if one is already waiting for it). */
 export async function enqueueRefine(blockId: string): Promise<void> {
   const b = await jobs();
   await b.send(QUEUES.refine, { blockId } satisfies RefineJob, {

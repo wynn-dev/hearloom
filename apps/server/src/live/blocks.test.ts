@@ -190,6 +190,58 @@ test("backlog next to a full block starts a new block of the same chain", async 
   expect(await blocks(next.chainId)).toHaveLength(2);
 });
 
+test("late audio from just before a live conversation joins it", async () => {
+  const t = tracker();
+  const base = Date.now() + 5 * 24 * 3600_000;
+  // The phone reconnects at base: what it recorded in the minute before arrives late.
+  const live = await t.place(userId, base, base + 3_000, true);
+  const late = await t.place(userId, base - 60_000, base - 57_000, false);
+  expect(late.chainId).toBe(live.chainId);
+  expect(late.blockId).toBe(live.blockId);
+  await t.closeAll();
+  const conv = (await conversations()).find((c) => c.id === live.chainId)!;
+  expect(conv.startedAt.getTime()).toBe(base - 60_000);
+  const [block] = await blocks(live.chainId);
+  expect(block!.startedAt.getTime()).toBe(base - 60_000);
+});
+
+test("ending a live conversation keeps a start that backlog moved earlier", async () => {
+  const t = tracker();
+  const base = Date.now() + 6 * 24 * 3600_000;
+  const placed = [];
+  for (let at = base; at < base + 12 * MIN; at += 5_000) {
+    placed.push(await t.place(userId, at, at + 3_000, true));
+  }
+  const chainId = placed[0]!.chainId;
+  // Late audio from just before the first (now closed) block.
+  await t.place(userId, base - 30_000, base - 27_000, false);
+  await t.closeAll();
+  const conv = (await conversations()).find((c) => c.id === chainId)!;
+  expect(conv.startedAt.getTime()).toBe(base - 30_000);
+});
+
+test("new speaker keys of backlog in an ended conversation continue after its keys", async () => {
+  const t = tracker();
+  const base = Date.now() - 3 * 24 * 3600_000;
+  const first = await t.place(userId, base, base + 5_000, false);
+  await db.insert(schema.utterances).values({
+    userId,
+    conversationId: first.chainId,
+    blockId: first.blockId,
+    startAt: new Date(base),
+    endAt: new Date(base + 5_000),
+    speakerKey: "S4",
+    text: "hi",
+    source: "refine",
+    provider: "test",
+  });
+  await t.tick(Date.now() + SILENCE_GAP_MS + 1);
+  // More backlog for the same conversation, from a new tracker (e.g. after a restart).
+  const more = await tracker().place(userId, base + 10_000, base + 12_000, false);
+  expect(more.chainId).toBe(first.chainId);
+  expect(more.clusters.alias("soniox:x:1")).toBe("S5");
+});
+
 test("backlog in a closed block of the live chain doesn't end the live chain", async () => {
   const t = tracker();
   const base = Date.now() + 4 * 24 * 3600_000;

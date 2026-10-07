@@ -17,7 +17,9 @@ CREATE INDEX "blocks_chain_id_index" ON "blocks" USING btree ("chain_id");--> st
 ALTER TABLE "utterances" ADD CONSTRAINT "utterances_block_id_blocks_id_fk" FOREIGN KEY ("block_id") REFERENCES "public"."blocks"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "utterances_block_id_index" ON "utterances" USING btree ("block_id");--> statement-breakpoint
 -- Every existing conversation becomes one block of its own chain, with the same id: its utterances
--- keep their speaker keys, and refine jobs queued by conversation id still find their block.
+-- keep their speaker keys, and refine jobs queued by conversation id still find their block. A
+-- pass that was running is redone (the worker re-queues closed blocks without a job).
+UPDATE "conversations" SET "status" = 'closed' WHERE "status" = 'refining';--> statement-breakpoint
 INSERT INTO "blocks" ("id", "user_id", "chain_id", "started_at", "ended_at", "status", "created_at", "updated_at")
 SELECT "id", "user_id", "id", "started_at", "ended_at", "status", "created_at", "updated_at" FROM "conversations";--> statement-breakpoint
 UPDATE "utterances" SET "block_id" = "conversation_id" WHERE "conversation_id" IS NOT NULL;

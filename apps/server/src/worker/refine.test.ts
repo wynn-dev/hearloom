@@ -75,6 +75,20 @@ describe("assignKeys", () => {
     expect(keys.get("b")!.known!.personId).toBe("alice");
   });
 
+  test("one key per cluster: the cluster sharing the most speech takes it", () => {
+    const keys = assignKeys(
+      [
+        facts("talker", { anchors: new Map([["S1", 2500]]) }),
+        facts("alice", { anchors: new Map([["S1", 9000]]) }),
+      ],
+      known,
+      ["S1", "S2"],
+      0.6,
+    );
+    expect(keys.get("alice")!.key).toBe("S1");
+    expect(keys.get("talker")).toMatchObject({ key: "S3", source: "new" });
+  });
+
   test("too little shared speech doesn't anchor", () => {
     const keys = assignKeys(
       [facts("a", { anchors: new Map([["S2", 1500]]) })],
@@ -128,6 +142,9 @@ describe("consolidate", () => {
 
   test("keeps keys apart when they speak in the same block or are different people", () => {
     expect(consolidate([sp("b1", "S1", 0), sp("b1", "S2", 0)], 0.6).size).toBe(0);
+    // S2 has no stored voice in b1, but its lines show it spoke there too.
+    const heardIn = new Map([["S2", new Set(["b1", "b2"])]]);
+    expect(consolidate([sp("b1", "S1", 0), sp("b2", "S2", 0)], 0.6, heardIn).size).toBe(0);
     expect(
       consolidate([sp("b1", "S1", 0, 10, "alice"), sp("b2", "S3", 0, 10, "bob")], 0.6).size,
     ).toBe(0);
@@ -315,6 +332,29 @@ describe("refining the blocks of a chain", () => {
     expect(conv!.speakerCount).toBe(3);
 
     expect((await refineBlock(deps(), blockB)).message).toBe("already refined");
+  });
+
+  test("speech added while a block is refined leaves it for another pass", async () => {
+    const { blockA } = await chain();
+    const r = await refineBlock(
+      {
+        ...deps(),
+        loadPieces: async (stream, from, to) => {
+          // Backlog lands in the block meanwhile (see BlockTracker.backlog).
+          await db
+            .update(schema.blocks)
+            .set({ status: "closed" })
+            .where(eq(schema.blocks.id, blockA));
+          return deps().loadPieces!(stream, from, to);
+        },
+      },
+      blockA,
+    );
+    expect(r).toMatchObject({ refined: false, replaced: 4 });
+    const [row] = await db.select().from(schema.blocks).where(eq(schema.blocks.id, blockA));
+    expect(row!.status).toBe("closed");
+    // The next pass refines it (the rows refined meanwhile stay as they are).
+    expect(await refineBlock(deps(), blockA)).toMatchObject({ refined: true, replaced: 4 });
   });
 
   test("without voice embeddings, the shared context alone carries keys and names over", async () => {

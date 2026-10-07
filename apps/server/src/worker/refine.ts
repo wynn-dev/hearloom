@@ -50,8 +50,9 @@ interface Turn {
  */
 const MAX_WINDOW_MS = 3 * 3600_000;
 /**
- * The end of the previous block, diarized together with this one: a cluster that shares this
- * speech with a previous speaker takes over its key, so keys carry across a chain.
+ * The previous block's speech in the CONTEXT_MS before this block, diarized together with it: a
+ * cluster that shares this speech with a previous speaker takes over its key, so keys carry across
+ * a chain. (After a longer pause, or across capture streams, keys carry over by voice instead.)
  */
 export const CONTEXT_MS = 90_000;
 /** Shared speech (in the context) needed to take over a previous speaker's key. */
@@ -114,9 +115,11 @@ export interface ClusterFacts {
 export type KeySource = "anchor" | "voice" | "live" | "new";
 
 /**
- * Key per cluster, in order of trust: the previous block's speaker it overlaps in the context;
- * a known voice of the chain; the live key most of its utterances had (so keys don't change when
- * a block is refined, unless that key belongs to a known voice); else the next free key.
+ * Key per cluster, in order of trust: the previous block's speaker it shares the most speech with
+ * in the context; a known voice of the chain; the live key most of its utterances had (so keys
+ * don't change when a block is refined, unless that key is already the chain's); else the next
+ * free key. One key per cluster: two clusters of one block are two people (the diarizer told them
+ * apart), so the best matches are taken first and a key once taken is not given again.
  */
 export function assignKeys(
   clusters: ClusterFacts[],
@@ -127,47 +130,50 @@ export function assignKeys(
   const out = new Map<string, { key: string; source: KeySource; known?: KnownSpeaker }>();
   const taken = new Set<string>();
   const knownKeys = new Set(known.map((k) => k.key));
+  const take = (label: string, key: string, source: KeySource, k?: KnownSpeaker) => {
+    out.set(label, { key, source, known: k });
+    taken.add(key);
+  };
+
+  const anchors: { label: string; key: string; ms: number }[] = [];
   for (const c of clusters) {
-    let best: [string, number] | null = null;
-    let total = 0;
+    const total = [...c.anchors.values()].reduce((a, b) => a + b, 0);
     for (const [key, ms] of c.anchors) {
-      total += ms;
-      if (!best || ms > best[1]) best = [key, ms];
-    }
-    if (best && best[1] >= ANCHOR_MIN_MS && best[1] >= total / 2) {
-      out.set(c.label, {
-        key: best[0],
-        source: "anchor",
-        known: known.find((k) => k.key === best[0]),
-      });
-      taken.add(best[0]);
+      if (ms >= ANCHOR_MIN_MS && ms >= total / 2) anchors.push({ label: c.label, key, ms });
     }
   }
+  for (const a of anchors.sort((x, y) => y.ms - x.ms)) {
+    if (out.has(a.label) || taken.has(a.key)) continue;
+    take(
+      a.label,
+      a.key,
+      "anchor",
+      known.find((k) => k.key === a.key),
+    );
+  }
+
+  const voices: { label: string; k: KnownSpeaker; score: number }[] = [];
   for (const c of clusters) {
     if (out.has(c.label) || !c.embedding) continue;
-    let match: KnownSpeaker | null = null;
-    let bestScore = threshold;
     for (const k of known) {
+      if (k.centroid.length === 0) continue;
       const score = cosine(c.embedding, k.centroid);
-      if (score >= bestScore) {
-        bestScore = score;
-        match = k;
-      }
-    }
-    if (match) {
-      out.set(c.label, { key: match.key, source: "voice", known: match });
-      taken.add(match.key);
+      if (score >= threshold) voices.push({ label: c.label, k, score });
     }
   }
+  for (const v of voices.sort((x, y) => y.score - x.score)) {
+    if (out.has(v.label) || taken.has(v.k.key)) continue;
+    take(v.label, v.k.key, "voice", v.k);
+  }
+
   let next = Math.max(0, ...[...usedKeys, ...knownKeys].map(keyNumber));
   for (const c of clusters) {
     if (out.has(c.label)) continue;
     const live = [...c.liveKeys]
       .filter(([key]) => !taken.has(key) && !knownKeys.has(key))
       .sort((a, b) => b[1] - a[1])[0]?.[0];
-    const key = live ?? `S${++next}`;
-    out.set(c.label, { key, source: live ? "live" : "new" });
-    taken.add(key);
+    if (live) take(c.label, live, "live");
+    else take(c.label, `S${++next}`, "new");
   }
   return out;
 }
@@ -180,9 +186,14 @@ export interface ChainSpeaker extends BlockSpeaker {
 /**
  * Keys of a finished chain that are the same voice: renames (key → key it merges into). Keys
  * merge when their voices are similar, they never speak in the same block (there, the diarizer
- * already told them apart) and they aren't named after different people.
+ * already told them apart) and they aren't named after different people. `heardIn`: the blocks
+ * each key speaks in (from the utterances; voices are only stored for some).
  */
-export function consolidate(speakers: ChainSpeaker[], threshold: number): Map<string, string> {
+export function consolidate(
+  speakers: ChainSpeaker[],
+  threshold: number,
+  heardIn: Map<string, Set<string>> = new Map(),
+): Map<string, string> {
   interface Group {
     keys: Set<string>;
     blocks: Set<string>;
@@ -192,6 +203,7 @@ export function consolidate(speakers: ChainSpeaker[], threshold: number): Map<st
   }
   const groups = new Map<string, Group>();
   for (const s of speakers) {
+    if (s.centroid.length === 0) continue;
     const g = groups.get(s.key);
     const c = Float32Array.from(s.centroid);
     if (!g) {
@@ -212,6 +224,7 @@ export function consolidate(speakers: ChainSpeaker[], threshold: number): Map<st
     g.blocks.add(s.blockId);
     if (s.personId) g.people.add(s.personId);
   }
+  for (const [key, g] of groups) for (const b of heardIn.get(key) ?? []) g.blocks.add(b);
   const keys = [...groups.keys()];
   const pairs: [string, string, number][] = [];
   for (let i = 0; i < keys.length; i++) {
@@ -257,9 +270,12 @@ function mergeProfiles(list: BlockSpeaker[]): BlockSpeaker[] {
       continue;
     }
     const total = cur.seconds + p.seconds || 1;
-    cur.centroid = cur.centroid.map(
-      (v, i) => (v * cur.seconds + (p.centroid[i] ?? 0) * p.seconds) / total,
-    );
+    if (cur.centroid.length === 0) cur.centroid = [...p.centroid];
+    else if (p.centroid.length > 0) {
+      cur.centroid = cur.centroid.map(
+        (v, i) => (v * cur.seconds + (p.centroid[i] ?? 0) * p.seconds) / total,
+      );
+    }
     cur.seconds += p.seconds;
     cur.personId ??= p.personId;
     cur.isSelf ??= p.isSelf;
@@ -310,18 +326,28 @@ async function refineNow(deps: RefineDeps, blockId: string): Promise<RefineResul
   if (block.status === "refined") return result("already refined", false);
   const { diarizer } = deps;
   if (!diarizer) return result("nothing to do (diarizer not built)", false);
-  const markRefined = () =>
-    db.update(schema.blocks).set({ status: "refined" }).where(eq(schema.blocks.id, blockId));
+  await db.update(schema.blocks).set({ status: "refining" }).where(eq(schema.blocks.id, blockId));
+  /**
+   * Refined, unless backlog added speech meanwhile (it sets the block back to closed and queues
+   * another pass). Returns whether it is refined now.
+   */
+  const markRefined = async (tx: Pick<Db, "update"> = db, speakers?: BlockSpeaker[]) =>
+    (
+      await tx
+        .update(schema.blocks)
+        .set({ status: "refined", ...(speakers ? { speakers } : {}) })
+        .where(and(eq(schema.blocks.id, blockId), eq(schema.blocks.status, "refining")))
+        .returning({ id: schema.blocks.id })
+    ).length > 0;
+  const again = "more speech arrived meanwhile; another pass will run";
 
   const live = await db
     .select()
     .from(schema.utterances)
     .where(and(eq(schema.utterances.blockId, blockId), isNull(schema.utterances.supersededAt)));
   if (live.length === 0) {
-    await markRefined();
-    return result("empty", true);
+    return (await markRefined()) ? result("empty", true) : result(again, false);
   }
-  await db.update(schema.blocks).set({ status: "refining" }).where(eq(schema.blocks.id, blockId));
 
   const people = await db
     .select({
@@ -498,9 +524,17 @@ async function refineNow(deps: RefineDeps, blockId: string): Promise<RefineResul
     for (const f of facts) {
       const { key, source, known: was } = keys.get(f.label)!;
       let inherited: { personId: string | null; isSelf: boolean | null } | undefined = was;
-      if (source === "anchor") {
-        const named = ctx.find((c) => c.speakerKey === key && c.personId);
-        if (named) inherited = { personId: named.personId, isSelf: named.isWearer };
+      if (source === "anchor" && !was?.personId) {
+        // No stored name for the key: the name most of its context lines had.
+        const votes = new Map<string, { n: number; isSelf: boolean | null }>();
+        for (const c of ctx) {
+          if (c.speakerKey !== key || !c.personId) continue;
+          const v = votes.get(c.personId) ?? { n: 0, isSelf: c.isWearer };
+          v.n++;
+          votes.set(c.personId, v);
+        }
+        const [top] = [...votes].sort((a, b) => b[1].n - a[1].n);
+        if (top) inherited = { personId: top[0], isSelf: top[1].isSelf };
       }
       let match: { personId: string; isSelf: boolean } | null = null;
       if (f.embedding) {
@@ -519,18 +553,18 @@ async function refineNow(deps: RefineDeps, blockId: string): Promise<RefineResul
         key,
       };
       speakerPerson.set(`${tag}${f.label}`, who);
-      if (f.embedding) {
-        const profile = {
-          key,
-          personId: who.personId,
-          isSelf: who.isSelf,
-          centroid: Array.from(f.embedding),
-          seconds: seconds.get(f.label) ?? 0,
-        };
-        profiles.push(profile);
-        // Later passes of this block (long migrated blocks) match against it too.
-        known.push({ ...profile, centroid: f.embedding });
-      }
+      // Every key is stored (without a voice if there is none), so later blocks don't hand it to
+      // someone else.
+      const profile = {
+        key,
+        personId: who.personId,
+        isSelf: who.isSelf,
+        centroid: f.embedding ? Array.from(f.embedding) : [],
+        seconds: seconds.get(f.label) ?? 0,
+      };
+      profiles.push(profile);
+      // Later passes of this block (long migrated blocks) match against it too.
+      known.push({ ...profile, centroid: f.embedding ?? new Float32Array(0) });
       usedKeys.push(key);
     }
 
@@ -579,13 +613,12 @@ async function refineNow(deps: RefineDeps, blockId: string): Promise<RefineResul
 
   if (replaced.length === 0) {
     // Nothing to re-derive (no stored audio): the live rows are final.
-    await markRefined();
-    return result("no stored audio to refine", true);
+    return (await markRefined()) ? result("no stored audio to refine", true) : result(again, false);
   }
 
   const now = new Date();
   const replacedIds = replaced.map((u) => u.id);
-  await db.transaction(async (tx) => {
+  const refined = await db.transaction(async (tx) => {
     // Rows edited since we read them (e.g. a speaker identified from the timeline): start over, so
     // the edit and the new voiceprint are taken into account.
     const current = await tx
@@ -639,18 +672,16 @@ async function refineNow(deps: RefineDeps, blockId: string): Promise<RefineResul
         }),
       );
     }
-    await tx
-      .update(schema.blocks)
-      .set({ status: "refined", speakers: mergeProfiles(profiles) })
-      .where(eq(schema.blocks.id, blockId));
+    // The rows above are refined either way; the block only if nothing was added meanwhile.
+    const merged = mergeProfiles(profiles);
+    if (await markRefined(tx, merged)) return true;
+    await tx.update(schema.blocks).set({ speakers: merged }).where(eq(schema.blocks.id, blockId));
+    return false;
   });
   const kept = live.length - replaced.length;
   const speakers = new Set([...speakerPerson.values()].map((s) => s.key)).size;
-  return result(
-    `refined: ${replaced.length} live → ${created.length} utterances, ${speakers} speakers${kept ? ` (${kept} kept: no audio)` : ""}`,
-    true,
-    replaced.length,
-  );
+  const done = `refined: ${replaced.length} live → ${created.length} utterances, ${speakers} speakers${kept ? ` (${kept} kept: no audio)` : ""}`;
+  return result(refined ? done : `${done}; ${again}`, refined, replaced.length);
 }
 
 /**
@@ -668,14 +699,32 @@ export async function finishChain(
     .from(schema.conversations)
     .where(eq(schema.conversations.id, chainId));
   if (!conv?.endedAt) return { finished: false, message: "chain still open" };
+  if (conv.status === "refined") return { finished: false, message: "already finished" };
   const chain = await db.select().from(schema.blocks).where(eq(schema.blocks.chainId, chainId));
   if (chain.length === 0 || chain.some((b) => b.status !== "refined")) {
     return { finished: false, message: "blocks still to refine" };
   }
   const ids = chain.map((b) => b.id);
+  const heard = await db
+    .selectDistinct({ blockId: schema.utterances.blockId, key: schema.utterances.speakerKey })
+    .from(schema.utterances)
+    .where(
+      and(
+        inArray(schema.utterances.blockId, ids),
+        isNull(schema.utterances.supersededAt),
+        isNotNull(schema.utterances.speakerKey),
+      ),
+    );
+  const heardIn = new Map<string, Set<string>>();
+  for (const h of heard) {
+    const set = heardIn.get(h.key!) ?? new Set<string>();
+    set.add(h.blockId!);
+    heardIn.set(h.key!, set);
+  }
   const renames = consolidate(
     chain.flatMap((b) => b.speakers.map((s) => ({ ...s, blockId: b.id }))),
     deps.clusterThreshold,
+    heardIn,
   );
   await db.transaction(async (tx) => {
     for (const [from, to] of renames) {

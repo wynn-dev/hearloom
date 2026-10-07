@@ -66,8 +66,8 @@ match wins. Enroll yourself from a few different situations (quiet room, outside
 When a block closes the server queues a job (pg-boss, in Postgres).
 `pnpm --filter @hearloom/server worker` then:
 
-1. Loads the block's audio from the stored Ogg chunks, plus the last 90 s of the previous block of the
-   conversation (if it's refined).
+1. Loads the block's audio from the stored Ogg chunks, plus what the previous (refined) block of the
+   conversation said in the 90 s before it, if that's on the same capture stream.
 2. **Diarizes it offline** with FluidAudio (pyannote-style segmentation + embeddings + VBx clustering,
    Core ML on the Neural Engine) — `sidecars/diarizer`, built with
    `pnpm --filter @hearloom/server build:diarizer`. Offline diarization gives consistent speakers
@@ -75,7 +75,8 @@ When a block closes the server queues a job (pg-boss, in Postgres).
 3. Gives each speaker cluster the conversation's key for that voice (S1, S2, …), so keys stay the same
    across blocks: the previous block's speaker it shares speech with in those 90 s; else a voice the
    conversation's refined blocks already know (cosine ≥ `SPEAKER_CLUSTER_THRESHOLD`); else the live
-   key most of its utterances had; else a new key.
+   key most of its utterances had (if no earlier block uses it); else a new key. Matches are
+   one-to-one: two clusters of one block never share a key.
 4. Names each cluster against enrolled voiceprints (or keeps the name its key already had); a
    confident match on an utterance's own voiceprint wins over the cluster (diarizers can merge similar
    voices).
