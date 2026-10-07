@@ -1,6 +1,6 @@
 import { schema } from "@hearloom/db";
 import { SPEAKER_MODEL_ID } from "@hearloom/inference";
-import { and, avg, count, desc, eq, isNotNull, sum } from "drizzle-orm";
+import { and, avg, count, desc, eq, isNotNull, ne, sum } from "drizzle-orm";
 import { db } from "../db";
 import { commandThreshold, MIN_PRINT_SAMPLES } from "../live/voice/detector";
 
@@ -49,16 +49,29 @@ export async function voiceProfile(userId: string) {
     .from(voiceSamples)
     .where(eq(voiceSamples.userId, userId));
   const recent = await db
-    .select({ score: voiceSamples.speakerScore, nameScore: voiceSamples.nameScore })
+    .select({
+      score: voiceSamples.speakerScore,
+      nameScore: voiceSamples.nameScore,
+      source: voiceSamples.source,
+    })
     .from(voiceSamples)
     .where(eq(voiceSamples.userId, userId))
     .orderBy(desc(voiceSamples.createdAt))
     .limit(50);
-  const scores = recent.flatMap((r) => (r.score === null ? [] : [r.score]));
+  // Same samples as the live pipeline's threshold: taught ones, not vouched-for commands.
+  const scores = recent.flatMap((r) =>
+    r.score === null || r.source === "command" ? [] : [r.score],
+  );
   const [scored] = await db
     .select({ n: count() })
     .from(voiceSamples)
-    .where(and(eq(voiceSamples.userId, userId), isNotNull(voiceSamples.speakerScore)));
+    .where(
+      and(
+        eq(voiceSamples.userId, userId),
+        isNotNull(voiceSamples.speakerScore),
+        ne(voiceSamples.source, "command"),
+      ),
+    );
   const voiceprintCount = prints?.n ?? 0;
   const voiceSeconds = Number(prints?.seconds ?? 0);
   const sampleCount = samples?.n ?? 0;

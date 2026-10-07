@@ -13,8 +13,8 @@ import { enqueueRefine, stopJobs } from "./jobs";
 import { livePipeline } from "./live/host";
 import { stopNotifications } from "./notify/gateway";
 import { attachRealtimeServer, topicFor } from "./realtime";
-import { onDetection } from "./voice/commands";
-import { onTeachHeard } from "./voice/teach";
+import { onDetection, recoverPending } from "./voice/commands";
+import { onTeachHeard, replayTeach } from "./voice/teach";
 
 interface RealtimeSocketData {
   kind: "realtime";
@@ -81,6 +81,15 @@ setFrameListener((meta, frames) => livePipeline.push(meta, frames));
 livePipeline.onVoiceCommand((d) => {
   void onDetection(d).catch((err) => console.error("[voice] command failed", err));
 });
+// A restarted pipeline forgets teaching prompts: without them, read phrases would be commands.
+livePipeline.onReady(replayTeach);
+// Deliveries cut off by the last shutdown.
+void recoverPending()
+  .then(({ retried, expired }) => {
+    if (retried + expired > 0)
+      console.log(`[voice] after restart: ${retried} command(s) retried, ${expired} expired`);
+  })
+  .catch((err) => console.error("[voice] recovering pending commands failed", err));
 livePipeline.onTeachHeard((userId, result) => {
   void onTeachHeard(userId, result).catch((err) => console.error("[voice] teach failed", err));
 });

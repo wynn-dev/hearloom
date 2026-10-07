@@ -4,6 +4,7 @@ CREATE TABLE "voice_commands" (
 	"stream_id" uuid,
 	"spoken_at" timestamp with time zone NOT NULL,
 	"ended_at" timestamp with time zone NOT NULL,
+	"parts" jsonb DEFAULT '[]'::jsonb NOT NULL,
 	"detected_at" timestamp with time zone NOT NULL,
 	"wake_name" text NOT NULL,
 	"heard_as" text NOT NULL,

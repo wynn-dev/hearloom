@@ -1,5 +1,6 @@
 import { contract } from "@hearloom/api";
 import { schema } from "@hearloom/db";
+import { voiceRenameReset } from "@hearloom/shared";
 import { implement, ORPCError } from "@orpc/server";
 import { and, asc, count, desc, eq, gte, isNull, lt, lte, max, or, sql } from "drizzle-orm";
 import { createToken } from "../agent/tokens";
@@ -216,7 +217,7 @@ export const router = authed.router({
             message: "Teach Hearloom your voice first (Voice → Teach your voice)",
           });
       }
-      const next = await updateSettings(userId, input);
+      const next = await updateSettings(userId, voiceRenameReset(await getSettings(userId), input));
       if (input.voice) livePipeline.voiceChanged(userId);
       return next;
     }),
@@ -673,13 +674,12 @@ export const router = authed.router({
     }),
     feedback: authed.voice.feedback.handler(async ({ context, input }) => {
       try {
-        await setFeedback((context as Ctx).userId, input.id, input.feedback);
+        return await setFeedback((context as Ctx).userId, input.id, input.feedback);
       } catch (err) {
         if (err instanceof FeedbackError)
           throw new ORPCError("BAD_REQUEST", { message: err.message });
         throw err;
       }
-      return { ok: true as const };
     }),
     test: authed.voice.test.handler(async ({ context }) => {
       const r = await sendTestCommand((context as Ctx).userId);
@@ -691,8 +691,8 @@ export const router = authed.router({
         await startTeach(userId, session.user.name, input.kind);
         return { ok: true as const };
       }),
-      stop: authed.voice.teach.stop.handler(({ context }) => {
-        stopTeach((context as Ctx).userId);
+      stop: authed.voice.teach.stop.handler(({ context, input }) => {
+        stopTeach((context as Ctx).userId, input.sessionId);
         return { ok: true as const };
       }),
       skip: authed.voice.teach.skip.handler(async ({ context }) => {

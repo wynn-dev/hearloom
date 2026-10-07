@@ -14,8 +14,10 @@ import {
   type DeliveryOutcome,
   deliverWithRetries,
   describeFailure,
+  MAX_AGE_MS,
 } from "./deliver";
 import { selfPersonId } from "./profile";
+import { isTeaching } from "./teach";
 
 const { voiceCommands, voiceSamples, voiceprints, phones } = schema;
 type CommandRow = typeof voiceCommands.$inferSelect;
@@ -61,6 +63,7 @@ export async function onDetection(d: VoiceDetection): Promise<void> {
       streamId: d.streamId,
       spokenAt: new Date(d.spokenAt),
       endedAt: new Date(d.endedAt),
+      parts: d.parts,
       detectedAt: new Date(d.detectedAt),
       wakeName: d.wakeName,
       heardAs: d.heardAs,
@@ -69,8 +72,11 @@ export async function onDetection(d: VoiceDetection): Promise<void> {
       command: d.command,
       lang: d.lang,
       speakerScore: d.speakerScore,
-      status: d.status,
-      reason: d.reason,
+      // Defence in depth: while the user is teaching, the phrases they read must not be sent
+      // (the live pipeline should have taught them instead, but it may have restarted).
+      ...(d.status !== "ignored" && isTeaching(d.userId)
+        ? { status: "ignored" as const, reason: "teaching" }
+        : { status: d.status, reason: d.reason }),
     })
     .onConflictDoNothing()
     .returning();
@@ -165,77 +171,119 @@ export async function listCommands(userId: string, limit: number, before?: Date)
 
 export class FeedbackError extends Error {}
 
+/** Detections that fired (passed the own-voice gate): they can be confirmed or called false. */
+const FIRED = new Set(["sent", "shadow", "failed", "expired"]);
+/**
+ * Ignored detections the user may call "missed". Not `not_own_voice` or `media_voice`: the gate
+ * already heard someone else there, and learning it would enrol their voice and loosen the gate.
+ */
+const MISSABLE = new Set(["near_miss", "no_command", "rate_limited", "no_voiceprint"]);
+
+export interface FeedbackResult {
+  /** Something was learned from it (voice and/or how the name is heard). */
+  learned: boolean;
+  /** Why nothing was learned, for the user. */
+  note: string | null;
+}
+
 /**
  * The user's verdict on a detection. "confirmed" (it was me, and right) and "missed" (it was me:
- * it should have fired) are learned from: the command's audio becomes a voiceprint sample and the
- * way the name was heard an alias. "false_trigger" undoes that and blocks the spelling from loose
- * matching. null clears the verdict.
+ * it should have fired) are learned from: the command's audio becomes a voiceprint, if it still
+ * sounds like the user, and the way the name was heard an alias. "false_trigger" undoes that and
+ * blocks the spelling from loose matching. null clears the verdict. Verdicts on one command are
+ * serialized (row lock), so a quick 👍 then 👎 can't leave the 👍's voiceprint behind.
  */
 export async function setFeedback(
   userId: string,
   id: string,
   feedback: "confirmed" | "false_trigger" | "missed" | null,
-): Promise<void> {
-  const [row] = await db
-    .select()
-    .from(voiceCommands)
-    .where(and(eq(voiceCommands.id, id), eq(voiceCommands.userId, userId)));
-  if (!row) throw new FeedbackError("voice command not found");
-  if (row.status === "test") throw new FeedbackError("test commands can't be rated");
-
-  // Undo what an earlier verdict taught.
-  const learned = await db
-    .delete(voiceSamples)
-    .where(and(eq(voiceSamples.commandId, id), eq(voiceSamples.userId, userId)))
-    .returning({ voiceprintId: voiceSamples.voiceprintId });
-  for (const l of learned) {
-    if (l.voiceprintId)
-      await db
-        .delete(voiceprints)
-        .where(and(eq(voiceprints.id, l.voiceprintId), eq(voiceprints.userId, userId)));
-  }
-  await db.update(voiceCommands).set({ feedback }).where(eq(voiceCommands.id, id));
-
-  const { voice } = await getSettings(userId);
-  const heard = compactName(row.heardAs);
-  if (feedback === "false_trigger") {
-    // A loose match on someone else's word: don't match it loosely again.
-    const isName = voice.names.some((n) => compactName(n) === heard);
-    if (!isName && !voice.blocked.some((b) => compactName(b) === heard)) {
-      await updateSettings(userId, {
-        voice: {
-          blocked: [...voice.blocked, row.heardAs].slice(-20),
-          aliases: voice.aliases.filter((a) => compactName(a) !== heard),
-        },
-      });
+): Promise<FeedbackResult> {
+  const result = await db.transaction(async (tx) => {
+    const [row] = await tx
+      .select()
+      .from(voiceCommands)
+      .where(and(eq(voiceCommands.id, id), eq(voiceCommands.userId, userId)))
+      .for("update");
+    if (!row) throw new FeedbackError("voice command not found");
+    const fired = FIRED.has(row.status);
+    if (feedback === "confirmed" || feedback === "false_trigger") {
+      if (!fired) throw new FeedbackError("only commands that fired can be confirmed or rejected");
+    } else if (feedback === "missed") {
+      if (row.status !== "ignored" || !MISSABLE.has(row.reason ?? ""))
+        throw new FeedbackError(
+          row.reason === "not_own_voice" || row.reason === "media_voice"
+            ? "This didn't sound like you, so it can't be learned from. Teach your voice instead."
+            : "only ignored detections can be marked as missed",
+        );
     }
-  } else if (feedback === "confirmed" || feedback === "missed") {
-    if (aliasWorthLearning(row.heardAs, { ...voice, aliases: voice.aliases }, 2)) {
-      await updateSettings(userId, {
-        voice: {
-          aliases: [...voice.aliases, row.heardAs].slice(-20),
-          blocked: voice.blocked.filter((b) => compactName(b) !== heard),
-        },
-      });
+
+    // Undo what an earlier verdict taught.
+    const undone = await tx
+      .delete(voiceSamples)
+      .where(and(eq(voiceSamples.commandId, id), eq(voiceSamples.userId, userId)))
+      .returning({ voiceprintId: voiceSamples.voiceprintId });
+    for (const u of undone) {
+      if (u.voiceprintId)
+        await tx
+          .delete(voiceprints)
+          .where(and(eq(voiceprints.id, u.voiceprintId), eq(voiceprints.userId, userId)));
     }
+    await tx.update(voiceCommands).set({ feedback }).where(eq(voiceCommands.id, id));
+
+    const { voice } = await getSettings(userId);
+    const heard = compactName(row.heardAs);
+    if (feedback === "false_trigger") {
+      // A loose match on someone else's word: don't match it loosely again.
+      const isName = voice.names.some((n) => compactName(n) === heard);
+      if (!isName && !voice.blocked.some((b) => compactName(b) === heard)) {
+        await updateSettings(userId, {
+          voice: {
+            blocked: [...voice.blocked, row.heardAs].slice(-20),
+            aliases: voice.aliases.filter((a) => compactName(a) !== heard),
+          },
+        });
+      }
+      return { learned: false, note: null };
+    }
+    if (feedback === null) return { learned: false, note: null };
+
+    // Learn the voice from the command's own utterances (not what was said between them),
+    // checked against the user's voice in the live pipeline.
     let voiceprintId: string | null = null;
-    let seconds = (row.endedAt.getTime() - row.spokenAt.getTime()) / 1000;
+    let seconds = 0;
+    let note: string | null = null;
     const personId = await selfPersonId(userId);
+    const ranges = row.parts?.length
+      ? row.parts
+      : [{ startAt: row.spokenAt.getTime(), endAt: row.endedAt.getTime() }];
     if (personId && row.streamId) {
       try {
         ({ voiceprintId, seconds } = await livePipeline.learnVoice(
           userId,
           personId,
           row.streamId,
-          row.spokenAt.getTime(),
-          row.endedAt.getTime(),
+          ranges,
         ));
       } catch (err) {
-        // Too short, or the audio is gone: the alias is still learned.
-        console.warn(`[voice] learning from command ${id}: ${err}`);
+        note = err instanceof Error ? err.message : String(err);
       }
+    } else {
+      note = "no audio to learn from";
     }
-    await db.insert(voiceSamples).values({
+    // The name: a fired command was already verified as the user's voice; a missed one only if
+    // its voice was just verified.
+    let aliasLearned = false;
+    if ((fired || voiceprintId) && aliasWorthLearning(row.heardAs, voice, 2)) {
+      await updateSettings(userId, {
+        voice: {
+          aliases: [...voice.aliases, row.heardAs].slice(-20),
+          blocked: voice.blocked.filter((b) => compactName(b) !== heard),
+        },
+      });
+      aliasLearned = true;
+    }
+    if (!voiceprintId && !aliasLearned) return { learned: false, note };
+    await tx.insert(voiceSamples).values({
       userId,
       source: "command",
       text: row.transcript,
@@ -246,7 +294,31 @@ export async function setFeedback(
       voiceprintId,
       commandId: id,
     });
-  }
+    return { learned: true, note: voiceprintId ? null : note };
+  });
   livePipeline.voiceChanged(userId);
   invalidate(userId, ["voice", "people"]);
+  return result;
+}
+
+/**
+ * At startup: deliveries in flight when the server stopped are lost. Retry the ones still fresh
+ * enough (same id, so the agent dedupes); expire the rest.
+ */
+export async function recoverPending(): Promise<{ retried: number; expired: number }> {
+  const stale = await db
+    .update(voiceCommands)
+    .set({ status: "expired", reason: "restart" })
+    .where(
+      and(
+        eq(voiceCommands.status, "pending"),
+        lt(voiceCommands.spokenAt, new Date(Date.now() - MAX_AGE_MS)),
+      ),
+    )
+    .returning({ userId: voiceCommands.userId });
+  for (const r of stale) invalidate(r.userId, ["voice"]);
+  const fresh = await db.select().from(voiceCommands).where(eq(voiceCommands.status, "pending"));
+  for (const row of fresh)
+    void deliver(row).catch((err) => console.error("[voice] redelivery failed", err));
+  return { retried: fresh.length, expired: stale.length };
 }

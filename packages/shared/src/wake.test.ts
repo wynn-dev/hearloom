@@ -18,7 +18,6 @@ describe("matchWake", () => {
     ["Hey Hermes, remind me to call mom at six.", "Hermes", "remind me to call mom at six."],
     ["hey hermès what's the weather", "hermès", "what's the weather"],
     ["Hé Hermes, hoe laat is het?", "Hermes", "hoe laat is het?"],
-    ["Hey her mess, turn on the lights", "her mess", "turn on the lights"],
     ["OK Hermes: set a timer", "Hermes", "set a timer"],
     ["Um, hey Hermes, what time is it", "Hermes", "what time is it"],
     ["Hey Hermis, what's up", "Hermis", "what's up"],
@@ -57,7 +56,35 @@ describe("matchWake", () => {
     expect(matchWake("hey hermes x", cfg)?.score).toBe(1);
     expect(matchWake("hey hermis x", cfg)?.score).toBe(0.9);
     expect(matchWake("hey air mess x", { ...cfg, aliases: ["air mess"] })?.score).toBe(1);
-    expect(matchWake("hey her mess x", cfg)?.score).toBeGreaterThanOrEqual(0.85);
+    expect(matchWake("hey hurmass x", cfg)?.score).toBe(0.85);
+    // Same key, but too much longer than the name.
+    expect(matchWake("hey hairmesses x", cfg)).toBeNull();
+  });
+
+  test("split names only match as a learned alias", () => {
+    expect(matchWake("Hey her mess, turn on the lights", cfg)).toBeNull();
+    const learned = { ...cfg, aliases: ["her mess"] };
+    expect(matchWake("Hey her mess, turn on the lights", learned)).toMatchObject({
+      heardAs: "her mess",
+      command: "turn on the lights",
+      score: 1,
+    });
+    // Not across punctuation, even as an alias.
+    expect(matchWake("Hey her, mess everything up", learned)).toBeNull();
+  });
+
+  // Everyday speech whose consonants spell HRMS (review of #30): must never fire.
+  test.each([
+    "Okay, her mom's coming over tonight.",
+    "Oh hi, Harry Moss is here.",
+    "Hey, hurry, miss, the bus is leaving",
+    "Hey, her moms are at the door.",
+    "Hey, harm us and you'll regret it",
+    "Hi her mess is everywhere",
+    "Hey Hermione, come here",
+    "OK, hers is the red one",
+  ])("everyday speech: %s", (text) => {
+    expect(matchWake(text, cfg)).toBeNull();
   });
 
   test("blocked spellings are not fuzzy-matched", () => {

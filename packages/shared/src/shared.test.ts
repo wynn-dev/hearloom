@@ -6,6 +6,7 @@ import {
   resolveSettings,
   settingsPatchSchema,
   settingsSchema,
+  voiceRenameReset,
 } from "./settings";
 
 const frame = (seq: number, at: number) => ({ seq, at, data: new Uint8Array([0xb8, 1, 2]) });
@@ -89,4 +90,18 @@ test("a whsec_ webhook secret must be base64", () => {
   expect(ok("")).toBe(true);
   expect(ok("whsec_")).toBe(false);
   expect(ok("whsec_not base64!")).toBe(false);
+});
+
+test("renaming the agent clears learned spellings", () => {
+  const current = mergeSettings(resolveSettings({}), {
+    voice: { names: ["Hermes"], aliases: ["her mess"], blocked: ["herpes"] },
+  });
+  expect(voiceRenameReset(current, { voice: { names: ["Jarvis"] } })).toEqual({
+    voice: { names: ["Jarvis"], aliases: [], blocked: [] },
+  });
+  // Same name (case/accents aside), or no rename: untouched.
+  expect(voiceRenameReset(current, { voice: { names: ["hermès"] } })).toEqual({
+    voice: { names: ["hermès"] },
+  });
+  expect(voiceRenameReset(current, { voice: { mode: "on" } })).toEqual({ voice: { mode: "on" } });
 });

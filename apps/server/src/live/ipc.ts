@@ -20,8 +20,8 @@ export type HostMessage =
       userId: string;
       personId: string;
       streamId: string;
-      from: number;
-      to: number;
+      /** The command's utterances (not the gaps between them). */
+      ranges: { startAt: number; endAt: number }[];
     };
 
 export type ChildMessage =

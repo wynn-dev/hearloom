@@ -1,5 +1,10 @@
 import { alignTeach, matchWake, nearWake, textSimilarity } from "@hearloom/shared";
-import { type AssembledCommand, CommandAssembler, type HeardUtterance } from "./assembler";
+import {
+  type AssembledCommand,
+  CommandAssembler,
+  DEFAULT_LIMITS,
+  type HeardUtterance,
+} from "./assembler";
 import type { IgnoreReason, TeachPrompt, TeachResult, VoiceConfig, VoiceDetection } from "./types";
 
 /** Default own-voice threshold before the user's samples say otherwise. */
@@ -58,6 +63,42 @@ const MAX_PER_HOUR = 30;
 /** The same speech captured by two streams: start within this, text this similar. */
 const DUPLICATE_MS = 1_500;
 const DUPLICATE_SIMILARITY = 0.8;
+/** Transcripts sent to the agent are capped (the command itself at 500 by the assembler). */
+export const MAX_TRANSCRIPT_CHARS = 1_000;
+/** A teaching sample must be at least this close to the user's voice (once there is one). */
+export const TEACH_MIN_SELF = 0.45;
+/** Before the user has a voiceprint: a sample this close to someone else's is theirs, not the user's. */
+const TEACH_OTHER_MATCH = 0.6;
+
+/**
+ * May a teaching sample with this voice score be learned as the user's voice? Null if so, else why
+ * not. Teaching must not enrol whoever happens to be talking while the Voice page is open.
+ */
+export function teachVoiceVerdict(score: VoiceScore | null): string | null {
+  if (!score) return "Too short to check it's your voice — say the whole phrase.";
+  if (score.self === null) {
+    return score.other >= TEACH_OTHER_MATCH
+      ? "That sounded like someone else you've named, not you — not learned."
+      : null;
+  }
+  if (score.self < TEACH_MIN_SELF || score.other > score.self)
+    return "That didn't sound like you — not learned.";
+  return null;
+}
+
+/** Audio of the parts only (not the silence or other speech between a wake word and command). */
+function partsAudio(source: AudioSource | null, parts: HeardUtterance[]): Float32Array | null {
+  if (!source) return null;
+  const pieces = parts.flatMap((p) => source.audio(p.startAt, p.endAt) ?? []);
+  if (pieces.length === 0) return null;
+  const out = new Float32Array(pieces.reduce((n, p) => n + p.length, 0));
+  let o = 0;
+  for (const p of pieces) {
+    out.set(p, o);
+    o += p.length;
+  }
+  return out;
+}
 
 interface UserState {
   assembler: CommandAssembler;
@@ -66,6 +107,9 @@ interface UserState {
   /** Accepted (sent or shadow) commands, newest last, for dedupe and rate limits. */
   recent: { spokenAt: number; acceptedAt: number; command: string }[];
 }
+
+/** Forget idle users after this long (their processors are gone too). */
+const USER_IDLE_MS = 3600_000;
 
 /**
  * Voice commands and voice teaching in the live pipeline: fed every fresh, final utterance; finds
@@ -93,6 +137,22 @@ export class VoiceDetector {
 
   setTeach(userId: string, prompt: TeachPrompt | null): void {
     this.user(userId).teach = prompt;
+  }
+
+  /** A stream processor was disposed: drop references to its audio, and users with nothing going on. */
+  dropSource(streamId: string): void {
+    const now = this.now();
+    for (const [userId, s] of this.users) {
+      if (s.source?.streamId === streamId) s.source = null;
+      s.recent = s.recent.filter((r) => now - r.acceptedAt < USER_IDLE_MS);
+      if (!s.source && !s.teach && !s.assembler.busy && s.recent.length === 0)
+        this.users.delete(userId);
+    }
+  }
+
+  /** Users with state (tests). */
+  get userCount(): number {
+    return this.users.size;
   }
 
   /**
@@ -157,8 +217,8 @@ export class VoiceDetector {
     c: AssembledCommand,
   ): Promise<void> {
     const now = this.now();
-    // Own voice, over the whole span (a short "Hey Hermes" has no embedding of its own).
-    const audio = s.source?.audio(c.spokenAt, c.endedAt) ?? null;
+    // Own voice, over all parts together (a short "Hey Hermes" has no embedding of its own).
+    const audio = partsAudio(s.source, c.parts);
     let score: VoiceScore | null = null;
     if (audio && audio.length >= MIN_VERIFY_SAMPLES) score = await this.deps.score(userId, audio);
     if (!score || score.self === null) {
@@ -233,12 +293,13 @@ export class VoiceDetector {
       chainId: first.chainId,
       spokenAt: c.spokenAt,
       endedAt: c.endedAt,
+      parts: c.parts.map((p) => ({ startAt: p.startAt, endAt: p.endAt })),
       detectedAt: this.now(),
       wakeName: c.wake.name,
       heardAs: c.wake.heardAs,
       nameScore: c.wake.score,
-      transcript: c.transcript,
-      command: c.command,
+      transcript: c.transcript.slice(0, MAX_TRANSCRIPT_CHARS),
+      command: c.command.slice(0, DEFAULT_LIMITS.maxChars),
       lang: first.lang,
       speakerScore,
       status,
@@ -257,14 +318,20 @@ export class VoiceDetector {
     const cfg = await this.deps.config(userId);
     const align = alignTeach(text, prompt.phrase, cfg.wake);
     const wake = matchWake(text, cfg.wake);
-    const ok = prompt.kind === "test" ? wake !== null : align.ok;
+    let ok = prompt.kind === "test" ? wake !== null : align.ok;
     let speakerScore: number | null = null;
     let voiceprintId: string | null = null;
+    let error: string | undefined;
     const seconds = (audio?.length ?? 0) / 16_000;
-    if (ok && audio && audio.length >= MIN_VERIFY_SAMPLES) {
-      const score = await this.deps.score(userId, audio);
+    if (ok) {
+      const score =
+        audio && audio.length >= MIN_VERIFY_SAMPLES ? await this.deps.score(userId, audio) : null;
       speakerScore = score?.self ?? null;
-      if (prompt.kind === "sample" && audio.length >= MIN_PRINT_SAMPLES) {
+      const refused = prompt.kind === "sample" ? teachVoiceVerdict(score) : null;
+      if (refused) {
+        ok = false;
+        error = refused;
+      } else if (prompt.kind === "sample" && audio && audio.length >= MIN_PRINT_SAMPLES) {
         try {
           voiceprintId = await this.deps.learn(userId, prompt.personId, audio);
         } catch (err) {
@@ -287,6 +354,7 @@ export class VoiceDetector {
       seconds,
       voiceprintId,
       wouldTrigger: wake !== null && speakerScore !== null && speakerScore >= cfg.minScore,
+      ...(error ? { error } : {}),
     });
   }
 }

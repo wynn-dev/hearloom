@@ -2,13 +2,13 @@ import type { Db } from "@hearloom/db";
 import { schema } from "@hearloom/db";
 import { SPEAKER_MODEL_ID, type SpeakerEmbedder, toFloat32 } from "@hearloom/inference";
 import { resolveSettings, wakeTerms } from "@hearloom/shared";
-import { and, desc, eq, isNotNull } from "drizzle-orm";
+import { and, desc, eq, isNotNull, ne } from "drizzle-orm";
 import { loadStreamAudio } from "../../audio/load";
 import { mediaVoices } from "../../episodes/store";
 import type { ChildMessage, HostMessage } from "../ipc";
 import type { SpeakerDirectory } from "../speakers";
 import { throughPendantCodec, transcribeClip } from "./clip";
-import { commandThreshold, VoiceDetector } from "./detector";
+import { commandThreshold, teachVoiceVerdict, VoiceDetector } from "./detector";
 import type { VoiceConfig } from "./types";
 
 /** Reload a user's voice settings at least this often (changes also reload them at once). */
@@ -74,7 +74,9 @@ export class VoiceRuntime {
     const scores = await db
       .select({ score: s.speakerScore })
       .from(s)
-      .where(and(eq(s.userId, userId), isNotNull(s.speakerScore)))
+      // Taught samples only: a command's score is what the gate measured, and a vouched-for one
+      // must not pull the threshold down.
+      .where(and(eq(s.userId, userId), isNotNull(s.speakerScore), ne(s.source, "command")))
       .orderBy(desc(s.createdAt))
       .limit(50);
     return {
@@ -173,8 +175,23 @@ export class VoiceRuntime {
   private async learnSpan(
     msg: Extract<HostMessage, { t: "learn_voice" }>,
   ): Promise<{ voiceprintId: string; seconds: number }> {
-    const audio = await loadStreamAudio(this.deps.db, msg.streamId, msg.from, msg.to);
-    if (!audio || audio.length < 16_000) throw new Error("need at least 1 s of stored audio");
+    const pieces: Float32Array[] = [];
+    for (const r of msg.ranges) {
+      const a = await loadStreamAudio(this.deps.db, msg.streamId, r.startAt, r.endAt);
+      if (a) pieces.push(a);
+    }
+    const audio = new Float32Array(pieces.reduce((n, p) => n + p.length, 0));
+    let o = 0;
+    for (const p of pieces) {
+      audio.set(p, o);
+      o += p.length;
+    }
+    if (audio.length < 16_000) throw new Error("need at least 1 s of stored audio");
+    const { embedder, speakers } = this.deps;
+    if (!embedder || !speakers) throw new Error("speaker model not installed");
+    // The user vouched for it, but it must still sound like them (not a partner, not the TV).
+    const refused = teachVoiceVerdict(await speakers.compare(msg.userId, embedder.embed(audio)));
+    if (refused) throw new Error(refused);
     const voiceprintId = await this.learn(msg.userId, msg.personId, audio);
     return { voiceprintId, seconds: audio.length / 16000 };
   }

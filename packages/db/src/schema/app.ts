@@ -459,6 +459,8 @@ export const voiceCommands = pgTable(
     spokenAt: ts().notNull(),
     /** End of the last part of the command. */
     endedAt: ts().notNull(),
+    /** Each utterance's span (a wake word and its command can be seconds apart). */
+    parts: jsonb().$type<{ startAt: number; endAt: number }[]>().notNull().default([]),
     /** The command was complete and had passed the checks. */
     detectedAt: ts().notNull(),
     wakeName: text().notNull(),

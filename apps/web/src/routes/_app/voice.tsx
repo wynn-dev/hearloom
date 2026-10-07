@@ -29,7 +29,7 @@ import { useToast } from "../../components/ui/toast";
 import { cn } from "../../lib/cn";
 import { useTimeZone } from "../../lib/me";
 import { pcmToBase64, type Recording, startRecording } from "../../lib/mic";
-import { errorMessage, orpc } from "../../lib/orpc";
+import { client, errorMessage, orpc } from "../../lib/orpc";
 import { formatTime, useNow } from "../../lib/time";
 
 export const Route = createFileRoute("/_app/voice")({
@@ -218,7 +218,7 @@ function NamesRow({ voice }: { voice: VoiceSettings }) {
     <SettingRow
       title="Agent name"
       htmlFor={id}
-      description="What you call it after “hey”. Up to 3, comma separated. Changing it? Teach a few phrases again."
+      description="What you call it after “hey”. Up to 3, comma separated. Changing it clears the learned spellings: teach a few phrases again."
     >
       <form
         className="flex items-center gap-2"
@@ -525,6 +525,43 @@ function TeachCard({ voice, status }: { voice: VoiceSettings; status: VoiceStatu
 /** Phrases per round of the progress dots. */
 const PROGRESS_DOTS = [0, 1, 2, 3, 4, 5, 6, 7];
 
+/** Unmount stops wait this long, so a remount (React StrictMode in dev) can call them off. */
+const STOP_DELAY_MS = 300;
+const pendingStops = new Map<string, ReturnType<typeof setTimeout>>();
+
+/**
+ * While teaching, the user's wake phrases are taught instead of sent: end the session when the
+ * page goes away (navigation, tab hidden or closed) rather than leaving it to time out.
+ */
+function useStopTeachingWhenGone(sessionId: string) {
+  const queryClient = useQueryClient();
+  useEffect(() => {
+    clearTimeout(pendingStops.get(sessionId));
+    pendingStops.delete(sessionId);
+    const stop = () =>
+      void client.voice.teach
+        .stop({ sessionId })
+        .then(() => queryClient.invalidateQueries({ queryKey: orpc.voice.key() }))
+        .catch(() => {});
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") stop();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("pagehide", stop);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("pagehide", stop);
+      pendingStops.set(
+        sessionId,
+        setTimeout(() => {
+          pendingStops.delete(sessionId);
+          stop();
+        }, STOP_DELAY_MS),
+      );
+    };
+  }, [sessionId, queryClient]);
+}
+
 function TeachSession({
   teach,
   status,
@@ -543,6 +580,7 @@ function TeachSession({
   );
   const [useBrowser, setUseBrowser] = useState(!status.pendantLive);
   const sample = teach.kind === "sample";
+  useStopTeachingWhenGone(teach.sessionId);
   const last = teach.results[0];
   // Flash the latest result briefly when it arrives.
   const [fresh, setFresh] = useState(false);
@@ -654,7 +692,9 @@ function TeachResultRow({ r }: { r: TeachResultItem }) {
           : { tone: "bad" as const, label: "Wouldn't trigger" }
       : r.ok
         ? { tone: "good" as const, label: "Learned" }
-        : { tone: "warn" as const, label: "Didn't match — try again" };
+        : r.error
+          ? { tone: "bad" as const, label: "Not learned" }
+          : { tone: "warn" as const, label: "Didn't match — try again" };
   return (
     <li className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-[13px]">
       <Badge tone={verdict.tone} dot>
@@ -766,6 +806,8 @@ const REASON: Record<string, string> = {
   rate_limited: "too many",
   no_command: "nothing followed",
   near_miss: "name not recognized",
+  teaching: "while teaching",
+  restart: "server restarted",
   no_webhook: "no webhook",
   route_ignored: "route ignores voice.command",
   too_old: "too old",
@@ -827,20 +869,32 @@ function CommandsCard() {
   );
 }
 
+/** Ignored detections that can be marked as missed (the server enforces the same). */
+const MISSABLE = new Set(["near_miss", "no_command", "rate_limited", "no_voiceprint"]);
+
 function CommandRow({ c, tz, now }: { c: VoiceCommand; tz: string; now: number }) {
   const queryClient = useQueryClient();
   const toast = useToast();
   const feedback = useMutation(
     orpc.voice.feedback.mutationOptions({
-      onSuccess: () => {
+      onSuccess: (r, input) => {
         void queryClient.invalidateQueries({ queryKey: orpc.voice.key() });
         void queryClient.invalidateQueries({ queryKey: orpc.settings.key() });
+        if (input.feedback === "confirmed" || input.feedback === "missed")
+          toast(
+            r.learned
+              ? { tone: "good", title: "Learned from it", description: r.note ?? undefined }
+              : { tone: "info", title: "Saved, nothing learned", description: r.note ?? undefined },
+          );
       },
       onError: (err) =>
         toast({ tone: "bad", title: "Couldn't save", description: errorMessage(err) }),
     }),
   );
   const s = STATUS[c.status];
+  const busy = feedback.isPending;
+  // Missed only where the gate didn't hear someone else (see setFeedback on the server).
+  const missable = c.status === "ignored" && MISSABLE.has(c.reason ?? "");
   const set = (f: VoiceCommand["feedback"]) =>
     feedback.mutate({ id: c.id, feedback: c.feedback === f ? null : f });
   const fired =
@@ -876,26 +930,29 @@ function CommandRow({ c, tz, now }: { c: VoiceCommand; tz: string; now: number }
         {c.status === "test" ? null : fired ? (
           <span className="inline-flex gap-1">
             <FeedbackButton
+              disabled={busy}
               active={c.feedback === "confirmed"}
               onClick={() => set("confirmed")}
               label="It was me: learn from it"
               icon={<ThumbsUp aria-hidden />}
             />
             <FeedbackButton
+              disabled={busy}
               active={c.feedback === "false_trigger"}
               onClick={() => set("false_trigger")}
               label="Wasn't me / false trigger"
               icon={<ThumbsDown aria-hidden />}
             />
           </span>
-        ) : (
+        ) : missable ? (
           <FeedbackButton
+            disabled={busy}
             active={c.feedback === "missed"}
             onClick={() => set("missed")}
             label="Missed: it was me, it should have fired"
             icon={<span className="text-xs">Missed</span>}
           />
-        )}
+        ) : null}
       </td>
     </tr>
   );
@@ -903,11 +960,13 @@ function CommandRow({ c, tz, now }: { c: VoiceCommand; tz: string; now: number }
 
 function FeedbackButton({
   active,
+  disabled,
   onClick,
   label,
   icon,
 }: {
   active: boolean;
+  disabled?: boolean;
   onClick: () => void;
   label: string;
   icon: ReactNode;
@@ -916,6 +975,7 @@ function FeedbackButton({
     <Button
       size="sm"
       variant={active ? "primary" : "ghost"}
+      disabled={disabled}
       onClick={onClick}
       title={label}
       aria-label={label}

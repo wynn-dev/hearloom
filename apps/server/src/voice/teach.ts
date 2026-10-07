@@ -10,28 +10,54 @@ import { ensureSelfPerson } from "./profile";
 
 const { voiceSamples } = schema;
 
-/** A teaching session ends after this long without a sample (the page was left open). */
-const IDLE_MS = 5 * 60_000;
+/**
+ * A teaching session ends after this long without progress (a matching sample, or the user acting
+ * on the page): speech that doesn't match the prompt doesn't keep it alive, since while it runs
+ * the user's wake phrases are taught, not sent.
+ */
+export const IDLE_MS = 5 * 60_000;
+/** …and after this long in any case. */
+export const MAX_SESSION_MS = 20 * 60_000;
 /** Results shown on the page. */
 const KEEP_RESULTS = 12;
+/** Browser uploads: one at a time (each is transcribed and embedded), at most so many per window. */
+const UPLOAD_TIMEOUT_MS = 30_000;
+const MAX_UPLOADS = 20;
+const UPLOAD_WINDOW_MS = 10 * 60_000;
 
 interface Session {
   prompt: TeachPrompt;
   /** Samples taken in this session. */
   taken: number;
   results: TeachResult[];
-  touchedAt: number;
-  timer: ReturnType<typeof setTimeout>;
+  idle: ReturnType<typeof setTimeout>;
+  idleAt: number;
+  hardStop: ReturnType<typeof setTimeout>;
+  hardStopAt: number;
+  /** A browser upload is being processed since (ms). */
+  uploadingSince: number | null;
+  uploads: number[];
 }
 
 const sessions = new Map<string, Session>();
 
 export class TeachError extends Error {}
 
+/** Progress: restart the idle timer. */
 function touch(userId: string, s: Session): void {
-  clearTimeout(s.timer);
-  s.touchedAt = Date.now();
-  s.timer = setTimeout(() => stopTeach(userId), IDLE_MS);
+  clearTimeout(s.idle);
+  s.idleAt = Date.now() + IDLE_MS;
+  s.idle = setTimeout(() => stopTeach(userId, s.prompt.sessionId), IDLE_MS);
+}
+
+/** Is the user teaching (their wake phrases must not be sent)? */
+export function isTeaching(userId: string): boolean {
+  return sessions.has(userId);
+}
+
+/** The live pipeline restarted: it forgot the prompts, so send them again. */
+export function replayTeach(): void {
+  for (const [userId, s] of sessions) livePipeline.teach(userId, s.prompt);
 }
 
 async function promptFor(
@@ -69,19 +95,34 @@ export async function startTeach(
 ): Promise<void> {
   const personId = await ensureSelfPerson(userId, userName);
   const old = sessions.get(userId);
-  if (old) clearTimeout(old.timer);
+  if (old) {
+    clearTimeout(old.idle);
+    clearTimeout(old.hardStop);
+  }
   const prompt = await promptFor(userId, kind, crypto.randomUUID(), personId);
-  const s: Session = { prompt, taken: 0, results: [], touchedAt: Date.now(), timer: 0 as never };
+  const s: Session = {
+    prompt,
+    taken: 0,
+    results: [],
+    idle: 0 as never,
+    idleAt: 0,
+    hardStop: setTimeout(() => stopTeach(userId, prompt.sessionId), MAX_SESSION_MS),
+    hardStopAt: Date.now() + MAX_SESSION_MS,
+    uploadingSince: null,
+    uploads: [],
+  };
   sessions.set(userId, s);
   touch(userId, s);
   livePipeline.teach(userId, prompt);
   invalidate(userId, ["voice", "people"]);
 }
 
-export function stopTeach(userId: string): void {
+/** Stop teaching (only that session, if given: a late stop must not end a newer one). */
+export function stopTeach(userId: string, sessionId?: string): void {
   const s = sessions.get(userId);
-  if (!s) return;
-  clearTimeout(s.timer);
+  if (!s || (sessionId && s.prompt.sessionId !== sessionId)) return;
+  clearTimeout(s.idle);
+  clearTimeout(s.hardStop);
   sessions.delete(userId);
   livePipeline.teach(userId, null);
   invalidate(userId, ["voice"]);
@@ -112,6 +153,8 @@ export function teachState(userId: string) {
     phrase: s.prompt.phrase,
     taken: s.taken,
     results: s.results,
+    /** When it ends unless there's progress (ms). */
+    expiresAt: Math.min(s.idleAt, s.hardStopAt),
   };
 }
 
@@ -121,6 +164,16 @@ export function uploadSample(userId: string, sessionId: string, pcm: Int16Array)
   if (!s || s.prompt.sessionId !== sessionId) throw new TeachError("this teaching session ended");
   if (pcm.length < 8_000) throw new TeachError("the recording is too short");
   if (pcm.length > 16_000 * 15) throw new TeachError("the recording is too long (max 15 s)");
+  const now = Date.now();
+  if (s.uploadingSince !== null && now - s.uploadingSince < UPLOAD_TIMEOUT_MS)
+    throw new TeachError("still listening to the last recording");
+  s.uploads = s.uploads.filter((t) => now - t < UPLOAD_WINDOW_MS);
+  if (s.uploads.length >= MAX_UPLOADS)
+    throw new TeachError(
+      "that's a lot of recordings — take a break and try again in a few minutes",
+    );
+  s.uploads.push(now);
+  s.uploadingSince = now;
   touch(userId, s);
   if (!livePipeline.teachAudio(userId, s.prompt, pcm))
     throw new TeachError("the live pipeline is not running");
@@ -131,7 +184,9 @@ export async function onTeachHeard(userId: string, r: TeachResult): Promise<void
   const s = sessions.get(userId);
   if (!s || s.prompt.sessionId !== r.sessionId) return;
   s.results = [r, ...s.results].slice(0, KEEP_RESULTS);
-  touch(userId, s);
+  if (r.source === "browser") s.uploadingSince = null;
+  // Only progress keeps the session alive (not the TV, not other people).
+  if (r.ok || r.source === "browser") touch(userId, s);
   if (r.kind === "sample" && r.ok && r.index === s.prompt.index) {
     await db.insert(voiceSamples).values({
       userId,
@@ -174,6 +229,9 @@ async function learnAlias(userId: string, heardAs: string | null): Promise<void>
 
 /** Tests: forget all sessions. */
 export function resetTeach(): void {
-  for (const s of sessions.values()) clearTimeout(s.timer);
+  for (const s of sessions.values()) {
+    clearTimeout(s.idle);
+    clearTimeout(s.hardStop);
+  }
   sessions.clear();
 }

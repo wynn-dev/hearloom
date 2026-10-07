@@ -24,6 +24,7 @@ export class LivePipelineHost {
   private readonly onBlock = new Set<BlockClosedHandler>();
   private readonly onVoice = new Set<VoiceCommandHandler>();
   private readonly onTeach = new Set<TeachHeardHandler>();
+  private readonly onReadyFns = new Set<() => void>();
   private pending = new Map<
     string,
     { resolve: (value: never) => void; reject: (e: Error) => void }
@@ -45,6 +46,14 @@ export class LivePipelineHost {
   /** A wake phrase was heard (deliverable, shadow, or ignored with a reason). */
   onVoiceCommand(fn: VoiceCommandHandler): void {
     this.onVoice.add(fn);
+  }
+
+  /**
+   * The child is (re)started and ready: state it keeps only in memory (teaching prompts) must be
+   * sent again.
+   */
+  onReady(fn: () => void): void {
+    this.onReadyFns.add(fn);
   }
 
   /** The user said something while teaching their voice. */
@@ -83,8 +92,7 @@ export class LivePipelineHost {
     userId: string,
     personId: string,
     streamId: string,
-    from: number,
-    to: number,
+    ranges: { startAt: number; endAt: number }[],
   ): Promise<{ voiceprintId: string; seconds: number }> {
     return this.request((requestId) => ({
       t: "learn_voice",
@@ -92,8 +100,7 @@ export class LivePipelineHost {
       userId,
       personId,
       streamId,
-      from,
-      to,
+      ranges,
     }));
   }
 
@@ -198,6 +205,7 @@ export class LivePipelineHost {
     switch (msg.t) {
       case "ready":
         this.ready = true;
+        for (const fn of this.onReadyFns) fn();
         return;
       case "log":
         console.log(`[live] ${msg.message}`);

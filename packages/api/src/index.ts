@@ -221,6 +221,7 @@ export const voiceStatusSchema = z.object({
       phrase: z.string(),
       taken: z.number(),
       results: z.array(teachResultSchema),
+      expiresAt: z.number(),
     })
     .nullable(),
   /** A pendant is streaming right now (teach through it). */
@@ -359,7 +360,7 @@ export const contract = {
           feedback: voiceCommandSchema.shape.feedback,
         }),
       )
-      .output(ok),
+      .output(z.object({ learned: z.boolean(), note: z.string().nullable() })),
     /** Send a signed `voice.command` with `test: true` to the agent webhook. */
     test: oc.output(
       z.object({
@@ -371,7 +372,8 @@ export const contract = {
     teach: {
       /** sample = learn from each phrase; test = say the wake phrase, see if it would fire. */
       start: oc.input(z.object({ kind: z.enum(["sample", "test"]) })).output(ok),
-      stop: oc.output(ok),
+      /** With `sessionId`, only that session (the page that started it went away). */
+      stop: oc.input(z.object({ sessionId: z.string().optional() })).output(ok),
       skip: oc.output(ok),
       /** A phrase recorded with the browser mic: base64 of 16 kHz mono PCM16 (little endian). */
       upload: oc

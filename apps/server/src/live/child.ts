@@ -188,6 +188,7 @@ setInterval(() => {
     void p.tick(now);
     if (now - p.lastActivity > 10 * 60_000) {
       processors.delete(id);
+      voice.detector.dropSource(id);
       void p.dispose();
     }
   }

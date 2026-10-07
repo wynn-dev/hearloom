@@ -171,6 +171,29 @@ function upgrade(stored: unknown): unknown {
   return { ...s, button, notifications };
 }
 
+/**
+ * Learned spellings belong to the agent's name: when a patch renames it, the aliases and blocked
+ * spellings start over (unless the patch sets them too).
+ */
+export function voiceRenameReset(current: Settings, patch: SettingsPatch): SettingsPatch {
+  const next = patch.voice?.names?.[0];
+  const key = (s: string) =>
+    s
+      .normalize("NFKD")
+      .replace(/\p{M}/gu, "")
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}]/gu, "");
+  if (next === undefined || key(next) === key(current.voice.names[0] ?? "")) return patch;
+  return {
+    ...patch,
+    voice: {
+      ...patch.voice,
+      aliases: patch.voice?.aliases ?? [],
+      blocked: patch.voice?.blocked ?? [],
+    },
+  };
+}
+
 export function mergeSettings(current: Settings, patch: SettingsPatch): Settings {
   return settingsSchema.parse({
     ...current,

@@ -49,10 +49,16 @@ pendant ─▶ phone ─▶ server ─▶ live pipeline child                   
     - an exact match on a configured name or a learned alias scores 1.0;
     - a close spelling (Damerau-Levenshtein distance ≤ max(1, ⌊len/5⌋), for names of 4 letters
       or more) scores 0.9;
-    - the same phonetic key ("her mess" and "Hermes" are both `HRMS`) scores 0.85.
-
-    Name spans of 1–3 words are tried.
+    - the same phonetic key ("hurmass" and "Hermes" are both `HRMS`) scores 0.85.
+  - **Loose matches are single words only**, within ±2 letters of the name's length.
+    - Spans of 2–3 words ("her mess") must be an exact name or **learned alias**, and can't contain
+      punctuation.
+    - Across words, the consonant skeleton matches everyday speech: "her mom's", "Harry Moss",
+      "hurry, miss" are all `HRMS`.
+    - The rule is to miss rather than misfire: a miss can be taught, a false trigger acts in the
+      world.
   - Spellings marked as false triggers are **blocked** from loose matching.
+  - **Renaming the agent clears the learned and blocked spellings.**
 - **Command assembly** (`assembler.ts`):
   - **One utterance:** sent as soon as the user stops talking. The assembler checks whether voice
     activity shows speech after the utterance's end.
@@ -117,6 +123,8 @@ pendant ─▶ phone ─▶ server ─▶ live pipeline child                   
   - Accepted: one short pendant buzz.
   - Failed: two short buzzes, plus a **passive** system notification ("Couldn't reach Hermes: the
     webhook secret was rejected"). It deep-links to `/voice`.
+- **After a server restart,** commands still `pending` are delivered again if they're under 60 s
+  old (same id, so Hermes dedupes). Older ones are marked `expired` with reason `restart`.
 
   Shadow mode never buzzes.
 
@@ -133,9 +141,24 @@ Teaching reuses the voiceprint machinery behind "This is me" (`voiceprints` rows
     which is how Soniox spells the name in your voice;
   - the utterance's audio (padded by 250 ms) is embedded with CAM++ and compared with your
     voiceprints so far. That score is the sample's quality and feeds the own-voice threshold;
+  - **it must sound like you.** Once you have a voiceprint, a sample scoring below 0.45 against
+    it, or closer to someone else's voice, is refused ("That didn't sound like you"). Before your
+    first voiceprint, a sample clearly matching another enrolled person is refused. Whoever else
+    talks while the page is open isn't enrolled as you;
   - if the audio is at least 1.5 s long, it is stored as a new voiceprint. Shorter "Hey Hermes"
     samples teach the name but would blur the voice match;
-  - the phrase advances. A session ends after 5 minutes without a sample.
+  - the phrase advances.
+- **A session ends** in any of these cases:
+  - after 5 minutes without progress. Only matching samples and your own actions count, so the TV
+    or other people talking don't keep it alive;
+  - after 20 minutes in any case;
+  - when you press Done, leave the page, or hide the tab.
+
+  While a session runs, your wake phrases are taught, not sent.
+- **If the live pipeline restarts mid-session,** the server sends the prompt again. As a second
+  guard, any detection that arrives while you're teaching is stored as ignored (`teaching`) and
+  never sent.
+- **Browser uploads** are processed one at a time, at most 20 per 10 minutes.
 - **Browser mic (fallback):**
   - The browser records 16 kHz mono PCM16 with its own echo cancellation, noise suppression and
     gain control turned off, so the voice sounds as it does to the pendant mic.
@@ -147,11 +170,18 @@ Teaching reuses the voiceprint machinery behind "This is me" (`voiceprints` rows
 - **Aliases:** a spelling heard in the name's position becomes an alias when it looks like the name
   (letters or sound) or has been heard at least twice. You can remove aliases in the console.
 - **Learning from real use:**
-  - **👍 confirmed** and **Missed** do two things. The command's stored audio becomes a voiceprint
-    sample (through the live pipeline, `learn_voice`), and the spelling becomes an alias.
+  - **👍 confirmed** (on commands that fired) and **Missed** (on ignored ones) learn from the
+    command. The audio of its utterances, not the gap between a wake word and the command, becomes
+    a voiceprint, if the live pipeline finds it sounds like you (same check as teaching). The
+    spelling becomes an alias.
+  - **Missed isn't offered on detections ignored as `not_own_voice` or `media_voice`.** The gate
+    heard someone else there; learning it would enrol their voice. The server refuses it too.
+  - **A Missed detection whose voice doesn't check out teaches nothing,** not even the spelling.
   - **👎 false trigger** removes anything learned from that command and blocks the spelling from
     loose matching.
-  - Changing your verdict undoes the earlier one.
+  - Changing your verdict undoes the earlier one. Verdicts on one command are serialized with a
+    row lock, so a quick 👍 then 👎 can't leave the 👍's voiceprint behind.
+  - **Only taught samples set the own-voice threshold.** Vouched-for commands never pull it down.
 - **Readiness on the Voice page:**
   - number of samples and seconds of voice learned;
   - consistency: the average similarity of samples to your voice;
@@ -225,6 +255,7 @@ Migration `0008_voice_commands`:
 - **`voice_commands`:** every detection, with:
   - status: `pending`, `sent`, `failed`, `expired`, `shadow`, `ignored` or `test`;
   - the reason, attempts, HTTP status and `sent_at` (latency = `sent_at − ended_at`);
+  - `parts`: each utterance's time span;
   - your feedback.
 
   Rows are linked to utterances by time, not by foreign key.
@@ -238,11 +269,13 @@ The webhook URL and secret are the agent's (`agent.webhookUrl`, `agent.webhookSe
 ## Tests
 
 - `packages/shared/src/wake.test.ts`: the matcher (greetings, accents, split names, near misses,
-  blocked spellings), teaching alignment, and alias learning.
+  blocked spellings), teaching alignment, and alias learning. It includes everyday sentences that
+  must never fire ("Okay, her mom's coming over tonight").
 - `apps/server/src/live/voice/assembler.test.ts`: single utterances, wake word then command,
   timeouts, continuations, speaker changes and caps.
 - `apps/server/src/live/voice/detector.test.ts`: the gates, shadow and off modes, duplicates, rate
-  limits, near misses, teaching and self-test.
+  limits, near misses, teaching and self-test. Also: refusing other voices while teaching, the
+  voice check over each part's span only, the caps, and pruning.
 - `apps/server/src/live/voice/clip.test.ts`: the pendant codec round trip.
 - `apps/server/src/voice/deliver.test.ts`: the retry policy (2xx, 5xx then 2xx, 401, duplicate,
   ignored, expiry).
@@ -253,7 +286,15 @@ The webhook URL and secret are the agent's (`agent.webhookUrl`, `agent.webhookSe
   - shadow and ignored rows;
   - the test command;
   - feedback learning and undo;
-  - teaching sessions and alias learning.
+  - Missed refused on someone else's voice;
+  - learning from part ranges;
+  - serialized verdicts;
+  - teaching sessions and alias learning;
+  - the teaching guard, and prompts replayed after a restart;
+  - session expiry and stale stops;
+  - the upload limit;
+  - pending recovery after a restart;
+  - the threshold ignoring command samples.
 
 ## Later
 

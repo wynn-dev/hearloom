@@ -1,6 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import type { HeardUtterance } from "./assembler";
-import { type AudioSource, commandThreshold, DEFAULT_MIN_SCORE, VoiceDetector } from "./detector";
+import {
+  type AudioSource,
+  commandThreshold,
+  DEFAULT_MIN_SCORE,
+  MAX_TRANSCRIPT_CHARS,
+  TEACH_MIN_SELF,
+  teachVoiceVerdict,
+  VoiceDetector,
+} from "./detector";
 import type { TeachResult, VoiceConfig, VoiceDetection } from "./types";
 
 const T = 1_800_000_000_000;
@@ -10,6 +18,7 @@ function setup(over: { config?: Partial<VoiceConfig>; self?: number | null; othe
   const detections: VoiceDetection[] = [];
   const taught: TeachResult[] = [];
   const learned: number[] = [];
+  const audioCalls: [number, number][] = [];
   const media = new Set<string>();
   const config: VoiceConfig = {
     mode: "on",
@@ -34,7 +43,10 @@ function setup(over: { config?: Partial<VoiceConfig>; self?: number | null; othe
   let lastSpeech = 0;
   const source: AudioSource = {
     streamId: "s1",
-    audio: (from, to) => new Float32Array(Math.max(0, Math.round((to - from) * 16))),
+    audio: (from, to) => {
+      audioCalls.push([from - T, to - T]);
+      return new Float32Array(Math.max(0, Math.round((to - from) * 16)));
+    },
     lastSpeechAt: () => lastSpeech,
   };
   const say = async (
@@ -66,6 +78,7 @@ function setup(over: { config?: Partial<VoiceConfig>; self?: number | null; othe
     detections,
     taught,
     learned,
+    audioCalls,
     media,
     scores,
     say,
@@ -173,8 +186,9 @@ describe("VoiceDetector", () => {
       heardAs: "her mess",
       speakerScore: 0.71,
       voiceprintId: "vp1",
-      wouldMatch: true,
-      wouldTrigger: true,
+      // A split name only matches once it's learned as an alias.
+      wouldMatch: false,
+      wouldTrigger: false,
       source: "pendant",
     });
     // Too short for a voiceprint, still a sample.
@@ -198,6 +212,77 @@ describe("VoiceDetector", () => {
     await t.say("Hey Hermes, test", 0, 2);
     expect(t.taught[0]).toMatchObject({ ok: true, wouldMatch: true, wouldTrigger: false });
     expect(t.learned).toHaveLength(0);
+  });
+});
+
+describe("review fixes", () => {
+  const prompt = {
+    sessionId: "t1",
+    kind: "sample" as const,
+    index: 1,
+    phrase: "Hey Hermes, what's the weather tomorrow?",
+    personId: "p1",
+  };
+
+  test("teaching refuses someone else's voice", async () => {
+    // Someone else (closer to another enrolled voice than to the user's) reads the prompt.
+    const t = setup({ self: 0.1, other: 0.9 });
+    t.detector.setTeach("u1", prompt);
+    await t.say("Hey Hermes, what's the weather tomorrow?", 0, 2.5, { isSelf: false });
+    expect(t.learned).toHaveLength(0);
+    expect(t.taught[0]).toMatchObject({ ok: false, voiceprintId: null });
+    expect(t.taught[0]!.error).toContain("didn't sound like you");
+  });
+
+  test("teaching refuses a voice below the floor even with no one else close", async () => {
+    const t = setup({ self: TEACH_MIN_SELF - 0.05, other: 0 });
+    t.detector.setTeach("u1", prompt);
+    await t.say("Hey Hermes, what's the weather tomorrow?", 0, 2.5);
+    expect(t.learned).toHaveLength(0);
+    expect(t.taught[0]!.ok).toBe(false);
+  });
+
+  test("teachVoiceVerdict", () => {
+    expect(teachVoiceVerdict(null)).not.toBeNull();
+    // First sample: nothing to compare with, unless it's clearly someone else enrolled.
+    expect(teachVoiceVerdict({ self: null, other: 0.2 })).toBeNull();
+    expect(teachVoiceVerdict({ self: null, other: 0.7 })).not.toBeNull();
+    expect(teachVoiceVerdict({ self: 0.7, other: 0.3 })).toBeNull();
+    expect(teachVoiceVerdict({ self: 0.6, other: 0.65 })).not.toBeNull();
+    expect(teachVoiceVerdict({ self: 0.4, other: 0 })).not.toBeNull();
+  });
+
+  test("own-voice check and parts use each utterance's span, not the gap between", async () => {
+    const t = setup();
+    await t.say("Hey Hermes.", 0, 0.8, { isSelf: null });
+    t.audioCalls.length = 0;
+    await t.say("What's on my calendar?", 5, 7);
+    expect(t.audioCalls).toEqual([
+      [0, 800],
+      [5000, 7000],
+    ]);
+    expect(t.detections[0]!.parts).toEqual([
+      { startAt: T, endAt: T + 800 },
+      { startAt: T + 5000, endAt: T + 7000 },
+    ]);
+  });
+
+  test("transcripts and commands are capped", async () => {
+    const t = setup();
+    const long = "word ".repeat(400);
+    await t.say(`Hey Hermes, ${long}`, 0, 20);
+    expect(t.detections[0]!.command.length).toBeLessThanOrEqual(500);
+    expect(t.detections[0]!.transcript.length).toBeLessThanOrEqual(MAX_TRANSCRIPT_CHARS);
+  });
+
+  test("a disposed stream's audio is dropped and idle users are forgotten", async () => {
+    const t = setup();
+    await t.say("Just talking.", 0, 2);
+    expect(t.detector.userCount).toBe(1);
+    t.detector.dropSource("other-stream");
+    expect(t.detector.userCount).toBe(1);
+    t.detector.dropSource("s1");
+    expect(t.detector.userCount).toBe(0);
   });
 });
 

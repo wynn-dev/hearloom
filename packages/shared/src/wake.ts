@@ -133,31 +133,54 @@ export function phoneticKey(s: string): string {
   return (first + rest).replace(/(.)\1+/g, "$1").toUpperCase();
 }
 
-/** How well a heard span (compacted) matches a name or alias (compacted): 0 = not at all. */
-function spanScore(heard: string, target: string, exactOnly: boolean): number {
+/** A loose match may differ in length from the name by at most this many letters. */
+const LOOSE_LENGTH_SLACK = 2;
+
+/**
+ * How well a heard span (compacted) matches a name or alias (compacted): 0 = not at all. Loose
+ * matches (a few edits away, or the same phonetic key) only for a single word close to the name's
+ * length: across words the consonant skeleton matches everyday speech ("her mom's", "Harry Moss"
+ * → HRMS). Missing a wake phrase can be taught; a false trigger acts in the world.
+ */
+function spanScore(heard: string, target: string, loose: boolean): number {
   if (!heard || !target) return 0;
   if (heard === target) return 1;
-  if (exactOnly || target.length < 4) return 0;
+  if (!loose || target.length < 4) return 0;
+  if (Math.abs(heard.length - target.length) > LOOSE_LENGTH_SLACK) return 0;
   if (editDistance(heard, target) <= Math.max(1, Math.floor(target.length / 5))) return 0.9;
   const key = phoneticKey(target);
   if (key.length >= 3 && phoneticKey(heard) === key) return 0.85;
   return 0;
 }
 
-/** Best score of a heard span against the config's names and aliases. */
-export function scoreName(heard: string, cfg: WakeConfig): { name: string; score: number } | null {
+/**
+ * Best score of heard words against the config's names and aliases. `words` > 1 (a span such as
+ * "her mess") must be an exact name or alias.
+ */
+export function scoreName(
+  heard: string,
+  cfg: WakeConfig,
+  words = 1,
+): { name: string; score: number } | null {
   const h = compactName(heard);
   const blocked = (cfg.blocked ?? []).some((b) => compactName(b) === h);
   let best: { name: string; score: number } | null = null;
-  const consider = (name: string, target: string, exactOnly: boolean) => {
-    const score = spanScore(h, compactName(target), exactOnly);
+  const consider = (name: string, target: string, loose: boolean) => {
+    const score = spanScore(h, compactName(target), loose);
     if (score > 0 && (!best || score > best.score)) best = { name, score };
   };
-  for (const name of cfg.names) consider(name, name, blocked);
+  for (const name of cfg.names) consider(name, name, !blocked && words === 1);
   // An alias belongs to the first name (one agent per user, for now).
   const primary = cfg.names[0];
-  if (primary) for (const alias of cfg.aliases) consider(primary, alias, true);
+  if (primary) for (const alias of cfg.aliases) consider(primary, alias, false);
   return best;
+}
+
+/** Words of a span are only separated by spaces (no comma etc. inside a name). */
+function joined(text: string, span: Token[]): boolean {
+  for (let i = 1; i < span.length; i++)
+    if (/\S/.test(text.slice(span[i - 1]!.end, span[i]!.start))) return false;
+  return true;
 }
 
 /** Can a wake phrase start at token i: the start of the text, or after a sentence end? */
@@ -186,7 +209,8 @@ export function matchWake(text: string, cfg: WakeConfig): WakeMatch | null {
     let best: { name: string; score: number; end: number; nameStart: number } | null = null;
     for (let k = 1; k <= MAX_NAME_WORDS && g + k < tokens.length; k++) {
       const span = tokens.slice(g + 1, g + 1 + k);
-      const hit = scoreName(span.map((t) => t.norm).join(""), cfg);
+      if (!joined(text, span)) break;
+      const hit = scoreName(span.map((t) => t.norm).join(""), cfg, k);
       // Ties go to the longer span ("her mess" over "her").
       if (hit && (!best || hit.score >= best.score))
         best = { ...hit, end: span.at(-1)!.end, nameStart: span[0]!.start };
@@ -220,6 +244,7 @@ export function nearWake(text: string, cfg: WakeConfig): WakeMatch | null {
     let best: { score: number; end: number; start: number } | null = null;
     for (let k = 1; k <= 2 && g + k < tokens.length; k++) {
       const span = tokens.slice(g + 1, g + 1 + k);
+      if (!joined(text, span)) break;
       const heard = span.map((t) => t.norm).join("");
       const score = 1 - editDistance(heard, target) / Math.max(heard.length, target.length);
       if (score >= 0.5 && (!best || score > best.score))
@@ -310,6 +335,8 @@ export function alignTeach(heard: string, prompt: string, cfg: WakeConfig): Teac
   if (g < 0) return { ok: false, heardAs: null, nameScore: 0, wouldMatch };
   let best: { k: number; restSim: number; nameScore: number } | null = null;
   for (let k = 1; k <= MAX_NAME_WORDS && g + k < tokens.length; k++) {
+    // A name is never split by punctuation ("hurry, miss").
+    if (!joined(heard, tokens.slice(g + 1, g + 1 + k))) break;
     const rest = tokens
       .slice(g + 1 + k)
       .map((t) => t.norm)
@@ -317,7 +344,7 @@ export function alignTeach(heard: string, prompt: string, cfg: WakeConfig): Teac
     const n = Math.max(rest.length, restWanted.length);
     const restSim = n === 0 ? 1 : 1 - distance(rest, restWanted) / n;
     const span = tokens.slice(g + 1, g + 1 + k).map((t) => t.norm);
-    const nameScore = scoreName(span.join(""), cfg)?.score ?? 0;
+    const nameScore = scoreName(span.join(""), cfg, k)?.score ?? 0;
     if (
       !best ||
       restSim > best.restSim + 1e-9 ||

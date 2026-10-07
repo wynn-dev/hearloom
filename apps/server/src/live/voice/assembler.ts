@@ -187,7 +187,10 @@ export class CommandAssembler {
       wake: s.wake,
       parts: s.parts,
       command,
-      transcript: s.parts.map((p) => p.text.trim()).join(" "),
+      transcript: s.parts
+        .map((p) => p.text.trim())
+        .join(" ")
+        .slice(0, 2 * this.limits.maxChars),
       spokenAt: s.parts[0]!.startAt,
       endedAt: s.parts.at(-1)!.endAt,
     });

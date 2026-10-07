@@ -1,5 +1,5 @@
 {
-  "id": "25b49529-8135-4744-bb08-8c93cd3ea55e",
+  "id": "ffb35ae9-db56-4875-a0d9-f0e2d1abc5c8",
   "prevId": "b840479f-0d61-43d8-b3c2-e0bd58d58aa3",
   "version": "7",
   "dialect": "postgresql",
@@ -2109,6 +2109,13 @@
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true
+        },
+        "parts": {
+          "name": "parts",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'[]'::jsonb"
         },
         "detected_at": {
           "name": "detected_at",

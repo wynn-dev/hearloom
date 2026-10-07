@@ -27,6 +27,8 @@ export interface VoiceDetection {
   chainId: string;
   spokenAt: number;
   endedAt: number;
+  /** Each utterance's own span (learning from a command skips what was between them). */
+  parts: { startAt: number; endAt: number }[];
   detectedAt: number;
   wakeName: string;
   heardAs: string;
