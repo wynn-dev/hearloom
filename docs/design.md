@@ -91,7 +91,7 @@ One gateway for system alerts and agent notifications. Nothing is held or queued
 to speak, and policy can only lower the volume (silent during quiet hours, a conversation, or past the
 hourly limit with sound) or refuse past a hard ceiling of 30 an hour → one copy per phone: APNs first,
 the live socket as fallback (and for the pendant buzz) → audit trail and feedback (useful / not useful /
-snooze / reply).
+reply).
 
 ## Agent interface
 

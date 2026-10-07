@@ -115,7 +115,7 @@ export const timelineSchema = z.object({
 
 export const notificationSchema = z.object({
   id: z.uuid(),
-  source: z.enum(["system", "rule", "agent"]),
+  source: z.enum(["system", "agent"]),
   category: z.string(),
   title: z.string(),
   body: z.string(),
@@ -272,7 +272,7 @@ export const contract = {
       .input(
         z.object({
           id: z.uuid(),
-          action: z.enum(["opened", "useful", "not_useful", "snoozed", "reply"]),
+          action: z.enum(["opened", "useful", "not_useful", "reply"]),
           replyText: z.string().max(2000).optional(),
         }),
       )

@@ -12,7 +12,7 @@ const ACTION_LABEL: Record<string, string> = {
   none: "Nothing",
   bookmark: "Bookmark",
   mute: "Mute / unmute",
-  ack_nudge: "Acknowledge nudge",
+  ack_nudge: "Acknowledge notification",
 };
 
 export default function Pendant() {

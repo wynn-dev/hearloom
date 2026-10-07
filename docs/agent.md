@@ -73,4 +73,4 @@ cron job whose pre-check calls `changes_since`.
 
 Transcripts are **untrusted input** — anyone near the pendant (or a TV) can say "ignore previous
 instructions…". Run Hermes isolated (Docker or a separate macOS user), give it only the MCP URL, use a
-read-only token unless you want nudges, and keep its shell/browser toolsets off.
+read-only token unless you want it to send notifications, and keep its shell/browser toolsets off.
