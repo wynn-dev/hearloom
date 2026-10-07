@@ -6,7 +6,6 @@ export type NotificationStatus = NotificationItem["status"];
 
 export const statusTone: Record<NotificationStatus, Tone> = {
   pending: "info",
-  held: "warn",
   sent: "accent",
   delivered: "good",
   failed: "bad",
@@ -15,7 +14,6 @@ export const statusTone: Record<NotificationStatus, Tone> = {
 
 export const statusLabel: Record<NotificationStatus, string> = {
   pending: "Pending",
-  held: "Held",
   sent: "Sent",
   delivered: "Delivered",
   failed: "Failed",
@@ -28,6 +26,7 @@ const reasons: Record<string, string> = {
   hourly_limit: "silent: hourly limit",
   hard_limit: "over 30 in an hour",
   source_disabled: "source turned off",
+  expired: "expired while held",
   apns_not_configured: "APNs not configured",
   no_phones: "no phones registered",
   no_push_token: "no push token",
@@ -53,7 +52,6 @@ export const sourceLabel: Record<NotificationItem["source"], string> = {
 export const feedbackLabel: Record<NonNullable<NotificationItem["feedback"]>, string> = {
   useful: "Marked useful",
   not_useful: "Marked not useful",
-  snoozed: "Snoozed",
 };
 
 export const buttonActionLabel: Record<ButtonAction, string> = {

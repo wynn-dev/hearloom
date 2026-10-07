@@ -13,7 +13,6 @@ const STATUS_TONE: Record<NotificationItem["status"], "good" | "warn" | "bad" | 
   delivered: "good",
   sent: "good",
   pending: "neutral",
-  held: "warn",
   suppressed: "neutral",
   failed: "bad",
 };

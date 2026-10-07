@@ -43,6 +43,13 @@
       "when": 1791369085947,
       "tag": "0005_drop_conversations",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1791380441916,
+      "tag": "0006_notifications_simplify",
+      "breakpoints": true
     }
   ]
 }
