@@ -85,7 +85,6 @@ protocol OmiBLEDelegate: AnyObject {
   func ble(_ ble: OmiBLE, stateChanged state: OmiBLE.State)
   func ble(_ ble: OmiBLE, discovered devices: [OmiBLE.Discovered])
   func ble(_ ble: OmiBLE, readyWithCodec codec: Int, info: WearableInfo)
-  func ble(_ ble: OmiBLE, infoUpdated info: WearableInfo)
   func bleDisconnected(_ ble: OmiBLE, peripheralId: String, error: Error?)
   func ble(_ ble: OmiBLE, frames: [Data], lost: Int)
   func ble(_ ble: OmiBLE, battery: Int)
@@ -124,6 +123,10 @@ final class OmiBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
   private var codec: Int?
   private var audioSubscribed = false
   private var announcedReady = false
+  /// Services whose characteristics aren't discovered yet, and reads (codec, device info, battery, ...)
+  /// not answered yet. Ready waits for both, so it carries complete device info.
+  private var servicesPending = 0
+  private var pendingReads: Set<CBUUID> = []
 
   /// The pendant we want connected. nil = stay disconnected.
   private(set) var targetId: UUID?
@@ -226,6 +229,8 @@ final class OmiBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     codec = nil
     audioSubscribed = false
     announcedReady = false
+    servicesPending = 0
+    pendingReads = []
     assembler.reset()
     assembler.fragmentationPossible = p.maximumWriteValueLength(for: .withoutResponse) < 163
     info = WearableInfo(peripheralId: p.identifier.uuidString, name: p.name ?? "Omi")
@@ -294,17 +299,22 @@ final class OmiBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
 
   func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
     if let error { return Log.error("ble: service discovery failed: \(error)") }
+    servicesPending = peripheral.services?.count ?? 0
     for service in peripheral.services ?? [] { peripheral.discoverCharacteristics(nil, for: service) }
   }
 
   func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
+    servicesPending -= 1
+    defer { maybeReady() }
     if let error { return Log.error("ble: characteristic discovery failed: \(error)") }
     for c in service.characteristics ?? [] {
       characteristics[c.uuid] = c
       switch c.uuid {
       case OmiUUID.audioCodec, OmiUUID.model, OmiUUID.firmware, OmiUUID.hardware, OmiUUID.serial, OmiUUID.features:
+        pendingReads.insert(c.uuid)
         peripheral.readValue(for: c)
       case OmiUUID.batteryLevel, OmiUUID.chargingStatus:
+        pendingReads.insert(c.uuid)
         peripheral.readValue(for: c)
         peripheral.setNotifyValue(true, for: c)
       case OmiUUID.button, OmiUUID.storageControl:
@@ -334,6 +344,9 @@ final class OmiBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
   }
 
   func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor c: CBCharacteristic, error: Error?) {
+    // A failed read is answered too.
+    let answered = pendingReads.remove(c.uuid) != nil
+    defer { if answered { maybeReady() } }
     guard error == nil, let value = c.value else { return }
     switch c.uuid {
     case OmiUUID.audioData:
@@ -341,7 +354,6 @@ final class OmiBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
       if !frames.isEmpty { delegate?.ble(self, frames: frames, lost: lost) }
     case OmiUUID.audioCodec:
       codec = value.first.map(Int.init)
-      maybeReady()
     case OmiUUID.batteryLevel:
       if let level = value.first {
         info?.battery = Int(level)
@@ -360,27 +372,21 @@ final class OmiBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
       if let status = StorageStatus(value) { delegate?.ble(self, storageStatus: status) }
     case OmiUUID.model:
       info?.model = String(data: value, encoding: .utf8)
-      publishInfo()
     case OmiUUID.firmware:
       info?.firmware = String(data: value, encoding: .utf8)
-      publishInfo()
     case OmiUUID.hardware:
       info?.hardwareRev = String(data: value, encoding: .utf8)
-      publishInfo()
     case OmiUUID.serial:
       info?.serial = String(data: value, encoding: .utf8)
-      publishInfo()
     default:
       break
     }
   }
 
-  private func publishInfo() {
-    if announcedReady, let info { delegate?.ble(self, infoUpdated: info) }
-  }
-
   private func maybeReady() {
-    guard !announcedReady, audioSubscribed, let codec, let info else { return }
+    guard !announcedReady, audioSubscribed, servicesPending <= 0, pendingReads.isEmpty, let codec, let info else {
+      return
+    }
     announcedReady = true
     state = .ready
     Log.info("ble: ready, codec \(codec), mtu-3 \(peripheral?.maximumWriteValueLength(for: .withoutResponse) ?? 0)")
