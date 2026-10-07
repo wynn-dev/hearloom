@@ -9,6 +9,7 @@ import {
   type ClusterFacts,
   consolidate,
   finishChain,
+  type Line,
   mergeLines,
   type RefineDeps,
   refineBlock,
@@ -28,7 +29,7 @@ describe("mergeLines", () => {
     text: string,
     speaker: string | null,
     lang = "en",
-  ) => ({
+  ): Line => ({
     startAt,
     endAt,
     text,
@@ -73,6 +74,24 @@ describe("mergeLines", () => {
       "Okay.",
     ]);
     expect(out[0]!.speaker).toBe("a");
+  });
+
+  test("lines whose own voice checks disagree stay apart", () => {
+    const alice = { personId: "alice", isSelf: false };
+    const bob = { personId: "bob", isSelf: false };
+    const out = mergeLines([
+      { ...line(0, 2000, "a1", "a"), own: alice },
+      { ...line(2500, 4000, "a2", "a"), own: alice },
+      { ...line(4500, 6000, "b1", "a"), own: bob },
+      { ...line(6500, 8000, "c1", "a"), own: null },
+      { ...line(8500, 8800, "Um,", null) },
+      { ...line(9000, 11_000, "c2", "a"), own: null },
+    ]);
+    expect(out.map((l) => [l.text, l.own?.personId ?? l.own])).toEqual([
+      ["a1 a2", "alice"],
+      ["b1", "bob"],
+      ["c1 Um, c2", null],
+    ]);
   });
 
   test("stops at the length cap and keeps a text-weighted confidence", () => {
@@ -446,5 +465,108 @@ describe("refining the blocks of a chain", () => {
     expect(rowsB.map((u) => u.speakerKey)).toEqual(["S2", "S1", "S7"]);
     // Alice was named in block A; her key carries the name into block B.
     expect(rowsB.map((u) => u.personId)).toEqual([null, aliceId, null]);
+  });
+
+  test("speech only in the previous block's context leaves the block's live rows", async () => {
+    const { blockA, blockB } = await chain();
+    await refineBlock(deps(), blockA);
+    const silentFrom = t0 + 10 * MIN;
+    const r = await refineBlock(
+      {
+        ...deps(),
+        loadPieces: async (stream, from, to) => {
+          const pieces = await deps().loadPieces!(stream, from, to);
+          for (const p of pieces) {
+            for (let i = 0; i < p.samples.length; i++) {
+              if (p.startAt + i / 16 >= silentFrom) p.samples[i] = 0;
+            }
+          }
+          return pieces;
+        },
+      },
+      blockB,
+    );
+    expect(r).toMatchObject({ refined: true, replaced: 0 });
+    const rows = await current(blockB);
+    expect(rows.map((u) => [u.source, u.speakerKey])).toEqual([
+      ["live", "S5"],
+      ["live", "S6"],
+      ["live", "S7"],
+    ]);
+  });
+
+  test("one speaker's fragments are joined, but not two voices the diarizer lumped together", async () => {
+    // Runs last: Bob's voiceprint (voice 2) would name voice 2 in the tests above.
+    const [bob] = await db
+      .insert(schema.people)
+      .values({ userId, name: "Bob" })
+      .returning({ id: schema.people.id });
+    await db.insert(schema.voiceprints).values({
+      userId,
+      personId: bob!.id,
+      model: SPEAKER_MODEL_ID,
+      embedding: Array.from(voice(2)),
+      sampleSeconds: 10,
+      source: "enrollment",
+    });
+    const t1 = t0 + 120 * MIN;
+    const lines = [
+      { from: t1, to: t1 + 2000, voice: 0, text: "a1" },
+      { from: t1 + 2500, to: t1 + 4500, voice: 0, text: "a2" },
+      { from: t1 + 5000, to: t1 + 7000, voice: 2, text: "b1" },
+    ];
+    const [conv] = await db
+      .insert(schema.conversations)
+      .values({ userId, startedAt: new Date(t1), endedAt: new Date(t1 + 7000), status: "closed" })
+      .returning({ id: schema.conversations.id });
+    const [block] = await db
+      .insert(schema.blocks)
+      .values({
+        userId,
+        chainId: conv!.id,
+        startedAt: new Date(t1),
+        endedAt: new Date(t1 + 7000),
+        status: "closed",
+      })
+      .returning({ id: schema.blocks.id });
+    await db.insert(schema.utterances).values(
+      lines.map((l) => ({
+        userId,
+        conversationId: conv!.id,
+        blockId: block!.id,
+        streamId,
+        startAt: new Date(l.from),
+        endAt: new Date(l.to),
+        speakerKey: "S1",
+        text: l.text,
+        source: "live" as const,
+        provider: "test",
+      })),
+    );
+    const r = await refineBlock(
+      {
+        ...deps(),
+        // One cluster for everything.
+        diarizer: {
+          diarize: async (samples) => [{ speaker: "spk0", start: 0, end: samples.length / 16000 }],
+        },
+        loadPieces: async (_stream, from, to) => {
+          const samples = new Float32Array(Math.round((to - from) * 16));
+          for (let i = 0; i < samples.length; i++) {
+            const ms = from + i / 16;
+            const l = lines.find((x) => ms >= x.from && ms < x.to);
+            samples[i] = l ? 0.1 * (l.voice + 1) : 0;
+          }
+          return [{ startAt: from, samples }];
+        },
+      },
+      block!.id,
+    );
+    expect(r).toMatchObject({ refined: true, replaced: 3 });
+    const rows = await current(block!.id);
+    expect(rows.map((u) => [u.text, u.personId])).toEqual([
+      ["a1 a2", aliceId],
+      ["b1", bob!.id],
+    ]);
   });
 });
