@@ -40,7 +40,9 @@ final class CaptureEngine: NSObject {
   /// Frames that arrive after a (re)connect before its stream starts (the pendant sends audio before
   /// codec and device info are read). Journaled into the new stream, stamped by arrival time.
   private var pendingFrames: [(data: Data, lost: Int, arrivedAt: Int64)] = []
-  private static let maxPendingFrames = 1500
+  /// Frames not held because `pendingFrames` was full.
+  private var pendingDropped = 0
+  private static let maxPendingFrames = 1500 // 30 s of 20 ms frames (codec 21), 15 s of 10 ms ones
   /// Capture time of the last frame, for stamping the next one; cleared when the timeline breaks
   /// (mute, disconnect) so the next frame re-anchors to the wall clock.
   private var lastFrameAt: Int64?
@@ -212,7 +214,9 @@ final class CaptureEngine: NSObject {
     endActiveStream()
     let frameMs = codec == 20 ? 10 : 20
     let early = pendingFrames
+    if pendingDropped > 0 { Log.warn("engine: \(pendingDropped) frames before ready didn't fit and were dropped") }
     pendingFrames = []
+    pendingDropped = 0
     let meta = StreamMeta(
       id: UUID().uuidString.lowercased(), codec: codec, sampleRate: 16000, frameMs: frameMs,
       startedAt: early.first?.arrivedAt ?? nowMs(), endedAt: nil, wearable: wearable)
@@ -497,6 +501,7 @@ extension CaptureEngine: OmiBLEDelegate {
       Log.error("ble: unsupported codec \(codec); update the pendant firmware")
       lastServerError = "Unsupported codec \(codec). Update the Omi firmware."
       pendingFrames = []
+      pendingDropped = 0
       emitStatus()
       return
     }
@@ -514,8 +519,11 @@ extension CaptureEngine: OmiBLEDelegate {
     // Stop feeding the stream but keep it open (see `streamLive`): it ends at its last frame when the
     // pendant comes back, so frames of the next connection never land in it.
     streamLive = false
-    if !pendingFrames.isEmpty { Log.warn("engine: dropped \(pendingFrames.count) frames received before ready") }
+    if !pendingFrames.isEmpty {
+      Log.warn("engine: dropped \(pendingFrames.count + pendingDropped) frames received before ready")
+    }
     pendingFrames = []
+    pendingDropped = 0
     lastFrameAt = nil
     chargingReported = false
     finishOffline(reason: "disconnected")
@@ -531,7 +539,12 @@ extension CaptureEngine: OmiBLEDelegate {
     let now = nowMs()
     guard streamLive else {
       // Connected, but this connection's stream isn't started yet: hold them for it.
-      for (i, frame) in frames.enumerated() where pendingFrames.count < CaptureEngine.maxPendingFrames {
+      for (i, frame) in frames.enumerated() {
+        guard pendingFrames.count < CaptureEngine.maxPendingFrames else {
+          if pendingDropped == 0 { Log.warn("engine: still no stream after \(pendingFrames.count) frames; dropping") }
+          pendingDropped += 1
+          continue
+        }
         pendingFrames.append((frame, i == 0 ? lost : 0, now))
       }
       return
@@ -540,10 +553,15 @@ extension CaptureEngine: OmiBLEDelegate {
     if framesThisStream % 50 == 0 { emitStatus() }
   }
 
+  /// The connected pendant; battery and charging arrive before ready sets `wearable` (fresh process).
+  private func peripheralId(_ ble: OmiBLE) -> String {
+    ble.peripheral?.identifier.uuidString ?? wearable?.peripheralId ?? ""
+  }
+
   func ble(_ ble: OmiBLE, battery: Int) {
     wearable?.battery = battery
     sendIfOpen([
-      "t": "event", "kind": "battery", "value": battery, "peripheralId": wearable?.peripheralId ?? "", "at": nowMs(),
+      "t": "event", "kind": "battery", "value": battery, "peripheralId": peripheralId(ble), "at": nowMs(),
     ])
     emitStatus()
   }
@@ -553,7 +571,7 @@ extension CaptureEngine: OmiBLEDelegate {
     chargingReported = true
     self.charging = charging
     sendIfOpen([
-      "t": "event", "kind": "charging", "value": charging, "peripheralId": wearable?.peripheralId ?? "", "at": nowMs(),
+      "t": "event", "kind": "charging", "value": charging, "peripheralId": peripheralId(ble), "at": nowMs(),
     ])
     emitStatus()
   }

@@ -124,9 +124,16 @@ final class OmiBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
   private var audioSubscribed = false
   private var announcedReady = false
   /// Services whose characteristics aren't discovered yet, and reads (codec, device info, battery, ...)
-  /// not answered yet. Ready waits for both, so it carries complete device info.
+  /// not answered yet. Ready waits for both, so it carries complete device info, but at most
+  /// `readyTimeout` once audio can flow.
   private var servicesPending = 0
   private var pendingReads: Set<CBUUID> = []
+  private var readyDeadlineSet = false
+  private static let readyTimeout = 3.0
+  /// A discovery round is running on this connection (don't restart it; that would reset its state).
+  private var discovering = false
+  /// Counts discovery rounds, so a late ready deadline can't act on the next one.
+  private var round = 0
 
   /// The pendant we want connected. nil = stay disconnected.
   private(set) var targetId: UUID?
@@ -202,7 +209,7 @@ final class OmiBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     if let p = peripheral, p.identifier == id {
       switch p.state {
       case .connected:
-        if !announcedReady { discover(p) }
+        if !announcedReady && !discovering { discover(p) }
         return
       case .connecting:
         return
@@ -231,6 +238,9 @@ final class OmiBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     announcedReady = false
     servicesPending = 0
     pendingReads = []
+    readyDeadlineSet = false
+    discovering = true
+    round += 1
     assembler.reset()
     assembler.fragmentationPossible = p.maximumWriteValueLength(for: .withoutResponse) < 163
     info = WearableInfo(peripheralId: p.identifier.uuidString, name: p.name ?? "Omi")
@@ -286,6 +296,7 @@ final class OmiBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     Log.info("ble: disconnected (\(error?.localizedDescription ?? "clean"))")
     announcedReady = false
     audioSubscribed = false
+    discovering = false
     delegate?.bleDisconnected(self, peripheralId: peripheral.identifier.uuidString, error: error)
     if targetId == peripheral.identifier {
       state = .connecting
@@ -298,7 +309,10 @@ final class OmiBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
   // MARK: CBPeripheralDelegate
 
   func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
-    if let error { return Log.error("ble: service discovery failed: \(error)") }
+    if let error {
+      discovering = false // let the next connectTarget retry
+      return Log.error("ble: service discovery failed: \(error)")
+    }
     servicesPending = peripheral.services?.count ?? 0
     for service in peripheral.services ?? [] { peripheral.discoverCharacteristics(nil, for: service) }
   }
@@ -311,11 +325,9 @@ final class OmiBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
       characteristics[c.uuid] = c
       switch c.uuid {
       case OmiUUID.audioCodec, OmiUUID.model, OmiUUID.firmware, OmiUUID.hardware, OmiUUID.serial, OmiUUID.features:
-        pendingReads.insert(c.uuid)
-        peripheral.readValue(for: c)
+        read(c, on: peripheral)
       case OmiUUID.batteryLevel, OmiUUID.chargingStatus:
-        pendingReads.insert(c.uuid)
-        peripheral.readValue(for: c)
+        read(c, on: peripheral)
         peripheral.setNotifyValue(true, for: c)
       case OmiUUID.button, OmiUUID.storageControl:
         peripheral.setNotifyValue(true, for: c)
@@ -383,11 +395,29 @@ final class OmiBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     }
   }
 
-  private func maybeReady() {
-    guard !announcedReady, audioSubscribed, servicesPending <= 0, pendingReads.isEmpty, let codec, let info else {
+  /// Read a characteristic if it's readable; ready waits for the answer.
+  private func read(_ c: CBCharacteristic, on p: CBPeripheral) {
+    guard c.properties.contains(.read) else { return }
+    pendingReads.insert(c.uuid)
+    p.readValue(for: c)
+  }
+
+  private func maybeReady(force: Bool = false) {
+    guard !announcedReady, audioSubscribed, let codec, let info else { return }
+    if !force, servicesPending > 0 || !pendingReads.isEmpty {
+      // Audio can flow; don't let a read that never answers hold up the stream.
+      guard !readyDeadlineSet else { return }
+      readyDeadlineSet = true
+      let r = round
+      queue.asyncAfter(deadline: .now() + OmiBLE.readyTimeout) { [weak self] in
+        guard let self, self.round == r, !self.announcedReady else { return }
+        Log.warn("ble: \(self.pendingReads.count) read(s), \(self.servicesPending) service(s) unanswered; ready anyway")
+        self.maybeReady(force: true)
+      }
       return
     }
     announcedReady = true
+    discovering = false
     state = .ready
     Log.info("ble: ready, codec \(codec), mtu-3 \(peripheral?.maximumWriteValueLength(for: .withoutResponse) ?? 0)")
     delegate?.ble(self, readyWithCodec: codec, info: info)
