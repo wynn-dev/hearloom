@@ -1,6 +1,15 @@
 import "./test-db";
 import { afterAll, beforeAll, expect, setSystemTime, test } from "bun:test";
-import { configuredHosts, hostnamesOf, rebindSafe, requestOrigin, trustedOwnOrigin } from "./auth";
+import {
+  auth,
+  configuredHosts,
+  hasSimpleBody,
+  hostnamesOf,
+  needsPreflight,
+  rebindSafe,
+  requestOrigin,
+  trustedOwnOrigin,
+} from "./auth";
 import { env } from "./env";
 import { app } from "./http/app";
 
@@ -321,6 +330,103 @@ test("sign-in is rate limited in one bucket for everyone: client IP headers don'
   // Open again after the window.
   nextRateLimitWindow();
   expect((await postSignIn(`http://127.0.0.1:3000${SIGN_IN}`, {})).status).toBe(401);
+});
+
+test("hasSimpleBody / needsPreflight: bodies any page can send vs ones that need a preflight", () => {
+  const simple = (type?: string) =>
+    hasSimpleBody(req("http://127.0.0.1:3000/x", type ? { "content-type": type } : {}));
+  for (const type of ["text/plain", "TEXT/PLAIN; a=application/json", "multipart/form-data; b=x"]) {
+    expect(simple(type)).toBe(true);
+  }
+  expect(simple("application/x-www-form-urlencoded")).toBe(true);
+  for (const type of [undefined, "application/json", "application/jsonx"]) {
+    expect(simple(type)).toBe(false);
+  }
+
+  const typed = (type?: string) =>
+    needsPreflight(req("http://127.0.0.1:3000/x", type ? { "content-type": type } : {}));
+  for (const type of ["application/json", "Application/JSON; charset=utf-8", "application/jsonx"]) {
+    expect(typed(type)).toBe(true);
+  }
+  for (const type of [
+    undefined,
+    "",
+    "text/plain",
+    "text/plain;charset=UTF-8",
+    "TEXT/PLAIN; a=application/json",
+    "application/x-www-form-urlencoded",
+    "multipart/form-data; boundary=x",
+  ]) {
+    expect(typed(type)).toBe(false);
+  }
+});
+
+test("requests any page can send don't count toward the shared limits", async () => {
+  const email = `limit-${crypto.randomUUID()}@test.local`;
+  const password = "right-password-123";
+  const ctx = await auth.$context;
+  const user = await ctx.internalAdapter.createUser(
+    { email, name: "limit", emailVerified: true },
+    { method: "admin" },
+  );
+  await ctx.internalAdapter.linkAccount({
+    userId: user.id,
+    providerId: "credential",
+    accountId: user.id,
+    password: await ctx.password.hash(password),
+  });
+  try {
+    nextRateLimitWindow();
+    const url = `http://127.0.0.1:3000${SIGN_IN}`;
+    const body = JSON.stringify({ email, password: "wrong" });
+    // What a page elsewhere can send with no-cors: plain-text and form POSTs (refused, even the form
+    // sign-in better-auth would take), POSTs with no body or an untyped one.
+    for (const type of [
+      "text/plain;charset=UTF-8",
+      "application/x-www-form-urlencoded",
+      "multipart/form-data; boundary=x",
+      "text/plain",
+    ]) {
+      const res = await app.fetch(
+        new Request(url, { method: "POST", headers: { "content-type": type }, body }),
+      );
+      expect(res.status).toBe(415);
+    }
+    expect((await app.fetch(new Request(url, { method: "POST" }))).status).not.toBe(429);
+    const untyped = new Request(url, { method: "POST", body: new Blob([body]) });
+    expect((await app.fetch(untyped)).status).toBe(415);
+    // And image loads of /get-session, well past its 100 per 10 s.
+    for (let i = 0; i < 120; i++) {
+      await app.fetch(new Request("http://127.0.0.1:3000/api/auth/get-session"));
+    }
+    const session = await app.fetch(new Request("http://127.0.0.1:3000/api/auth/get-session"));
+    expect(session.status).toBe(200);
+    // The owner still signs in.
+    const res = await app.fetch(
+      new Request(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email, password }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    // JSON lookalikes better-auth also parses do count: 2 more tries fill the window, then 429.
+    const lookalike = () =>
+      app.fetch(
+        new Request(url, {
+          method: "POST",
+          headers: { "content-type": "application/jsonx" },
+          body: JSON.stringify({ email, password: "wrong-password" }),
+        }),
+      );
+    expect([
+      (await lookalike()).status,
+      (await lookalike()).status,
+      (await lookalike()).status,
+    ]).toEqual([401, 401, 429]);
+  } finally {
+    await ctx.internalAdapter.deleteUser(user.id);
+  }
 });
 
 test("no CORS preflight is granted, so a page elsewhere can't send X-Forwarded-* to auth", async () => {

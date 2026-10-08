@@ -93,9 +93,18 @@ call Hearloom's auth as you, so don't mount apps you don't trust there. Hermes o
 starts it at login and restarts it if it exits. If the worker dies, the server keeps running (refine
 jobs wait in the queue until the next restart). For launchd, run `scripts/start.sh` (what `pnpm start`
 runs) directly: it ends by exec-ing turbo, so `launchctl bootout`'s SIGTERM reaches turbo, which stops
-the server and worker. Through `pnpm`, the SIGTERM stops at pnpm and they keep running. launchd doesn't
-read your shell profile, so the plist sets `PATH`: it must include `bun`, `pnpm` and `node` (see
-`which bun pnpm node`). For example `~/Library/LaunchAgents/hearloom.plist`, with your own paths:
+the server and worker. Through `pnpm`, the SIGTERM stops at pnpm and they keep running.
+
+launchd doesn't read your shell profile, so the plist sets `PATH`. It must reach `bun`, `pnpm` and
+`node`, with paths that last:
+
+- Put the directory of the bun you mean to run first (it must be ≥ 1.4.2), and check it with
+  `<that directory>/bun --version`: a Mac can have more than one, and the first on `PATH` wins.
+- `which node` may print a path that only lives as long as your shell. With fnm it's
+  `~/.local/state/fnm_multishells/<id>/bin`; use `~/.local/share/fnm/aliases/default/bin` instead, or
+  Homebrew's node (`/opt/homebrew/bin`).
+
+For example `~/Library/LaunchAgents/hearloom.plist`, with your own paths:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -107,7 +116,8 @@ read your shell profile, so the plist sets `PATH`: it must include `bun`, `pnpm`
   <array><string>/bin/sh</string><string>/Users/you/hearloom/scripts/start.sh</string></array>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>PATH</key><string>/Users/you/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <!-- Your bun's directory first, then pnpm's and node's. -->
+    <key>PATH</key><string>/path/to/bun/bin:/opt/homebrew/bin:/Users/you/.local/share/fnm/aliases/default/bin:/usr/bin:/bin</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>

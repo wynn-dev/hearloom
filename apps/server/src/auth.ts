@@ -88,6 +88,37 @@ export function trustedOwnOrigin(req: Request, configured = configuredHosts): st
   return origin && rebindSafe(new URL(origin).hostname, configured) ? origin : null;
 }
 
+/** Content types any page can POST anywhere without a CORS preflight. */
+const SIMPLE_CONTENT_TYPES = new Set([
+  "text/plain",
+  "application/x-www-form-urlencoded",
+  "multipart/form-data",
+]);
+
+const contentTypeOf = (req: Request) =>
+  req.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
+
+/**
+ * Whether a request's body is of a type any page can send anywhere without a CORS preflight: plain
+ * text, a form or multipart. better-auth takes form posts for sign-in (no-JS forms); Hearloom's
+ * clients only send JSON, so the auth route refuses these before they reach the rate limiter.
+ */
+export function hasSimpleBody(req: Request): boolean {
+  const type = contentTypeOf(req);
+  return type !== undefined && SIMPLE_CONTENT_TYPES.has(type);
+}
+
+/**
+ * Whether a page on another origin can't send this request without a CORS preflight (which this
+ * server never grants): it has a body of a type other than the simple ones. True for every real auth
+ * call with a body (JSON, and lookalikes like `application/jsonx` that better-auth also parses);
+ * false for GETs and bodiless POSTs, which any page can send and which carry no credentials.
+ */
+export function needsPreflight(req: Request): boolean {
+  const type = contentTypeOf(req);
+  return !!type && !SIMPLE_CONTENT_TYPES.has(type);
+}
+
 export const auth = betterAuth({
   appName: "Hearloom",
   baseURL: env.PUBLIC_URL,
@@ -120,8 +151,17 @@ export const auth = betterAuth({
     return own ? [...staticOrigins, own] : staticOrigins;
   },
   // On whatever NODE_ENV says (`pnpm start` sets none; better-auth would only limit in production):
-  // 3 sign-ins per 10 s, 100 requests per 10 s on other auth paths.
-  rateLimit: { enabled: true },
+  // 3 sign-ins (and password or email changes) per 10 s, 100 requests per 10 s on other auth paths.
+  // Only requests that need a CORS preflight count (needsPreflight); the auth route already refused
+  // plain-text and form bodies (hasSimpleBody). The limiter runs before better-auth's content-type and
+  // origin checks, and its buckets are shared (below), so otherwise any web page could keep them full
+  // for everyone: plain-text sign-in POSTs would hold sign-in at 429, and image loads of /get-session
+  // would make the console report the server unreachable. Every real auth call (console, app) is JSON
+  // or a GET or bodiless POST without credentials.
+  rateLimit: {
+    enabled: true,
+    customRules: { "/**": (req, current) => (needsPreflight(req) ? current : false) },
+  },
   advanced: {
     // Checked under `bun test` too (better-auth skips it there by default), so tests see what runs.
     disableOriginCheck: false,

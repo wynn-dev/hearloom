@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { RPCHandler } from "@orpc/server/fetch";
 import { Hono } from "hono";
-import { auth } from "../auth";
+import { auth, hasSimpleBody } from "../auth";
 import { env } from "../env";
 import { handleMcp } from "../mcp/server";
 import { router } from "../rpc/router";
@@ -13,7 +13,14 @@ export const app = new Hono();
 
 app.get("/health", (c) => c.json({ ok: true, time: new Date().toISOString() }));
 
-app.on(["GET", "POST"], "/api/auth/*", (c) => auth.handler(c.req.raw));
+app.on(["GET", "POST"], "/api/auth/*", (c) => {
+  // Plain-text and form posts are what any web page can send here unasked; refusing them up front keeps
+  // them out of auth's shared rate limits (auth.ts).
+  if (c.req.method === "POST" && hasSimpleBody(c.req.raw)) {
+    return c.json({ message: "Send JSON", code: "UNSUPPORTED_MEDIA_TYPE" }, 415);
+  }
+  return auth.handler(c.req.raw);
+});
 
 app.all("/rpc/*", async (c) => {
   const { matched, response } = await rpc.handle(c.req.raw, {
