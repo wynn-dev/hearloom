@@ -7,6 +7,7 @@ import {
   hermesCommandsSnippet,
   hermesConfigSnippets,
   hermesEnvSnippet,
+  hermesMcpUrl,
   hermesRouteOf,
   hermesWebhookUrl,
   normalizeHost,
@@ -80,6 +81,27 @@ test("the route name and port follow the webhook URL", () => {
     port: 8644,
   });
   expect(hermesRouteOf("not a url")).toEqual({ route: "hearloom-voice", port: 8644 });
+});
+
+test("MCP URL: loopback for Hermes on this machine, PUBLIC_URL's otherwise", () => {
+  const config = {
+    mcpUrl: "https://mac.tail1234.ts.net/mcp",
+    localMcpUrl: "http://127.0.0.1:3000/mcp",
+  };
+  expect(hermesMcpUrl(config, LOCAL)).toBe("http://127.0.0.1:3000/mcp");
+  expect(hermesMcpUrl(config, "http://localhost:9000/webhooks/hearloom")).toBe(
+    "http://127.0.0.1:3000/mcp",
+  );
+  expect(hermesMcpUrl(config, "http://[::1]:8644/webhooks/hearloom-voice")).toBe(
+    "http://127.0.0.1:3000/mcp",
+  );
+  expect(hermesMcpUrl(config, "http://mac-mini.tail1234.ts.net:8644/webhooks/hearloom-voice")).toBe(
+    "https://mac.tail1234.ts.net/mcp",
+  );
+  expect(hermesMcpUrl(config, "https://proxy.example/hermes")).toBe(
+    "https://mac.tail1234.ts.net/mcp",
+  );
+  expect(hermesMcpUrl(config, "not a url")).toBe("https://mac.tail1234.ts.net/mcp");
 });
 
 test(".env lines: the token while it's on screen, a placeholder otherwise", () => {

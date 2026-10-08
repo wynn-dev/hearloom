@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { RPCHandler } from "@orpc/server/fetch";
 import { Hono } from "hono";
-import { auth } from "../auth";
+import { auth, hasSimpleBody } from "../auth";
 import { env } from "../env";
 import { handleMcp } from "../mcp/server";
 import { router } from "../rpc/router";
@@ -13,7 +13,14 @@ export const app = new Hono();
 
 app.get("/health", (c) => c.json({ ok: true, time: new Date().toISOString() }));
 
-app.on(["GET", "POST"], "/api/auth/*", (c) => auth.handler(c.req.raw));
+app.on(["GET", "POST"], "/api/auth/*", (c) => {
+  // Plain-text and form posts are what any web page can send here unasked; refusing them up front keeps
+  // them out of auth's shared rate limits (auth.ts).
+  if (c.req.method === "POST" && hasSimpleBody(c.req.raw)) {
+    return c.json({ message: "Send JSON", code: "UNSUPPORTED_MEDIA_TYPE" }, 415);
+  }
+  return auth.handler(c.req.raw);
+});
 
 app.all("/rpc/*", async (c) => {
   const { matched, response } = await rpc.handle(c.req.raw, {
@@ -41,6 +48,9 @@ app.get("*", async (c) => {
     const cache = path.startsWith("/assets/") ? "public, max-age=31536000, immutable" : "no-cache";
     return new Response(file, { headers: { "cache-control": cache } });
   }
+  // A missing asset (a tab still on the previous build asking for an old chunk) or API path is a 404,
+  // not the console's HTML with a 200, which a script import or an API client would choke on.
+  if (path.startsWith("/assets/") || path.startsWith("/api/")) return c.notFound();
   const index = Bun.file(join(env.WEB_DIST, "index.html"));
   if (await index.exists())
     return new Response(index, { headers: { "content-type": "text/html" } });

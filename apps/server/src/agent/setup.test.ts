@@ -32,14 +32,24 @@ test("generated webhook secrets: whsec_ + base64 of 32 random bytes, accepted on
   expect(seen.size).toBe(50);
 });
 
-test("agentConfig: PUBLIC_URL without a trailing slash, MCP endpoint under it", () => {
-  expect(agentConfig("https://mac.tail1234.ts.net")).toEqual({
+test("agentConfig: PUBLIC_URL without a trailing slash, MCP endpoint under it and on loopback", () => {
+  expect(agentConfig("https://mac.tail1234.ts.net", 3000)).toEqual({
     publicUrl: "https://mac.tail1234.ts.net",
     mcpUrl: "https://mac.tail1234.ts.net/mcp",
+    localMcpUrl: "http://127.0.0.1:3000/mcp",
   });
-  expect(agentConfig("https://example.com/hearloom/").mcpUrl).toBe(
+  expect(agentConfig("https://example.com/hearloom/", 3000).mcpUrl).toBe(
     "https://example.com/hearloom/mcp",
   );
+  expect(agentConfig("https://example.com", 8080).localMcpUrl).toBe("http://127.0.0.1:8080/mcp");
+  // HOST: every address -> loopback; one address -> that one.
+  const local = (host: string) => agentConfig("https://example.com", 3000, host).localMcpUrl;
+  expect(local("0.0.0.0")).toBe("http://127.0.0.1:3000/mcp");
+  expect(local("::")).toBe("http://127.0.0.1:3000/mcp");
+  expect(local("127.0.0.1")).toBe("http://127.0.0.1:3000/mcp");
+  expect(local("192.168.1.20")).toBe("http://192.168.1.20:3000/mcp");
+  expect(local("::1")).toBe("http://[::1]:3000/mcp");
+  expect(local("localhost")).toBe("http://localhost:3000/mcp");
 });
 
 const userId = `test-${crypto.randomUUID()}`;
@@ -66,7 +76,7 @@ afterAll(async () => {
 
 test("agent.config exposes the server's PUBLIC_URL (not the console's origin)", async () => {
   const config = await client.agent.config();
-  expect(config).toEqual(agentConfig(env.PUBLIC_URL));
+  expect(config).toEqual(agentConfig(env.PUBLIC_URL, env.PORT, env.HOST));
   expect(config.mcpUrl).toBe(`${env.PUBLIC_URL.replace(/\/+$/, "")}/mcp`);
 });
 

@@ -29,6 +29,7 @@ import {
   hermesCommandsSnippet,
   hermesConfigSnippets,
   hermesEnvSnippet,
+  hermesMcpUrl,
   hermesWebhookUrl,
   normalizeHost,
   parseHermesWebhookUrl,
@@ -83,6 +84,8 @@ function ConnectHermes() {
   }
   const agent = settings.data?.agent;
   const webhookUrl = agent?.webhookUrl ?? "";
+  /** Where Hearloom sends voice commands: the saved URL, or Hermes on this machine. */
+  const deliverTo = webhookUrl || hermesWebhookUrl({ kind: "local" });
   const hasToken = (tokens.data ?? []).length > 0 || token !== null;
 
   return (
@@ -130,8 +133,8 @@ function ConnectHermes() {
               token={token}
               secret={secret}
               hasSecret={agent.webhookSecretSet}
-              mcpUrl={config.data.mcpUrl}
-              webhookUrl={webhookUrl || hermesWebhookUrl({ kind: "local" })}
+              mcpUrl={hermesMcpUrl(config.data, deliverTo)}
+              webhookUrl={deliverTo}
             />
           ) : (
             <LoadingRows rows={3} />
