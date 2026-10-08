@@ -84,8 +84,10 @@ Sign in with the server's `PUBLIC_URL`: with the setup in the README ("Remote ac
 same address as the console.
 
 Plain `http://your-mac.your-tailnet.ts.net:3000` works too (the app allows plain HTTP only for `*.ts.net`
-and local networks; Tailscale already encrypts the traffic), but only while no `tailscale serve` handler
-uses port 3000: one there takes the port over on the tailnet address, and plain HTTP gets `400`.
+and local networks; Tailscale already encrypts the traffic), but not when the server listens on loopback
+only (`HOST=127.0.0.1`, as the README recommends behind `tailscale serve`), and only while no
+`tailscale serve` handler uses port 3000: one there takes the port over on the tailnet address, and
+plain HTTP gets `400`.
 
 To change the address, sign out and sign in again with the new one; the phone keeps its record.
 

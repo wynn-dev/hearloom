@@ -41,6 +41,9 @@ app.get("*", async (c) => {
     const cache = path.startsWith("/assets/") ? "public, max-age=31536000, immutable" : "no-cache";
     return new Response(file, { headers: { "cache-control": cache } });
   }
+  // A missing asset (a tab still on the previous build asking for an old chunk) or API path is a 404,
+  // not the console's HTML with a 200, which a script import or an API client would choke on.
+  if (path.startsWith("/assets/") || path.startsWith("/api/")) return c.notFound();
   const index = Bun.file(join(env.WEB_DIST, "index.html"));
   if (await index.exists())
     return new Response(index, { headers: { "content-type": "text/html" } });

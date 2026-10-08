@@ -7,7 +7,8 @@ reads over MCP and can tidy up your episodes; Hearloom can POST events to it ove
 ## MCP endpoint
 
 `POST {PUBLIC_URL}/mcp` — stateless Streamable HTTP, `Authorization: Bearer hl_…`. An agent on the
-server's own machine uses `http://127.0.0.1:{PORT}/mcp` instead (no tailnet or proxy in between).
+server's own machine uses `http://127.0.0.1:{PORT}/mcp` instead (no tailnet or proxy in between; `HOST`
+instead of 127.0.0.1 when the server listens on one specific address).
 Create a token in the console → **Agent**. A token gives the agent every tool below; there are no
 scopes. Tokens are stored hashed; revoke them any time.
 
@@ -128,9 +129,9 @@ hermes gateway restart
 ```
 
 The MCP URL comes from the `agent.config` RPC. When Hermes runs on the server's machine (the webhook
-goes to loopback, as "This machine" sets it up) it's `http://127.0.0.1:{PORT}/mcp`, which works whatever
-`PUBLIC_URL` says. Anywhere else it's `PUBLIC_URL` + `/mcp`, not the console's address (they differ when
-the console is served by Vite).
+goes to loopback, as "This machine" sets it up) it's `http://127.0.0.1:{PORT}/mcp` (or `HOST`'s
+address), which works whatever `PUBLIC_URL` says. Anywhere else it's `PUBLIC_URL` + `/mcp`, not the
+console's address (they differ when the console is served by Vite).
 
 **The `hearloom` skill** ([`hermes/skills/hearloom/SKILL.md`](../hermes/skills/hearloom/SKILL.md)) carries
 the guidance, so the route's prompt stays one line. It covers voice commands (speech-to-text errors, the

@@ -1,6 +1,6 @@
 import "./test-db";
 import { expect, test } from "bun:test";
-import { requestOrigin } from "./auth";
+import { hostnamesOf, rebindSafe, requestOrigin, trustedOwnOrigin } from "./auth";
 import { env } from "./env";
 import { app } from "./http/app";
 
@@ -66,6 +66,59 @@ test("requestOrigin: anything but one plain http(s) host is no origin", () => {
   ]) {
     expect(requestOrigin(req("http://127.0.0.1:3000/x", headers))).toBeNull();
   }
+});
+
+test("rebindSafe: only names nobody else's DNS can point at this server", () => {
+  const configured = hostnamesOf([
+    "https://hearloom.example.com",
+    "http://console.example.org:8080",
+    "hearloom://",
+    "https://*.example.net",
+  ]);
+  expect([...configured].sort()).toEqual(["console.example.org", "hearloom.example.com"]);
+  for (const safe of [
+    "localhost",
+    "127.0.0.1",
+    "192.168.1.20",
+    "100.83.218.9",
+    "[::1]",
+    "[fd7a:115c:a1e0::1]",
+    "macbook",
+    "mac.tail1234.ts.net",
+    "hearloom.example.com",
+    "console.example.org",
+  ]) {
+    expect(rebindSafe(safe, configured)).toBe(true);
+  }
+  for (const unsafe of [
+    "evil.example",
+    "127.0.0.1.evil.example",
+    "localhost.evil.example",
+    "mac.tail1234.ts.net.evil.example",
+    "evil-ts.net",
+    "sub.hearloom.example.com",
+    "example.net",
+    "mac.local",
+  ]) {
+    expect(rebindSafe(unsafe, configured)).toBe(false);
+  }
+});
+
+test("trustedOwnOrigin: the request's origin, unless its host could be rebound", () => {
+  const configured = new Set(["hearloom.example.com"]);
+  const own = (host: string, extra: Record<string, string> = {}) =>
+    trustedOwnOrigin(req("http://127.0.0.1:3000/x", { host, ...extra }), configured);
+  expect(own("evil.example:3000")).toBeNull();
+  expect(own("evil.example", { "x-forwarded-proto": "https" })).toBeNull();
+  expect(own("192.168.1.20:3000")).toBe("http://192.168.1.20:3000");
+  expect(own("macbook:3000")).toBe("http://macbook:3000");
+  expect(own("mac.tail1234.ts.net", { "x-forwarded-proto": "https" })).toBe(
+    "https://mac.tail1234.ts.net",
+  );
+  // A configured host on any port or scheme (e.g. a second serve handler).
+  expect(own("hearloom.example.com:8443", { "x-forwarded-proto": "https" })).toBe(
+    "https://hearloom.example.com:8443",
+  );
 });
 
 /**
@@ -174,6 +227,31 @@ test("auth rejects an origin other than the request's own", async () => {
       origin: "http://evil.example",
     }),
   ).toMatchObject(rejected);
+});
+
+test("auth trusts LAN addresses and single-label names it came in on", async () => {
+  expect(
+    await signIn(`http://192.168.1.20:3000${SIGN_IN}`, {
+      host: "192.168.1.20:3000",
+      origin: "http://192.168.1.20:3000",
+    }),
+  ).toMatchObject({ status: 401 });
+  expect(
+    await signIn(`http://macbook:3000${SIGN_IN}`, {
+      host: "macbook:3000",
+      origin: "http://macbook:3000",
+    }),
+  ).toMatchObject({ status: 401 });
+});
+
+test("DNS rebinding: a page on a name re-resolved to this machine isn't trusted", async () => {
+  // http://evil.example:3000 rebound to the Mac's LAN IP or 127.0.0.1: Origin and Host agree, but
+  // evil.example is someone else's name.
+  for (const host of ["evil.example:3000", "evil.example", "127.0.0.1.nip.example:3000"]) {
+    expect(
+      await signIn(`http://${host}${SIGN_IN}`, { host, origin: `http://${host}` }),
+    ).toMatchObject({ status: 403, code: "INVALID_ORIGIN" });
+  }
 });
 
 test("no CORS preflight is granted, so a page elsewhere can't send X-Forwarded-* to auth", async () => {

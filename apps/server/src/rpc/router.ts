@@ -193,11 +193,18 @@ async function teachCall(fn: () => unknown): Promise<void> {
 
 /**
  * `PUBLIC_URL` (how phones, browsers and agents reach this server) and the MCP endpoint under it, plus
- * the endpoint on loopback for an agent on this machine (no tailnet or proxy in between).
+ * the endpoint for an agent on this machine (no tailnet or proxy in between): on loopback when the
+ * server listens on every address, else on the one address it listens on (`HOST`).
  */
-export function agentConfig(publicUrl: string, port: number) {
+export function agentConfig(publicUrl: string, port: number, host = "0.0.0.0") {
   const base = publicUrl.replace(/\/+$/, "");
-  return { publicUrl: base, mcpUrl: `${base}/mcp`, localMcpUrl: `http://127.0.0.1:${port}/mcp` };
+  const wildcard = ["", "0.0.0.0", "::", "[::]"].includes(host);
+  const local = wildcard
+    ? "127.0.0.1"
+    : host.includes(":") && !host.startsWith("[")
+      ? `[${host}]`
+      : host;
+  return { publicUrl: base, mcpUrl: `${base}/mcp`, localMcpUrl: `http://${local}:${port}/mcp` };
 }
 
 export const router = authed.router({
@@ -637,7 +644,7 @@ export const router = authed.router({
         return { ok: true as const };
       }),
     },
-    config: authed.agent.config.handler(() => agentConfig(env.PUBLIC_URL, env.PORT)),
+    config: authed.agent.config.handler(() => agentConfig(env.PUBLIC_URL, env.PORT, env.HOST)),
     generateWebhookSecret: authed.agent.generateWebhookSecret.handler(async ({ context }) => {
       const secret = generateWebhookSecret();
       const settings = await updateSettings((context as Ctx).userId, {
