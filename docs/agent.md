@@ -6,7 +6,8 @@ reads over MCP and can tidy up your episodes; Hearloom can POST events to it ove
 
 ## MCP endpoint
 
-`POST {PUBLIC_URL}/mcp` — stateless Streamable HTTP, `Authorization: Bearer hl_…`.
+`POST {PUBLIC_URL}/mcp` — stateless Streamable HTTP, `Authorization: Bearer hl_…`. An agent on the
+server's own machine uses `http://127.0.0.1:{PORT}/mcp` instead (no tailnet or proxy in between).
 Create a token in the console → **Agent**. A token gives the agent every tool below; there are no
 scopes. Tokens are stored hashed; revoke them any time.
 
@@ -95,7 +96,7 @@ its top-level key (add the key first if your file doesn't have it).
 ```yaml
 # Under the top-level "mcp_servers:" line:
   hearloom:
-    url: "https://your-mac.your-tailnet.ts.net/mcp"   # PUBLIC_URL + /mcp
+    url: "http://127.0.0.1:3000/mcp"   # Hermes on this machine; elsewhere PUBLIC_URL + /mcp
     headers:
       Authorization: "Bearer ${HEARLOOM_MCP_TOKEN}"
 ```
@@ -126,8 +127,10 @@ hermes skills install https://raw.githubusercontent.com/wynn-dev/hearloom/main/h
 hermes gateway restart
 ```
 
-The MCP URL is the server's `PUBLIC_URL`, not the console's address (they differ when the console is
-served by Vite or a proxy); the console reads it from the `agent.config` RPC.
+The MCP URL comes from the `agent.config` RPC. When Hermes runs on the server's machine (the webhook
+goes to loopback, as "This machine" sets it up) it's `http://127.0.0.1:{PORT}/mcp`, which works whatever
+`PUBLIC_URL` says. Anywhere else it's `PUBLIC_URL` + `/mcp`, not the console's address (they differ when
+the console is served by Vite).
 
 **The `hearloom` skill** ([`hermes/skills/hearloom/SKILL.md`](../hermes/skills/hearloom/SKILL.md)) carries
 the guidance, so the route's prompt stays one line. It covers voice commands (speech-to-text errors, the

@@ -231,7 +231,7 @@ Facts below were checked against the Hermes docs (messaging/webhooks) and its so
    ```yaml
    # Under the top-level "mcp_servers:" line:
      hearloom:
-       url: "https://your-mac.your-tailnet.ts.net/mcp"   # PUBLIC_URL + /mcp
+       url: "http://127.0.0.1:3000/mcp"   # Hermes on this machine; elsewhere PUBLIC_URL + /mcp
        headers:
          Authorization: "Bearer ${HEARLOOM_MCP_TOKEN}"
    ```

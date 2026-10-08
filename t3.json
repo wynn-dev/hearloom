@@ -15,6 +15,12 @@
       "previewUrl": "http://localhost:5173"
     },
     {
+      "name": "Start",
+      "command": "pnpm start",
+      "icon": "play",
+      "previewUrl": "http://localhost:3000"
+    },
+    {
       "name": "Mobile",
       "command": "pnpm --filter @hearloom/mobile start",
       "icon": "play"

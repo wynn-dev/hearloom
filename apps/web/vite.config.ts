@@ -15,7 +15,7 @@ export default defineConfig({
   ],
   server: {
     port: 5173,
-    // TRUSTED_ORIGINS expects 5173; fail rather than drift to 5174.
+    // A fixed address (bookmarks, a proxy you point at it): fail rather than drift to 5174.
     strictPort: true,
     // IPv4 loopback, not Vite's default localhost (::1 only on macOS), so proxies forwarding to
     // 127.0.0.1 reach it.

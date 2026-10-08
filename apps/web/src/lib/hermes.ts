@@ -99,6 +99,23 @@ export function parseHermesWebhookUrl(url: string): HermesWhere {
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
 
 /**
+ * The MCP URL to give Hermes. When it runs on the Hearloom server's machine (the webhook goes to
+ * loopback, as "This machine" sets it up) that's the server's loopback endpoint: it needs no tailnet
+ * or proxy and doesn't depend on PUBLIC_URL. Anywhere else, PUBLIC_URL's.
+ */
+export function hermesMcpUrl(
+  config: { mcpUrl: string; localMcpUrl: string },
+  webhookUrl: string,
+): string {
+  try {
+    if (LOOPBACK.has(new URL(webhookUrl).hostname)) return config.localMcpUrl;
+  } catch {
+    // Not a URL: Hermes is somewhere else.
+  }
+  return config.mcpUrl;
+}
+
+/**
  * Route name and listening port to put in Hermes's config, taken from the webhook URL. The URL's port
  * is Hermes's own only when Hearloom reaches Hermes directly: a URL the card built (this machine,
  * another host) or a loopback one. A custom URL elsewhere may be a proxy, so Hermes keeps 8644.
