@@ -10,7 +10,7 @@
   },
   "scripts": {
     "dev": "turbo run dev dev:worker --filter=@hearloom/server --filter=@hearloom/web",
-    "start": "pnpm db:migrate && pnpm --filter @hearloom/web build && turbo run start worker --filter=@hearloom/server --continue=always",
+    "start": "sh scripts/start.sh",
     "build": "turbo run build",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",

@@ -81,17 +81,21 @@ server too, but only while no `tailscale serve` handler uses port 3000: a serve 
 on the tailnet address, and plain HTTP to it then gets `400`.
 
 Auth trusts the address a request came in on (as `tailscale serve` and Vite forward it), so the console
-and the app work from any of those URLs, and from anything else you mount on the same origin with
-`tailscale serve --set-path`. That covers IP addresses, `localhost`, single-label names, `*.ts.net`
-names and `PUBLIC_URL`'s host; other names (e.g. `mac.local`, your own domain) must be `PUBLIC_URL`'s
-or listed in `TRUSTED_ORIGINS`, so a site that re-points its own name at your Mac (DNS rebinding) isn't
-trusted. Hermes on the same Mac talks to `http://127.0.0.1:3000/mcp` and needs no serve at all (the
-console's Agent page fills that in).
+and the app work from any of those URLs. That covers IP addresses, `localhost`, single-label names,
+`PUBLIC_URL`'s host and other machines on its tailnet (`*.<tailnet>.ts.net`); other names (e.g.
+`mac.local`, your own domain) must be listed in `TRUSTED_ORIGINS`, so a site that re-points its own name
+at your Mac (DNS rebinding) isn't trusted. Caveat: anything else served on the same origin, e.g. an app
+you mount next to Hearloom with `tailscale serve --set-path`, is the same origin to the browser and can
+call Hearloom's auth as you, so don't mount apps you don't trust there. Hermes on the same Mac talks to
+`http://127.0.0.1:3000/mcp` and needs no serve at all (the console's Agent page fills that in).
 
 `pnpm start` has to keep running: in a terminal you leave open (tmux), or as a launchd agent that
 starts it at login and restarts it if it exits. If the worker dies, the server keeps running (refine
-jobs wait in the queue until the next restart). For example `~/Library/LaunchAgents/hearloom.plist`,
-with your own paths:
+jobs wait in the queue until the next restart). For launchd, run `scripts/start.sh` (what `pnpm start`
+runs) directly: it ends by exec-ing turbo, so `launchctl bootout`'s SIGTERM reaches turbo, which stops
+the server and worker. Through `pnpm`, the SIGTERM stops at pnpm and they keep running. launchd doesn't
+read your shell profile, so the plist sets `PATH`: it must include `bun`, `pnpm` and `node` (see
+`which bun pnpm node`). For example `~/Library/LaunchAgents/hearloom.plist`, with your own paths:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -99,9 +103,12 @@ with your own paths:
 <plist version="1.0">
 <dict>
   <key>Label</key><string>hearloom</string>
-  <!-- A login shell, so pnpm and bun are on PATH. -->
   <key>ProgramArguments</key>
-  <array><string>/bin/zsh</string><string>-lc</string><string>cd /Users/you/hearloom &amp;&amp; exec pnpm start</string></array>
+  <array><string>/bin/sh</string><string>/Users/you/hearloom/scripts/start.sh</string></array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/Users/you/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>StandardOutPath</key><string>/Users/you/Library/Logs/hearloom.log</string>

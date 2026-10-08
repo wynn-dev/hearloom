@@ -30,23 +30,34 @@ export function hostnamesOf(origins: string[]): Set<string> {
   return names;
 }
 
-const configuredHosts = hostnamesOf([env.PUBLIC_URL, ...extraOrigins]);
+/** Hosts of PUBLIC_URL and TRUSTED_ORIGINS. Exported for tests, which add hosts as if configured. */
+export const configuredHosts = hostnamesOf([env.PUBLIC_URL, ...extraOrigins]);
+
+/** `.<tailnet>.ts.net` for a Tailscale MagicDNS name (`<machine>.<tailnet>.ts.net`), else null. */
+function tailnetOf(hostname: string): string | null {
+  return /(\.[a-z0-9-]+\.ts\.net)$/.exec(hostname)?.[1] ?? null;
+}
 
 /**
  * Whether a host name can't be pointed at this server by someone else's DNS (DNS rebinding): an IP
- * literal, localhost, a single-label name (no public DNS), a Tailscale MagicDNS name (`*.ts.net`,
- * whose DNS Tailscale runs), or a host this server is configured with. `hostname` is as `URL`
- * normalizes it (lower case, IPv6 in brackets).
+ * literal, localhost, a host this server is configured with (PUBLIC_URL, TRUSTED_ORIGINS), a machine
+ * on the same tailnet as one of those (`*.<tailnet>.ts.net`), or a single-label name (no public DNS,
+ * and `http://macbook:3000` needs it). The residual risk is single-label names and tailnet names
+ * resolved by a hostile resolver (a network's DNS or search domain), which could hand out an
+ * attacker's address for them first. `hostname` is as `URL` normalizes it (lower case, IPv6 in brackets).
  */
 export function rebindSafe(hostname: string, configured: Set<string>): boolean {
-  return (
+  if (
     hostname === "localhost" ||
     IPV4.test(hostname) ||
     hostname.startsWith("[") ||
     !hostname.includes(".") ||
-    hostname.endsWith(".ts.net") ||
     configured.has(hostname)
-  );
+  ) {
+    return true;
+  }
+  const tailnet = tailnetOf(hostname);
+  return tailnet !== null && [...configured].some((c) => tailnetOf(c) === tailnet);
 }
 
 /**
@@ -108,8 +119,19 @@ export const auth = betterAuth({
     const own = request ? trustedOwnOrigin(request) : null;
     return own ? [...staticOrigins, own] : staticOrigins;
   },
-  // Checked under `bun test` too (better-auth skips it there by default), so tests see what runs.
-  advanced: { disableOriginCheck: false },
+  // On whatever NODE_ENV says (`pnpm start` sets none; better-auth would only limit in production):
+  // 3 sign-ins per 10 s, 100 requests per 10 s on other auth paths.
+  rateLimit: { enabled: true },
+  advanced: {
+    // Checked under `bun test` too (better-auth skips it there by default), so tests see what runs.
+    disableOriginCheck: false,
+    // No client IP header is trusted, so every client shares one bucket per path. Per-IP buckets would
+    // come from a header the client sends (X-Forwarded-For), and a guesser could pick a new address for
+    // every try. On a personal server one bucket is fine: the limit only slows sign-ins (existing
+    // sessions don't sign in again), and the rest of the auth paths have plenty of room. The one-time
+    // better-auth warning about "a single shared per-path bucket" is this, on purpose.
+    ipAddress: { ipAddressHeaders: [] },
+  },
   plugins: [admin(), bearer()],
 });
 
