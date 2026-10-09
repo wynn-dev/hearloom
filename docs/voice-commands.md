@@ -78,6 +78,7 @@ pendant ─▶ phone ─▶ server ─▶ live pipeline child                   
   | Mode | `off` skips detection; `shadow` stores but never sends | — / `shadow` |
   | Own voice | A CAM++ embedding of the command's utterances (wake phrase + command), each padded by 250 ms and taken from its own stream (a command can span a reconnect). Its best match must be one of your own voiceprints, scoring ≥ the threshold, and not beaten by anyone else's. Only the command's own audio decides: a near miss (≥ 0.45, closer to you than anyone else) is also scored after up to 3 s of your recent speech from the same stream, but that score is only logged (your speech would lift anyone's command) | `ignored: no_voiceprint` / `clip_missing` / `clip_too_short` (under 0.8 s padded) / `check_error` / `not_own_voice` (with its score) |
   | TV / radio | The speaker is a media voice in this chain (`mediaVoices`) | `ignored: media_voice` |
+  | Cut off | The recognizer's session broke mid-command, or the audio stalled mid-speech and didn't come back within 10 s: the pendant gets the failed cue | `ignored: cut_off` |
   | Duplicate (checked first) | Same speech heard by two streams, one copy already accepted: within 1.5 s, text ≥ 80% similar | dropped silently |
   | Rate | At least 2 s apart, at most 6 per minute and 30 per hour | `ignored: rate_limited` |
   | Near miss | A greeting plus something name-like that didn't match ("hey hermit"), in a voice that scores at least 0.45 against yours (or a line tagged as you) | `ignored: near_miss` |
