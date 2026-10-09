@@ -119,7 +119,7 @@ process.on("message", (raw) => {
   const msg = raw as HostMessage;
   if (voice.handle(msg)) return;
   if (msg.t === "frames") {
-    void processorFor(msg.stream).push(msg.frames as AudioFrame[]);
+    void processorFor(msg.stream).push(msg.frames as AudioFrame[], msg.receivedAt);
   } else if (msg.t === "voiceprints_changed") {
     deps.speakers?.invalidate(msg.userId);
   } else if (msg.t === "episodes_changed") {
@@ -173,7 +173,10 @@ setInterval(() => {
   void voice.detector.tick().catch((err) => log(`voice: ${err}`));
 }, 1000);
 
+let shuttingDown = false;
 async function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
   await Promise.all([...processors.values()].map((p) => p.dispose()));
   await deps.blocks.closeAll();
   // The episodes of the chains just closed are still being written.
@@ -182,5 +185,8 @@ async function shutdown() {
   process.exit(0);
 }
 process.on("SIGTERM", () => void shutdown());
+// Ctrl-C (or turbo stopping the server) signals the whole process group: shut down cleanly too
+// rather than die mid-write. The server doesn't restart us while it is shutting down.
+process.on("SIGINT", () => void shutdown());
 process.on("disconnect", () => void shutdown());
 send({ t: "ready" });

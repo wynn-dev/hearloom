@@ -39,7 +39,8 @@ pendant ─▶ phone ─▶ server ─▶ live pipeline child                   
 
 - **Where:** in the live pipeline child (`apps/server/src/live/voice/`), on every fresh, final
   Soniox utterance, right after it's saved (`processor.ts` `saveUtterance`).
-  - Backlog (audio more than 30 s late) and the refine pass never trigger commands.
+  - Backlog (audio the server received more than 30 s after it was captured) and the refine pass
+    never trigger commands.
 - **Recognition bias:** each Soniox session gets the agent's name(s) as `context.terms`, and so do
   backlog requests.
 - **Matcher:** `packages/shared/src/wake.ts`. It is pure and shared with the console's "Try a

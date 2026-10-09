@@ -146,12 +146,18 @@ export class StreamWriter {
   private chunk: OpenChunk | null = null;
   private queue: Promise<unknown> = Promise.resolve();
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  private disposed = false;
   private lastAt = 0;
   private framesSinceProgress = 0;
   private bytesSinceProgress = 0;
-  /** Called with newly stored frames (e.g. the live transcription pipeline). */
-  onFrames?: (meta: StreamMeta, frames: AudioFrame[]) => void;
-  /** Called when the writer has closed its chunk after idling. */
+  /** The ack last saved with the stream's progress (it lags `ackedSeq` after a failed save). */
+  private savedSeq: number;
+  /**
+   * Called with newly stored frames (e.g. the live transcription pipeline) and when the server
+   * received them (unix ms).
+   */
+  onFrames?: (meta: StreamMeta, frames: AudioFrame[], receivedAt: number) => void;
+  /** Called when the writer has closed its chunk and saved its progress after idling. */
   onIdle?: () => void;
 
   constructor(
@@ -159,16 +165,24 @@ export class StreamWriter {
     public ackedSeq: number,
     private readonly sink: ChunkSink,
     private readonly opts: WriterOptions,
-  ) {}
+  ) {
+    this.savedSeq = ackedSeq;
+  }
 
-  /** Store frames; resolves with the new ack (highest durable seq). */
-  append(frames: AudioFrame[]): Promise<number> {
-    return this.enqueue(() => this.appendNow(frames));
+  /**
+   * Store frames received at `receivedAt` (unix ms); resolves with the new ack (highest durable
+   * seq). Rejects if they (or the progress) couldn't be stored: the phone resends from its ack.
+   */
+  append(frames: AudioFrame[], receivedAt = Date.now()): Promise<number> {
+    return this.enqueue(() => this.appendNow(frames, receivedAt));
   }
 
   /** Close the open chunk (stream ended, idle, or shutdown). */
   flush(): Promise<void> {
-    return this.enqueue(() => this.closeChunk());
+    return this.enqueue(async () => {
+      await this.closeChunk();
+      await this.saveProgress();
+    });
   }
 
   private enqueue<T>(fn: () => Promise<T>): Promise<T> {
@@ -177,9 +191,13 @@ export class StreamWriter {
     return run;
   }
 
-  private async appendNow(frames: AudioFrame[]): Promise<number> {
+  private async appendNow(frames: AudioFrame[], receivedAt: number): Promise<number> {
     const fresh = frames.filter((f) => f.seq > this.ackedSeq);
-    if (fresh.length === 0) return this.ackedSeq;
+    if (fresh.length === 0) {
+      // A resend after a failed save: the frames are stored, the progress may not be yet.
+      await this.saveProgress();
+      return this.ackedSeq;
+    }
     // Acks are cumulative: storing frames past a hole would let the phone delete the missing ones.
     if (fresh[0]!.seq !== this.ackedSeq + 1) throw new SeqGapError(this.ackedSeq);
 
@@ -195,22 +213,32 @@ export class StreamWriter {
     }
     await this.spool(part);
 
+    // The frames are durable in the spool: from here on they count as stored (a resend is ignored),
+    // so the pipeline gets them even if saving the progress fails.
     const last = fresh[fresh.length - 1]!;
     this.ackedSeq = last.seq;
     this.lastAt = last.at;
     this.framesSinceProgress += fresh.length;
     this.bytesSinceProgress += fresh.reduce((n, f) => n + f.data.length, 0);
+    this.armIdle();
+    this.onFrames?.(this.meta, fresh, receivedAt);
+    await this.saveProgress();
+    return this.ackedSeq;
+  }
+
+  /** Save the stream's progress if it changed since the last successful save. */
+  private async saveProgress(): Promise<void> {
+    if (this.ackedSeq === this.savedSeq && this.framesSinceProgress === 0) return;
+    const ackedSeq = this.ackedSeq;
     await this.sink.saveProgress(this.meta, {
-      ackedSeq: this.ackedSeq,
+      ackedSeq,
       lastFrameAt: new Date(this.lastAt),
       frames: this.framesSinceProgress,
       bytes: this.bytesSinceProgress,
     });
+    this.savedSeq = ackedSeq;
     this.framesSinceProgress = 0;
     this.bytesSinceProgress = 0;
-    this.armIdle();
-    this.onFrames?.(this.meta, fresh);
-    return this.ackedSeq;
   }
 
   /** Whether `f` must start a new chunk, given the open chunk plus not-yet-spooled frames. */
@@ -259,17 +287,27 @@ export class StreamWriter {
   }
 
   private armIdle(): void {
+    if (this.disposed) return;
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = setTimeout(() => {
       this.idleTimer = null;
-      // On failure the spool files stay on disk and are recovered at the next start.
-      void this.flush()
-        .catch((err) => console.error(`[ingest] closing chunk of ${this.meta.id} failed`, err))
-        .finally(() => this.onIdle?.());
+      void this.flush().then(
+        () => {
+          if (this.savedSeq === this.ackedSeq) this.onIdle?.();
+        },
+        (err) => {
+          // Not idle yet: dropping the writer now would let the next hello resume from a stale
+          // ack in the database. Try again later (a chunk that failed to close stays in the spool,
+          // recovered at the next start).
+          console.error(`[ingest] closing chunk of ${this.meta.id} failed`, err);
+          this.armIdle();
+        },
+      );
     }, this.opts.idleMs);
   }
 
   dispose(): void {
+    this.disposed = true;
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = null;
   }

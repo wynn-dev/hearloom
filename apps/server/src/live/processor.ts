@@ -11,13 +11,14 @@ import {
 } from "@hearloom/inference";
 import type { AudioFrame } from "@hearloom/shared";
 import { eq, sql } from "drizzle-orm";
-import { type ContextMinute, ContextMinutes, contextScores, MINUTE } from "../episodes/rules";
+import { type ContextMinute, ContextMinutes, contextScores } from "../episodes/rules";
 import { SonioxSession } from "./asr/soniox";
 import { SessionClock, SonioxAssembler, type SonioxToken } from "./asr/soniox-assembler";
 import { SonioxError, transcribeFile } from "./asr/soniox-async";
 import type { Utterance } from "./asr/types";
 import type { BlockTracker } from "./blocks";
 import type { EpisodeTracker } from "./episodes";
+import { Freshness } from "./freshness";
 import { PcmHistory } from "./pcm";
 import { type SoundEvent, SoundEventSmoother } from "./sounds";
 import type { SpeakerDirectory } from "./speakers";
@@ -52,8 +53,6 @@ export interface LiveDeps {
   log(message: string): void;
 }
 
-/** Audio older than this when it reaches us is backlog (uploaded late), not live. */
-const FRESH_MS = 30_000;
 /** Close the Soniox session after this much time without speech (we pay per streamed second). */
 const SONIOX_IDLE_MS = 45_000;
 /** Rotate Soniox sessions well before their 300-minute cap. */
@@ -77,6 +76,9 @@ const TAG_WINDOW_SAMPLES = 32_000; // 2 s
 const TAG_HOP_SAMPLES = 16_000; // 1 s
 const TAG_MIN_RMS = 0.003;
 const MIN_EMBED_SAMPLES = 16_000; // 1 s
+
+/** Let other work (the live stream's frames) run before more backlog work. */
+const yieldToLive = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 interface Segment {
   startAt: number;
@@ -152,6 +154,11 @@ export class StreamProcessor {
   /** Audio time of the end of the audio processed so far. */
   private heardUntil = 0;
   private readonly voiceSource: AudioSource;
+  private readonly freshness = new Freshness();
+  /** Whether the audio being processed is live (see Freshness). */
+  private fresh = true;
+  /** An utterance runs on at the end of the audio processed so far (see Freshness). */
+  private midUtterance = false;
   /** Wall-clock spans of audio that arrived too late to stream (merged, recent only). */
   private backlogSpans: { from: number; to: number }[] = [];
   private backlog: BacklogBatch | null = null;
@@ -176,11 +183,14 @@ export class StreamProcessor {
     };
   }
 
-  /** Process frames in order (calls are serialized). */
-  push(frames: AudioFrame[]): Promise<void> {
+  /**
+   * Process frames in order (calls are serialized). `receivedAt`: when the server received them
+   * (unix ms), which decides whether they are live or backlog.
+   */
+  push(frames: AudioFrame[], receivedAt = Date.now()): Promise<void> {
     this.framesArrivedAt = Date.now();
     this.queue = this.queue
-      .then(() => this.process(frames))
+      .then(() => this.process(frames, receivedAt))
       .catch((err) => this.deps.log(`process: ${err}`));
     return this.queue;
   }
@@ -223,7 +233,7 @@ export class StreamProcessor {
 
   // ---- decoding & runs --------------------------------------------------------------------
 
-  private async process(frames: AudioFrame[]): Promise<void> {
+  private async process(frames: AudioFrame[], receivedAt: number): Promise<void> {
     this.lastActivity = Date.now();
     const pcmParts: Int16Array[] = [];
     const flushParts = async () => {
@@ -236,7 +246,7 @@ export class StreamProcessor {
         o += p.length;
       }
       pcmParts.length = 0;
-      await this.feed(pcm);
+      await this.feed(pcm, receivedAt);
     };
 
     for (const f of frames) {
@@ -273,6 +283,8 @@ export class StreamProcessor {
     this.backlogSpans = []; // the previous run's segments were flushed in endRun
     this.runStartAt = at;
     this.runSamples = 0;
+    this.freshness.reset();
+    this.midUtterance = false;
     this.tagFill = 0;
     this.tagSinceHop = 0;
   }
@@ -291,16 +303,30 @@ export class StreamProcessor {
 
   // ---- per-run processing ------------------------------------------------------------------
 
-  private async feed(pcm: Int16Array): Promise<void> {
+  private async feed(pcm: Int16Array, receivedAt: number): Promise<void> {
     const samples = toFloat32(pcm);
     const absAt = this.runStartAt + this.runSamples / 16;
     this.runSamples += samples.length;
     this.history.push(absAt, samples);
-    const fresh = Date.now() - absAt < FRESH_MS;
-    if (!fresh && this.deps.soniox) this.markBacklog(absAt, absAt + samples.length / 16);
+    // From when the server received the audio, not when we get to it: a busy pipeline must not
+    // turn live speech into backlog (unless it's minutes behind).
+    const fresh = this.freshness.judge({
+      lagMs: receivedAt - absAt,
+      ageMs: Date.now() - absAt,
+      at: absAt,
+      midUtterance: this.midUtterance,
+    });
+    this.fresh = fresh;
+    if (!fresh) {
+      // Backlog (an old stream uploading) must not hold up the live stream's audio.
+      await yieldToLive();
+      if (this.deps.soniox) this.markBacklog(absAt, absAt + samples.length / 16);
+    }
 
     // Speech detection.
     const { segments, speaking } = this.vad!.accept(samples);
+    // A segment that just ended is a boundary even if speech goes on (TV, music, a monologue).
+    this.midUtterance = speaking && segments.length === 0;
     this.heardUntil = absAt + samples.length / 16;
     if (speaking) {
       this.lastSpeechAt = Date.now();
@@ -322,7 +348,7 @@ export class StreamProcessor {
     for (const seg of segments) await this.onSegment(seg);
 
     // Sound tagging: 2 s windows every 1 s.
-    if (this.deps.tagger) await this.tag(samples);
+    if (this.deps.tagger) await this.tag(samples, fresh);
   }
 
   private markBacklog(from: number, to: number): void {
@@ -530,7 +556,7 @@ export class StreamProcessor {
     }
   }
 
-  private async tag(samples: Float32Array): Promise<void> {
+  private async tag(samples: Float32Array, fresh: boolean): Promise<void> {
     let o = 0;
     while (o < samples.length) {
       const room = TAG_WINDOW_SAMPLES - this.tagFill;
@@ -546,6 +572,8 @@ export class StreamProcessor {
         const windowStart = windowEnd - TAG_WINDOW_SAMPLES / 16;
         // Quiet windows aren't worth tagging, but still count as misses for open events.
         const loud = rms(this.tagBuf) >= TAG_MIN_RMS;
+        // Tagging is the costly part: for backlog, let the live stream go first at every window.
+        if (loud && !fresh) await yieldToLive();
         // Speech-context classes (television, narration…) rarely make the top 10: ask for more.
         const all = loud ? this.deps.tagger!.tag(this.tagBuf, 50) : [];
         const tags = all.slice(0, 10);
@@ -576,7 +604,7 @@ export class StreamProcessor {
           set: { windows: sql`excluded.windows`, scores: sql`excluded.scores` },
           setWhere: sql`excluded.windows >= ${c.windows}`,
         });
-      if (Date.now() - (m.at + MINUTE) < FRESH_MS + MINUTE) this.deps.episodes.context(userId, m);
+      if (this.fresh) this.deps.episodes.context(userId, m);
     }
   }
 

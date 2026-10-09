@@ -3,7 +3,13 @@ import type { StreamInfo } from "./processor";
 import type { TeachHeard, TeachPrompt, VoiceCueEvent, VoiceDetection } from "./voice/types";
 
 export type HostMessage =
-  | { t: "frames"; stream: StreamInfo; frames: { seq: number; at: number; data: Uint8Array }[] }
+  | {
+      t: "frames";
+      stream: StreamInfo;
+      frames: { seq: number; at: number; data: Uint8Array }[];
+      /** When the server received the frames (unix ms): live or backlog is judged from it. */
+      receivedAt: number;
+    }
   | { t: "voiceprints_changed"; userId: string }
   | { t: "episodes_changed"; userId: string }
   | { t: "enroll"; requestId: string; userId: string; personId: string; utteranceId: string }

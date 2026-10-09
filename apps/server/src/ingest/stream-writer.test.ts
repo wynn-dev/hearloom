@@ -108,6 +108,84 @@ describe("StreamWriter", () => {
     expect(sink.chunks[0]!.endAt.getTime() - sink.chunks[0]!.startAt.getTime()).toBe(500);
   });
 
+  test("passes the receive time on with the stored frames", async () => {
+    const w = new StreamWriter(meta, -1, new MemorySink(), opts());
+    const got: [number, number][] = [];
+    w.onFrames = (_m, frames, receivedAt) => got.push([frames.length, receivedAt]);
+    const t0 = 1_760_000_000_000;
+    await w.append(run(0, t0, 10), t0 + 5_000);
+    await w.append(run(5, t0 + 100, 10), t0 + 6_000); // half resent: only the new half
+    await w.flush();
+    w.dispose();
+    expect(got).toEqual([
+      [10, t0 + 5_000],
+      [5, t0 + 6_000],
+    ]);
+  });
+
+  test("a failed progress save still feeds the pipeline, and is retried on the resend", async () => {
+    const sink = new MemorySink();
+    const w = new StreamWriter(meta, -1, sink, opts());
+    const fed: number[] = [];
+    w.onFrames = (_m, frames) => fed.push(...frames.map((f) => f.seq));
+    const t0 = 1_760_000_000_000;
+    expect(await w.append(run(0, t0, 10))).toBe(9);
+
+    const save = sink.saveProgress.bind(sink);
+    sink.saveProgress = async () => {
+      throw new Error("connection terminated");
+    };
+    await expect(w.append(run(10, t0 + 200, 10))).rejects.toThrow("connection terminated");
+    // Spooled, so the pipeline has them; not acked to the phone, and the saved progress lags.
+    expect(fed).toHaveLength(20);
+    expect(sink.acked).toBe(9);
+
+    // The phone resends from its ack (9): nothing is stored twice, the progress is saved, and the
+    // ack covers the frames.
+    sink.saveProgress = save;
+    expect(await w.append(run(10, t0 + 200, 10))).toBe(19);
+    expect(sink.acked).toBe(19);
+    expect(fed).toHaveLength(20);
+    await w.flush();
+    w.dispose();
+    expect(sink.chunks).toHaveLength(1);
+    expect(sink.chunks[0]!.frameCount).toBe(20);
+  });
+
+  test("flush saves progress a failed save left behind", async () => {
+    const sink = new MemorySink();
+    const w = new StreamWriter(meta, -1, sink, opts());
+    const save = sink.saveProgress.bind(sink);
+    sink.saveProgress = async () => {
+      throw new Error("db down");
+    };
+    await expect(w.append(run(0, 1_760_000_000_000, 10))).rejects.toThrow("db down");
+    sink.saveProgress = save;
+    await w.flush();
+    w.dispose();
+    expect(sink.acked).toBe(9);
+  });
+
+  test("isn't reported idle (and dropped) until its progress is saved", async () => {
+    const sink = new MemorySink();
+    const w = new StreamWriter(meta, -1, sink, { ...opts(), idleMs: 20 });
+    let idle = 0;
+    w.onIdle = () => idle++;
+    const save = sink.saveProgress.bind(sink);
+    sink.saveProgress = async () => {
+      throw new Error("db down");
+    };
+    await expect(w.append(run(0, 1_760_000_000_000, 10))).rejects.toThrow("db down");
+    await Bun.sleep(80); // idle flushes fail
+    expect(idle).toBe(0);
+    expect(sink.chunks).toHaveLength(1); // the chunk itself closed
+    sink.saveProgress = save;
+    await Bun.sleep(80); // retried
+    expect(idle).toBe(1);
+    expect(sink.acked).toBe(9);
+    w.dispose();
+  });
+
   test("recovers spooled frames after a crash", async () => {
     const crashed = new MemorySink();
     const w = new StreamWriter(meta, -1, crashed, opts());
