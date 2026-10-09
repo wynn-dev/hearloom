@@ -140,7 +140,7 @@ async function row(id: string) {
   return r!;
 }
 
-test("a command is delivered, signed, and acknowledged with the sent buzz", async () => {
+test("a command is delivered and signed; sent doesn't buzz (the heard tap was enough)", async () => {
   const d = detection();
   await onDetection(d);
   expect(received).toHaveLength(1);
@@ -162,7 +162,7 @@ test("a command is delivered, signed, and acknowledged with the sent buzz", asyn
   const r = await row(d.id);
   expect(r).toMatchObject({ status: "sent", attempts: 1, httpStatus: 202, reason: null });
   expect(r.sentAt).not.toBeNull();
-  expect(buzzes).toEqual(["short", "short"]);
+  expect(buzzes).toEqual([]);
 });
 
 test("retries a 500 with the same event id", async () => {
@@ -213,12 +213,13 @@ test("pipeline cues buzz the pendant, distinctly; not with voice buzzes off", as
   }
   expect(CUE_PULSES).toEqual({
     heard: ["short"],
-    sent: ["short", "short"],
+    sent: [],
     no_command: ["medium"],
     failed: ["short", "short", "short"],
   });
-  // All four tell apart.
-  expect(new Set(Object.values(CUE_PULSES).map((p) => p.join())).size).toBe(4);
+  // The three that buzz tell apart.
+  const buzzing = Object.values(CUE_PULSES).filter((p) => p.length > 0);
+  expect(new Set(buzzing.map((p) => p.join())).size).toBe(3);
 
   buzzes.length = 0;
   await updateSettings(userId, { voice: { haptics: false } });

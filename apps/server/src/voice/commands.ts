@@ -24,11 +24,12 @@ type CommandRow = typeof voiceCommands.$inferSelect;
 
 /**
  * The pendant's pulses for each cue (short 100 ms, medium 300 ms, long 500 ms), told apart by count
- * and length: heard · , sent · · , nothing came of it — , not sent · · · .
+ * and length: heard · , nothing came of it — , not sent · · · . Sent is silent: the tap was enough,
+ * so only a problem buzzes again (the owner found a "sent" double tap unnecessary).
  */
 export const CUE_PULSES: Record<VoiceCue, HapticPattern[]> = {
   heard: ["short"],
-  sent: ["short", "short"],
+  sent: [],
   no_command: ["medium"],
   failed: ["short", "short", "short"],
 };
@@ -65,6 +66,7 @@ export function commandEvent(row: CommandRow, attempt: number, test = false) {
  * commands in "on" mode.)
  */
 export function cue(userId: string, cue: VoiceCue): Promise<void> {
+  if (CUE_PULSES[cue].length === 0) return Promise.resolve();
   const queue = buzzing.get(userId) ?? { chain: Promise.resolve(), stillAt: 0 };
   buzzing.set(userId, queue);
   const run = queue.chain.then(async () => {
@@ -138,7 +140,7 @@ export async function onDetection(d: VoiceDetection): Promise<void> {
 }
 
 /**
- * Send a command to the agent with retries, then tell the user how it went: the "sent" buzz when
+ * Send a command to the agent with retries, then tell the user how it went: the "sent" cue (silent) when
  * the agent took it; the "failed" buzz and a silent notification when it didn't.
  */
 export async function deliver(row: CommandRow, test = false): Promise<DeliveryOutcome> {
