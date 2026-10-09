@@ -69,11 +69,22 @@ export class SpeakerDirectory {
     return { self, other };
   }
 
-  async identify(userId: string, embedding: Float32Array): Promise<SpeakerMatch | null> {
+  /**
+   * The best match at or above the threshold. `ownerBar`: the user's own-voice bar for voice
+   * commands; their own voice matches from it when it's lower than the threshold, so a line isn't
+   * held to a stricter bar than a command (and their near misses are tagged as theirs).
+   */
+  async identify(
+    userId: string,
+    embedding: Float32Array,
+    ownerBar?: number | null,
+  ): Promise<SpeakerMatch | null> {
+    const selfThreshold = Math.min(this.threshold, ownerBar ?? this.threshold);
     let best: SpeakerMatch | null = null;
     for (const p of await this.prints(userId)) {
       const score = cosine(embedding, p.embedding);
-      if (score >= this.threshold && (!best || score > best.score)) {
+      const bar = p.isSelf ? selfThreshold : this.threshold;
+      if (score >= bar && (!best || score > best.score)) {
         best = { personId: p.personId, name: p.name, isSelf: p.isSelf, score };
       }
     }

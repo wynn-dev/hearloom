@@ -8,7 +8,13 @@ import { mediaVoices } from "../../episodes/store";
 import type { ChildMessage, HostMessage } from "../ipc";
 import type { SpeakerDirectory } from "../speakers";
 import { throughPendantCodec, transcribeClip } from "./clip";
-import { commandThreshold, logLearnVerdict, VoiceDetector } from "./detector";
+import {
+  commandThreshold,
+  logLearnVerdict,
+  PAD_MS,
+  selfPrintVerdict,
+  VoiceDetector,
+} from "./detector";
 import type { VoiceConfig } from "./types";
 
 /** Reload a user's voice settings at least this often (changes also reload them at once). */
@@ -88,7 +94,7 @@ export class VoiceRuntime {
     const v = resolveSettings(row?.settings).voice;
     const s = schema.voiceSamples;
     const scores = await db
-      .select({ score: s.speakerScore })
+      .select({ score: s.speakerScore, seconds: s.seconds })
       .from(s)
       // Taught samples only: a command's score is what the gate measured, and a vouched-for one
       // must not pull the threshold down.
@@ -98,7 +104,7 @@ export class VoiceRuntime {
     return {
       mode: v.mode,
       wake: { names: v.names, aliases: v.aliases, blocked: v.blocked },
-      minScore: commandThreshold(scores.map((r) => r.score!)),
+      minScore: commandThreshold(scores.map((r) => ({ score: r.score!, seconds: r.seconds }))),
       haptics: v.haptics,
     };
   }
@@ -184,8 +190,14 @@ export class VoiceRuntime {
     msg: Extract<HostMessage, { t: "learn_voice" }>,
   ): Promise<{ embedding: number[]; seconds: number }> {
     const pieces: Float32Array[] = [];
+    // Padded, as the gate scored it.
     for (const r of msg.ranges) {
-      const a = await loadStreamAudio(this.deps.db, msg.streamId, r.startAt, r.endAt);
+      const a = await loadStreamAudio(
+        this.deps.db,
+        msg.streamId,
+        r.startAt - PAD_MS,
+        r.endAt + PAD_MS,
+      );
       if (a) pieces.push(a);
     }
     const audio = new Float32Array(pieces.reduce((n, p) => n + p.length, 0));
@@ -198,10 +210,11 @@ export class VoiceRuntime {
     const { embedder, speakers } = this.deps;
     if (!embedder || !speakers) throw new Error("speaker model not installed");
     // The user vouched for it, but it must still sound like them (not a partner, not the TV): as
-    // much as a command must to be sent.
+    // much as a command must to be sent. And not be learned already ("This is me" on it).
     const { minScore } = await this.config(msg.userId);
     const embedding = embedder.embed(audio);
-    const refused = logLearnVerdict(await speakers.compare(msg.userId, embedding), minScore);
+    const score = await speakers.compare(msg.userId, embedding);
+    const refused = logLearnVerdict(score, minScore) ?? selfPrintVerdict(score, minScore);
     if (refused) throw new Error(refused);
     return { embedding: Array.from(embedding), seconds: audio.length / 16000 };
   }

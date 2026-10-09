@@ -1,4 +1,4 @@
-import type { TeachResultItem, VoiceCommand, VoiceStatus } from "@hearloom/api";
+import type { OwnVoiceprint, TeachResultItem, VoiceCommand, VoiceStatus } from "@hearloom/api";
 import { compactName, matchWake, nearWake, type Settings } from "@hearloom/shared";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
@@ -15,6 +15,7 @@ import {
   Square,
   ThumbsDown,
   ThumbsUp,
+  Trash2,
   X,
 } from "lucide-react";
 import { type ReactNode, useEffect, useId, useRef, useState } from "react";
@@ -22,6 +23,7 @@ import { RelTime } from "../../components/bits";
 import { Badge, type Tone } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
 import { Card, CardBody, CardHeader, PageHeader } from "../../components/ui/card";
+import { ConfirmButton } from "../../components/ui/dialog";
 import { Field, Input } from "../../components/ui/input";
 import { Dot, EmptyState, ErrorNotice, LoadingRows } from "../../components/ui/misc";
 import { SettingRow, Switch } from "../../components/ui/switch";
@@ -533,8 +535,114 @@ function TeachCard({ voice, status }: { voice: VoiceSettings; status: VoiceStatu
       <CardBody className="flex flex-col gap-5">
         {teach ? <TeachSession teach={teach} status={status} name={name ?? "Hermes"} /> : null}
         <Readiness profile={status.profile} />
+        {status.profile.voiceprints > 0 ? <OwnVoiceprints /> : null}
       </CardBody>
     </Card>
+  );
+}
+
+/** Below this average similarity to the others, a voiceprint is probably not (only) the user. */
+const OUTLIER_SIMILARITY = 0.45;
+
+const PRINT_SOURCE: Record<OwnVoiceprint["source"], string> = {
+  enrollment: "taught / command",
+  confirmed: "“This is me”",
+};
+
+/** The user's voiceprints, to spot and remove one learned from a bad clip. */
+function OwnVoiceprints() {
+  const tz = useTimeZone() ?? "UTC";
+  const now = useNow();
+  const toast = useToast();
+  const queryClient = useQueryClient();
+  const prints = useQuery(orpc.voice.voiceprints.queryOptions());
+  const remove = useMutation(
+    orpc.voice.removeVoiceprint.mutationOptions({
+      onSuccess: () => {
+        void queryClient.invalidateQueries({ queryKey: orpc.voice.key() });
+        void queryClient.invalidateQueries({ queryKey: orpc.people.key() });
+        toast({ tone: "good", title: "Voiceprint deleted" });
+      },
+    }),
+  );
+  const outliers = (prints.data ?? []).filter(
+    (p) => p.similarity !== null && p.similarity < OUTLIER_SIMILARITY,
+  ).length;
+  return (
+    <details className="text-[13px]">
+      <summary className="cursor-pointer text-xs text-ink-3 select-none">
+        Your voiceprints{prints.data ? ` (${prints.data.length})` : ""}
+        {outliers > 0 ? ` · ${outliers} unlike the rest` : ""}
+      </summary>
+      {prints.error ? (
+        <ErrorNotice error={prints.error} onRetry={() => void prints.refetch()} className="mt-2" />
+      ) : !prints.data ? (
+        <LoadingRows rows={2} />
+      ) : (
+        <div className="mt-2 overflow-x-auto">
+          <p className="mb-2 text-xs text-ink-3">
+            Each clip Hearloom learned your voice from. One that sounds unlike the rest (low
+            similarity) may be someone else or noise: it lets other voices pass as yours. Delete it.
+          </p>
+          <table className="w-full text-left text-[13px]">
+            <thead className="border-b border-line text-xs text-ink-3">
+              <tr>
+                <th className={th}>Learned</th>
+                <th className={th}>From</th>
+                <th className={cn(th, "text-right")}>Length</th>
+                <th
+                  className={cn(th, "text-right")}
+                  title="Average similarity to your other voiceprints"
+                >
+                  Like the rest
+                </th>
+                <th className={th} />
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-line">
+              {prints.data.map((p) => {
+                const outlier = p.similarity !== null && p.similarity < OUTLIER_SIMILARITY;
+                return (
+                  <tr key={p.id}>
+                    <td className={cn(td, "whitespace-nowrap text-ink-2")}>
+                      <span title={formatTime(p.createdAt, tz, true)}>
+                        <RelTime date={p.createdAt} now={now} tz={tz} />
+                      </span>
+                    </td>
+                    <td className={cn(td, "text-ink-2")}>{PRINT_SOURCE[p.source]}</td>
+                    <td className={cn(td, "tabular text-right text-ink-2")}>
+                      {p.seconds.toFixed(1)} s
+                    </td>
+                    <td className={cn(td, "tabular text-right")}>
+                      {p.similarity === null ? (
+                        "—"
+                      ) : outlier ? (
+                        <Badge tone="warn">{p.similarity.toFixed(2)}</Badge>
+                      ) : (
+                        <span className="text-ink-2">{p.similarity.toFixed(2)}</span>
+                      )}
+                    </td>
+                    <td className={cn(td, "text-right")}>
+                      <ConfirmButton
+                        title="Delete this voiceprint?"
+                        description="Hearloom stops comparing voices with this clip. The rest of your voice stays learned."
+                        confirmLabel="Delete"
+                        onConfirm={() => remove.mutateAsync({ id: p.id })}
+                        variant="ghost"
+                        size="icon"
+                      >
+                        <Trash2 aria-hidden />
+                        <span className="sr-only">Delete voiceprint</span>
+                      </ConfirmButton>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </details>
   );
 }
 
@@ -817,6 +925,9 @@ const STATUS: Record<VoiceCommand["status"], { tone: Tone; label: string }> = {
 
 const REASON: Record<string, string> = {
   no_voiceprint: "no voiceprint yet",
+  clip_missing: "audio missing (reconnected?)",
+  clip_too_short: "too short to check the voice",
+  check_error: "voice check failed",
   not_own_voice: "not your voice",
   media_voice: "TV / radio",
   rate_limited: "too many",
@@ -887,7 +998,15 @@ function CommandsCard() {
 }
 
 /** Ignored detections that can be marked as missed (the server enforces the same). */
-const MISSABLE = new Set(["near_miss", "no_command", "rate_limited", "no_voiceprint"]);
+const MISSABLE = new Set([
+  "near_miss",
+  "no_command",
+  "rate_limited",
+  "no_voiceprint",
+  "clip_missing",
+  "clip_too_short",
+  "check_error",
+]);
 
 function CommandRow({ c, tz, now }: { c: VoiceCommand; tz: string; now: number }) {
   const queryClient = useQueryClient();

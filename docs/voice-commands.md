@@ -75,17 +75,20 @@ pendant ─▶ phone ─▶ server ─▶ live pipeline child                   
   | Gate | Rule | Stored as |
   |---|---|---|
   | Mode | `off` skips detection; `shadow` stores but never sends | — / `shadow` |
-  | Own voice | A CAM++ embedding over the whole span (wake phrase + command). Its best match must be one of your own voiceprints, scoring ≥ the threshold, and not beaten by anyone else's | `ignored: no_voiceprint` / `not_own_voice` |
+  | Own voice | A CAM++ embedding of the command's utterances (wake phrase + command), each padded by 250 ms and taken from its own stream (a command can span a reconnect). Its best match must be one of your own voiceprints, scoring ≥ the threshold, and not beaten by anyone else's. A near miss (≥ 0.45, closer to you than anyone else) is scored again after up to 3 s of your recent speech from the same stream, if there is some | `ignored: no_voiceprint` / `clip_missing` / `clip_too_short` (under 0.8 s padded) / `check_error` / `not_own_voice` (with its score) |
   | TV / radio | The speaker is a media voice in this chain (`mediaVoices`) | `ignored: media_voice` |
   | Duplicate | Same speech heard by two streams: within 1.5 s, text ≥ 80% similar | dropped silently |
   | Rate | At least 2 s apart, at most 6 per minute and 30 per hour | `ignored: rate_limited` |
-  | Near miss | A greeting plus something name-like from you that didn't match ("hey hermit") | `ignored: near_miss` |
+  | Near miss | A greeting plus something name-like that didn't match ("hey hermit"), in a voice that scores at least 0.45 against yours (or a line tagged as you) | `ignored: near_miss` |
 
   Mute needs nothing extra: the phone doesn't upload muted audio.
 - **Own-voice threshold:**
   - The default is 0.65.
   - After 3 samples, it is learned from how similar your samples were to your voice: the 20th
-    percentile minus 0.05, clamped to 0.55–0.75.
+    percentile minus 0.05, clamped to 0.45–0.75. Command-length samples (≤ 2.5 s) are used when
+    there are at least 3 of them: long clips score higher than a short command does.
+  - Transcript lines are tagged as you from the same bar when it's under
+    `SPEAKER_MATCH_THRESHOLD` (0.6), so a line is never held to a stricter bar than a command.
 
 ### Delivery
 
@@ -140,7 +143,11 @@ Short pulses (100 ms), told apart by count and length:
 | · one tap | heard "Hey Hermes" | while you're still talking, typically under a second after the name |
 | · · two taps | the agent answered (its reply goes out on its channel right after) | when its run ends, within 2 minutes of sending |
 | — one longer buzz (300 ms) | no command: nothing followed (8 s), someone else spoke, or it wasn't the wake phrase after all | when that's clear |
-| · · · three taps | not sent: rejected here (rate limit, TV voice, …), the agent couldn't be reached, or **no reply within 2 minutes** | after the gate, after the retries, or 2 minutes after sending |
+| · · · three taps | not sent: rejected here (rate limit, TV voice, your voice not sure enough, the check broke, …), the agent couldn't be reached, or **no reply within 2 minutes** | after the gate, after the retries, or 2 minutes after sending |
+
+- **A near miss of your own voice** (scoring 0.45 or more, under the threshold, closer to you than
+  to anyone else) doesn't tap when it's heard, but gets the three taps once the gate has decided.
+  A voice that's clearly someone else's stays silent.
 
 - **On/off:** Voice page → **Buzz the pendant** (also in the app's Settings → "Buzz pendant for
   voice commands"); on by default. It's separate from "Buzz pendant when urgent", which is for
@@ -198,8 +205,8 @@ Teaching reuses the voiceprint machinery behind "This is me" (`voiceprints` rows
   - the utterance's audio (padded by 250 ms) is embedded with CAM++ and compared with your
     voiceprints so far. That score is the sample's quality and feeds the own-voice threshold;
   - **it must sound like you.** Once you have a voiceprint, a sample is refused ("That didn't
-    sound like you") if it scores below 0.55 against it (the lowest own-voice bar a command can
-    ever need, so learned samples can't drag the threshold under it) or closer to someone else's
+    sound like you") if it scores below 0.55 against it (above the lowest own-voice bar a command
+    can ever need, so learned samples can't drag the threshold under it) or closer to someone else's
     voice. Before your
     first voiceprint, a sample clearly matching another enrolled person is refused. Whoever else
     talks while the page is open isn't enrolled as you;
@@ -253,6 +260,12 @@ Teaching reuses the voiceprint machinery behind "This is me" (`voiceprints` rows
     timeout or restart while the live pipeline works stores nothing. "This is me" and People
     voiceprints have no sample rows by design and are never touched by this.
   - **Only taught samples set the own-voice threshold.** Vouched-for commands never pull it down.
+  - **No outliers, no copies.** Every way a voiceprint of your own voice is added (teaching, 👍 /
+    Missed, "This is me") skips a clip that is a copy of one already learned (similarity ≥ 0.98),
+    and 👍 / Missed / "This is me" also skip one that doesn't score your threshold against the
+    voiceprints you have (teaching has its own 0.55 bar). "This is me" still attributes the line.
+  - **Your voiceprints** are listed on the Voice page (when, from what, how long, how alike the
+    rest) and can be deleted one by one.
 - **Readiness on the Voice page:**
   - number of samples and seconds of voice learned;
   - consistency: the average similarity of samples to your voice;

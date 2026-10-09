@@ -84,8 +84,12 @@ export class LivePipelineHost {
   }
 
   /** Ask the pipeline (which holds the speaker model) to learn a voiceprint from an utterance. */
-  enroll(userId: string, personId: string, utteranceId: string): Promise<number> {
-    return this.request<number>((requestId) => ({
+  enroll(
+    userId: string,
+    personId: string,
+    utteranceId: string,
+  ): Promise<{ sampleSeconds: number; note: string | null }> {
+    return this.request((requestId) => ({
       t: "enroll",
       requestId,
       userId,
@@ -227,7 +231,9 @@ export class LivePipelineHost {
       case "enrolled": {
         const p = this.pending.get(msg.requestId);
         this.pending.delete(msg.requestId);
-        if (p) msg.ok ? p.resolve(msg.sampleSeconds as never) : p.reject(new Error(msg.error));
+        if (!p) return;
+        if (msg.ok) p.resolve({ sampleSeconds: msg.sampleSeconds, note: msg.note } as never);
+        else p.reject(new Error(msg.error));
         return;
       }
       case "learned": {

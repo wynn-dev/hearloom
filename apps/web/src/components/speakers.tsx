@@ -35,11 +35,16 @@ export function IdentifySpeaker({
         setOpen(false);
         void queryClient.invalidateQueries({ queryKey: orpc.timeline.key() });
         void queryClient.invalidateQueries({ queryKey: orpc.people.key() });
-        toast({
-          tone: "good",
-          title: "Voice learned",
-          description: `${res.sampleSeconds.toFixed(1)} s of audio added to the voiceprint.`,
-        });
+        void queryClient.invalidateQueries({ queryKey: orpc.voice.key() });
+        toast(
+          res.note
+            ? { tone: "info", title: "Speaker saved, voice not learned", description: res.note }
+            : {
+                tone: "good",
+                title: "Voice learned",
+                description: `${res.sampleSeconds.toFixed(1)} s of audio added to the voiceprint.`,
+              },
+        );
       },
       onError: (err) =>
         toast({ tone: "bad", title: "Couldn't learn this voice", description: errorMessage(err) }),

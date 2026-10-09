@@ -1,5 +1,5 @@
 import { schema } from "@hearloom/db";
-import { SPEAKER_MODEL_ID } from "@hearloom/inference";
+import { cosine, SPEAKER_MODEL_ID } from "@hearloom/inference";
 import { and, avg, count, desc, eq, isNotNull, ne, sum } from "drizzle-orm";
 import { db } from "../db";
 import { commandThreshold, MIN_PRINT_SAMPLES } from "../live/voice/detector";
@@ -54,6 +54,56 @@ export async function insertVoiceprint(
   return row!.id;
 }
 
+/**
+ * The user's own voiceprints (current speaker model), newest first, each with its average
+ * similarity to the others: an outlier (a clip of someone else, or noise) stands out.
+ */
+export async function listOwnVoiceprints(userId: string) {
+  const personId = await selfPersonId(userId);
+  if (!personId) return [];
+  const rows = await db
+    .select({
+      id: voiceprints.id,
+      createdAt: voiceprints.createdAt,
+      source: voiceprints.source,
+      seconds: voiceprints.sampleSeconds,
+      embedding: voiceprints.embedding,
+    })
+    .from(voiceprints)
+    .where(
+      and(
+        eq(voiceprints.userId, userId),
+        eq(voiceprints.personId, personId),
+        eq(voiceprints.model, SPEAKER_MODEL_ID),
+      ),
+    )
+    .orderBy(desc(voiceprints.createdAt));
+  const embeddings = rows.map((r) => Float32Array.from(r.embedding));
+  return rows.map(({ embedding: _, ...r }, i) => {
+    let sum = 0;
+    for (const [j, e] of embeddings.entries()) if (j !== i) sum += cosine(embeddings[i]!, e);
+    return { ...r, similarity: rows.length > 1 ? sum / (rows.length - 1) : null };
+  });
+}
+
+/** Forget one of the user's own voiceprints (false: no such voiceprint of theirs). */
+export async function removeOwnVoiceprint(userId: string, id: string): Promise<boolean> {
+  const personId = await selfPersonId(userId);
+  if (!personId) return false;
+  // Its sample row stays (the voiceprint link is cleared): the sample still counts as taught.
+  const removed = await db
+    .delete(voiceprints)
+    .where(
+      and(
+        eq(voiceprints.id, id),
+        eq(voiceprints.userId, userId),
+        eq(voiceprints.personId, personId),
+      ),
+    )
+    .returning({ id: voiceprints.id });
+  return removed.length > 0;
+}
+
 /** How well Hearloom knows the user's voice and how they say the agent's name. */
 export async function voiceProfile(userId: string) {
   const personId = await selfPersonId(userId);
@@ -76,6 +126,7 @@ export async function voiceProfile(userId: string) {
   const recent = await db
     .select({
       score: voiceSamples.speakerScore,
+      seconds: voiceSamples.seconds,
       nameScore: voiceSamples.nameScore,
       source: voiceSamples.source,
     })
@@ -85,7 +136,7 @@ export async function voiceProfile(userId: string) {
     .limit(50);
   // Same samples as the live pipeline's threshold: taught ones, not vouched-for commands.
   const scores = recent.flatMap((r) =>
-    r.score === null || r.source === "command" ? [] : [r.score],
+    r.score === null || r.source === "command" ? [] : [{ score: r.score, seconds: r.seconds }],
   );
   const [scored] = await db
     .select({ n: count() })

@@ -45,6 +45,8 @@ export interface LiveDeps {
   voice: VoiceDetector | null;
   /** Words to bias recognition toward for this user (the agent's name). */
   terms(userId: string): Promise<string[]>;
+  /** The user's own-voice bar for voice commands (transcript lines use it for them too). */
+  ownerBar?(userId: string): Promise<number>;
   /** Ask the server to refresh clients' views for this user. */
   invalidate(userId: string, keys: Array<"timeline" | "status">): void;
   log(message: string): void;
@@ -476,7 +478,8 @@ export class StreamProcessor {
     let isWearer: boolean | null = null;
     if (audio && audio.length >= MIN_EMBED_SAMPLES && this.deps.embedder) {
       const emb = this.deps.embedder.embed(audio);
-      const match = await this.deps.speakers?.identify(userId, emb);
+      const ownerBar = await this.deps.ownerBar?.(userId).catch(() => null);
+      const match = await this.deps.speakers?.identify(userId, emb, ownerBar);
       if (match) {
         personId = match.personId;
         isWearer = match.isSelf;

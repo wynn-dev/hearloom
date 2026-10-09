@@ -31,7 +31,7 @@ import {
   setReplyTimeout,
 } from "./commands";
 import { MAX_AGE_MS } from "./deliver";
-import { ensureSelfPerson, voiceProfile } from "./profile";
+import { ensureSelfPerson, listOwnVoiceprints, removeOwnVoiceprint, voiceProfile } from "./profile";
 import {
   IDLE_MS,
   isTeaching,
@@ -554,6 +554,70 @@ test("a voiceprint is never stored without the sample that removes it", async ()
   expect(await voiceprintIds()).toEqual(before);
   expect(before).toContain(thisIsMe);
   await db.delete(schema.voiceprints).where(eq(schema.voiceprints.id, thisIsMe));
+  await updateSettings(userId, { voice: { aliases: [], blocked: [] } });
+});
+
+test("the user's voiceprints are listed with how alike they are, and one can be deleted", async () => {
+  const personId = await ensureSelfPerson(userId, "Tester");
+  const add = async (embedding: number[], seconds: number) => {
+    const [vp] = await db
+      .insert(schema.voiceprints)
+      .values({
+        userId,
+        personId,
+        model: SPEAKER_MODEL_ID,
+        embedding,
+        sampleSeconds: seconds,
+        source: "confirmed",
+      })
+      .returning({ id: schema.voiceprints.id });
+    return vp!.id;
+  };
+  await db.delete(schema.voiceprints).where(eq(schema.voiceprints.userId, userId));
+  const a = await add([1, 0, 0], 2);
+  const b = await add([0.8, 0.6, 0], 3);
+  const outlier = await add([0, 0, 1], 1.6);
+  // Someone else's voiceprint isn't listed, nor can it be deleted here.
+  const [other] = await db
+    .insert(schema.people)
+    .values({ userId, name: "Partner" })
+    .returning({ id: schema.people.id });
+  const [theirs] = await db
+    .insert(schema.voiceprints)
+    .values({
+      userId,
+      personId: other!.id,
+      model: SPEAKER_MODEL_ID,
+      embedding: [0, 1, 0],
+      sampleSeconds: 2,
+      source: "confirmed",
+    })
+    .returning({ id: schema.voiceprints.id });
+
+  const list = await listOwnVoiceprints(userId);
+  expect(list.map((p) => p.id).sort()).toEqual([a, b, outlier].sort());
+  const byId = new Map(list.map((p) => [p.id, p]));
+  expect(byId.get(a)!.similarity).toBeCloseTo((0.8 + 0) / 2);
+  expect(byId.get(b)!.similarity).toBeCloseTo((0.8 + 0) / 2);
+  expect(byId.get(outlier)!.similarity).toBeCloseTo(0);
+  expect(byId.get(outlier)).toMatchObject({ seconds: 1.6, source: "confirmed" });
+
+  expect(await removeOwnVoiceprint(userId, theirs!.id)).toBe(false);
+  expect(await removeOwnVoiceprint(crypto.randomUUID(), outlier)).toBe(false);
+  expect(await removeOwnVoiceprint(userId, outlier)).toBe(true);
+  expect((await listOwnVoiceprints(userId)).map((p) => p.id).sort()).toEqual([a, b].sort());
+
+  await db.delete(schema.people).where(eq(schema.people.id, other!.id));
+  await db.delete(schema.voiceprints).where(eq(schema.voiceprints.userId, userId));
+});
+
+test("feedback: Missed is allowed where the voice couldn't be checked", async () => {
+  for (const reason of ["clip_missing", "clip_too_short", "check_error"] as const) {
+    const d = detection({ status: "ignored", reason });
+    await onDetection(d);
+    await setFeedback(userId, d.id, "missed");
+    expect((await row(d.id)).feedback).toBe("missed");
+  }
   await updateSettings(userId, { voice: { aliases: [], blocked: [] } });
 });
 

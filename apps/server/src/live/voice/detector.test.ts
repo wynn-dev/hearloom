@@ -8,23 +8,37 @@ import {
   DEFAULT_MIN_SCORE,
   logLearnVerdict,
   MAX_TRANSCRIPT_CHARS,
+  selfPrintVerdict,
   TEACH_GRACE_MS,
   TEACH_MIN_SELF,
   THRESHOLD_FLOOR,
   teachVoiceVerdict,
   VoiceDetector,
+  type VoiceScore,
 } from "./detector";
 import type { TeachHeard, VoiceConfig, VoiceCueEvent, VoiceDetection } from "./types";
 
 const T = 1_800_000_000_000;
 
-function setup(over: { config?: Partial<VoiceConfig>; self?: number | null; other?: number } = {}) {
+function setup(
+  over: {
+    config?: Partial<VoiceConfig>;
+    self?: number | null;
+    other?: number;
+    /** Score by clip length (s), instead of the fixed self/other. */
+    scoreBySeconds?: (seconds: number) => VoiceScore | null;
+  } = {},
+) {
   let now = T;
   const detections: VoiceDetection[] = [];
   const cueEvents: VoiceCueEvent[] = [];
   const taught: TeachHeard[] = [];
   const learned: number[] = [];
   const audioCalls: [number, number][] = [];
+  /** The stream each audio call went to. */
+  const audioStreams: string[] = [];
+  /** Lengths (s) of the clips scored. */
+  const scored: number[] = [];
   const media = new Set<string>();
   const config: VoiceConfig = {
     mode: "on",
@@ -34,9 +48,14 @@ function setup(over: { config?: Partial<VoiceConfig>; self?: number | null; othe
     ...over.config,
   };
   const scores = { self: over.self === undefined ? 0.8 : over.self, other: over.other ?? 0.2 };
+  let scoreError: Error | null = null;
   const detector = new VoiceDetector({
     config: async () => config,
-    score: async () => ({ ...scores }),
+    score: async (_u, audio) => {
+      if (scoreError) throw scoreError;
+      scored.push(audio.length / 16_000);
+      return over.scoreBySeconds ? over.scoreBySeconds(audio.length / 16_000) : { ...scores };
+    },
     isMediaVoice: async (_u, chainId, key) => media.has(`${chainId}:${key}`),
     embed: async (audio) => {
       learned.push(audio.length);
@@ -50,15 +69,28 @@ function setup(over: { config?: Partial<VoiceConfig>; self?: number | null; othe
   });
   let lastSpeech = 0;
   let heardUntil = 0;
-  const source: AudioSource = {
-    streamId: "s1",
-    audio: (from, to) => {
-      audioCalls.push([from - T, to - T]);
-      return new Float32Array(Math.max(0, Math.round((to - from) * 16)));
-    },
-    lastSpeechAt: () => lastSpeech,
-    heardUntil: () => heardUntil,
+  const sources = new Map<string, AudioSource>();
+  /** Streams whose audio is no longer retained. */
+  const noAudio = new Set<string>();
+  const sourceFor = (streamId: string): AudioSource => {
+    let src = sources.get(streamId);
+    if (!src) {
+      src = {
+        streamId,
+        audio: (from, to) => {
+          audioCalls.push([from - T, to - T]);
+          audioStreams.push(streamId);
+          if (noAudio.has(streamId)) return null;
+          return new Float32Array(Math.max(0, Math.round((to - from) * 16)));
+        },
+        lastSpeechAt: () => lastSpeech,
+        heardUntil: () => heardUntil,
+      };
+      sources.set(streamId, src);
+    }
+    return src;
   };
+  const source = sourceFor("s1");
   const say = async (
     text: string,
     startS: number,
@@ -81,7 +113,7 @@ function setup(over: { config?: Partial<VoiceConfig>; self?: number | null; othe
         chainId: "c1",
         ...o,
       },
-      source,
+      sourceFor(o.streamId ?? "s1"),
     );
   };
   /**
@@ -109,7 +141,7 @@ function setup(over: { config?: Partial<VoiceConfig>; self?: number | null; othe
     return detector.partial(
       "u1",
       { text, startAt: T + startS * 1000, tokens, audioAt: T + audioS * 1000, speakerKey: "S1" },
-      streamId === "s1" ? source : { ...source, streamId },
+      sourceFor(streamId),
     );
   };
   return {
@@ -121,9 +153,16 @@ function setup(over: { config?: Partial<VoiceConfig>; self?: number | null; othe
     taught,
     learned,
     audioCalls,
+    audioStreams,
+    noAudio,
+    scored,
     media,
     scores,
     say,
+    source,
+    failScoring: (err: Error | null) => {
+      scoreError = err;
+    },
     setNow: (s: number) => {
       now = T + s * 1000;
     },
@@ -171,6 +210,22 @@ describe("VoiceDetector", () => {
     const someoneElse = setup({ self: 0.7, other: 0.75 });
     await someoneElse.say("Hey Hermes, lights on", 0, 2);
     expect(someoneElse.detections[0]!.reason).toBe("not_own_voice");
+
+    const clearlyNot = setup({ self: 0.3 });
+    await clearlyNot.say("Hey Hermes, lights on", 0, 2);
+    expect(clearlyNot.detections[0]).toMatchObject({
+      reason: "not_own_voice",
+      speakerScore: 0.3,
+    });
+  });
+
+  test("the own-voice check scores padded audio (as teaching samples are)", async () => {
+    const t = setup();
+    await t.say("Hey Hermes, lights on", 10, 11.4);
+    // 1.4 s of speech, 0.25 s either side.
+    expect(t.audioCalls.at(-1)).toEqual([9750, 11650]);
+    expect(t.scored.at(-1)).toBeCloseTo(1.9);
+    expect(t.detections[0]!.status).toBe("pending");
   });
 
   test("media voices are ignored", async () => {
@@ -208,6 +263,18 @@ describe("VoiceDetector", () => {
     });
     await t.say("Hey Anna, what's up", 5, 7);
     expect(t.detections).toHaveLength(1);
+  });
+
+  test("a misheard wake phrase is logged when it sounds like the user, tagged or not", async () => {
+    // A bare "Hey Adri" is too short for the transcript to tag it as theirs.
+    const near = setup({ self: 0.5 });
+    await near.say("Hey hermit.", 0, 0.8, { isSelf: null });
+    expect(near.detections[0]).toMatchObject({ reason: "near_miss", speakerScore: 0.5 });
+    // Someone else's misheard "hey …": nothing logged, nothing buzzed.
+    const other = setup({ self: 0.3 });
+    await other.say("Hey hermit.", 0, 0.8, { isSelf: null });
+    expect(other.detections).toHaveLength(0);
+    expect(other.cues()).toEqual([]);
   });
 
   test("teaching: matches the prompt, learns, and never sends a command", async () => {
@@ -294,7 +361,7 @@ describe("review fixes", () => {
     expect(teachVoiceVerdict({ self: 0.6, other: 0.65 })).not.toBeNull();
     expect(teachVoiceVerdict({ self: 0.4, other: 0 })).not.toBeNull();
     // Never below the lowest bar a command can need (review round 2): a 0.5 voice isn't learned.
-    expect(TEACH_MIN_SELF).toBe(THRESHOLD_FLOOR);
+    expect(TEACH_MIN_SELF).toBeGreaterThanOrEqual(THRESHOLD_FLOOR);
     expect(teachVoiceVerdict({ self: 0.5, other: 0 })).not.toBeNull();
     expect(teachVoiceVerdict({ self: 0.56, other: 0.2 })).toBeNull();
   });
@@ -306,6 +373,27 @@ describe("review fixes", () => {
     expect(logLearnVerdict({ self: 0.7, other: 0.72 }, 0.65)).not.toBeNull();
     expect(logLearnVerdict({ self: null, other: 0 }, 0.65)).not.toBeNull();
     expect(logLearnVerdict({ self: 0.66, other: 0.3 }, 0.65)).toBeNull();
+  });
+
+  test("selfPrintVerdict: no outliers, no copies; the first one is free", () => {
+    // The first voiceprint: nothing to compare with, unless it's clearly someone else on file.
+    expect(selfPrintVerdict({ self: null, other: 0.2 }, 0.57)).toBeNull();
+    expect(selfPrintVerdict({ self: null, other: 0.7 }, 0.57)).not.toBeNull();
+    // The real bad one: a "This is me" clip that scored 0.44 against the user's voice.
+    expect(selfPrintVerdict({ self: 0.44, other: 0.2 }, 0.57)).not.toBeNull();
+    expect(selfPrintVerdict({ self: 0.6, other: 0.65 }, 0.57)).not.toBeNull();
+    // The same clip learned twice (cos 1.000).
+    expect(selfPrintVerdict({ self: 1, other: 0.2 }, 0.57)).toContain("Already learned");
+    expect(selfPrintVerdict({ self: 0.985, other: 0.2 }, 0.57)).toContain("Already learned");
+    expect(selfPrintVerdict({ self: 0.7, other: 0.2 }, 0.57)).toBeNull();
+  });
+
+  test("teaching the same clip again adds a sample, not a second voiceprint", async () => {
+    const t = setup({ self: 0.99 });
+    t.detector.setTeach("u1", prompt);
+    await t.say("Hey Hermes, what's the weather tomorrow?", 0, 2.5);
+    expect(t.taught[0]).toMatchObject({ ok: true, embedding: null });
+    expect(t.learned).toHaveLength(0);
   });
 
   test("the last teaching phrase, finalized after Done, is not a command", async () => {
@@ -330,9 +418,10 @@ describe("review fixes", () => {
     await t.say("Hey Hermes.", 0, 0.8, { isSelf: null });
     t.audioCalls.length = 0;
     await t.say("What's on my calendar?", 5, 7);
+    // Each padded.
     expect(t.audioCalls).toEqual([
-      [0, 800],
-      [5000, 7000],
+      [-250, 1050],
+      [4750, 7250],
     ]);
     expect(t.detections[0]!.parts).toEqual([
       { startAt: T, endAt: T + 800 },
@@ -360,11 +449,21 @@ describe("review fixes", () => {
 });
 
 test("commandThreshold", () => {
+  const long = (...scores: number[]) => scores.map((score) => ({ score, seconds: 3.2 }));
+  const short = (...scores: number[]) => scores.map((score) => ({ score, seconds: 1.6 }));
   expect(commandThreshold([])).toBe(DEFAULT_MIN_SCORE);
-  expect(commandThreshold([0.8, 0.9])).toBe(DEFAULT_MIN_SCORE);
-  expect(commandThreshold([0.7, 0.75, 0.8, 0.85, 0.9])).toBeCloseTo(0.65);
-  expect(commandThreshold([0.3, 0.4, 0.5])).toBe(0.55);
-  expect(commandThreshold([0.95, 0.95, 0.95])).toBe(0.75);
+  expect(commandThreshold(long(0.8, 0.9))).toBe(DEFAULT_MIN_SCORE);
+  expect(commandThreshold(long(0.7, 0.75, 0.8, 0.85, 0.9))).toBeCloseTo(0.65);
+  // Never under the floor, never over 0.75.
+  expect(commandThreshold(long(0.3, 0.4, 0.5))).toBe(THRESHOLD_FLOOR);
+  expect(THRESHOLD_FLOOR).toBe(0.45);
+  expect(commandThreshold(long(0.95, 0.95, 0.95))).toBe(0.75);
+  // Tuned on command-length samples when there are enough: they score lower than long ones.
+  expect(commandThreshold([...long(0.7, 0.72, 0.75, 0.8), ...short(0.55, 0.6, 0.62)])).toBeCloseTo(
+    0.5,
+  );
+  // Too few of them: all samples.
+  expect(commandThreshold([...long(0.7, 0.72, 0.75, 0.8), ...short(0.55, 0.6)])).toBeCloseTo(0.55);
 });
 
 describe("pendant cues", () => {
@@ -427,8 +526,31 @@ describe("pendant cues", () => {
     expect(t.cues()).toEqual(["heard:partial"]);
   });
 
-  test("not the user's voice: no buzz at all", async () => {
-    const t = setup({ self: 0.5 });
+  test("clearly not the user's voice: no buzz at all", async () => {
+    for (const voice of [
+      { self: 0.31, other: 0.2 },
+      // Closer to someone else on file than to the user.
+      { self: 0.55, other: 0.6 },
+    ]) {
+      const t = setup(voice);
+      await t.hear(
+        [
+          ["Hey", 0.3],
+          ["Hermes,", 0.8],
+          ["what's", 1.1],
+        ],
+        0,
+        1.2,
+      );
+      await t.say("Hey Hermes, what's 17 times 23?", 0, 2.5);
+      expect(t.cues()).toEqual([]);
+      expect(t.detections[0]).toMatchObject({ reason: "not_own_voice", speakerScore: voice.self });
+    }
+  });
+
+  test("a near miss of the user's own voice: no tap, but told it failed, and recorded", async () => {
+    // Above the floor, under the bar (0.65), closer to the user than to anyone else.
+    const t = setup({ self: 0.52, other: 0.31 });
     await t.hear(
       [
         ["Hey", 0.3],
@@ -439,8 +561,75 @@ describe("pendant cues", () => {
       1.2,
     );
     await t.say("Hey Hermes, what's 17 times 23?", 0, 2.5);
-    expect(t.cues()).toEqual([]);
-    expect(t.detections[0]!.reason).toBe("not_own_voice");
+    expect(t.cues()).toEqual(["failed"]);
+    expect(t.detections[0]).toMatchObject({
+      status: "ignored",
+      reason: "not_own_voice",
+      speakerScore: 0.52,
+    });
+    // Another stream's copy of the same words isn't told again.
+    await t.say("Hey Hermes, what's 17 times 23?", 0.05, 2.5, { streamId: "s2" });
+    expect(t.cues()).toEqual(["failed"]);
+  });
+
+  test("a near miss in shadow mode or with buzzes off: recorded, never buzzed", async () => {
+    for (const config of [{ haptics: false }, { mode: "shadow" as const }]) {
+      const t = setup({ self: 0.52, config });
+      await t.say("Hey Hermes, lights on", 0, 2);
+      expect(t.cues()).toEqual([]);
+      expect(t.detections[0]).toMatchObject({ reason: "not_own_voice", speakerScore: 0.52 });
+    }
+  });
+
+  test("a near miss is scored again after the user's recent speech on the same stream", async () => {
+    // Short clips score low; with 3 s more of the same voice it's clear.
+    const t = setup({
+      scoreBySeconds: (s) => ({ self: s >= 4 ? 0.7 : 0.55, other: 0.25 }),
+    });
+    await t.say("I'm going to take the dog out now.", 0, 4, { isSelf: true });
+    t.audioCalls.length = 0;
+    await t.say("Hey Hermes, lights on", 10, 11.4, { isSelf: null });
+    expect(t.detections.at(-1)).toMatchObject({ status: "pending", speakerScore: 0.7 });
+    // The last 3 s of that speech, then the padded command.
+    expect(t.audioCalls).toContainEqual([1000, 4000]);
+    expect(t.scored.at(-1)).toBeCloseTo(3 + 1.9);
+    expect(t.cues()).toEqual(["heard:final"]);
+  });
+
+  test("earlier speech from another stream, or someone else's, isn't used", async () => {
+    const byLength = (s: number) => ({ self: s >= 4 ? 0.7 : 0.55, other: 0.25 });
+    const other = setup({ scoreBySeconds: byLength });
+    await other.say("I'm going to take the dog out now.", 0, 4, { isSelf: true, streamId: "s2" });
+    await other.say("Hey Hermes, lights on", 10, 11.4, { isSelf: null });
+    expect(other.detections.at(-1)).toMatchObject({ reason: "not_own_voice", speakerScore: 0.55 });
+    expect(other.cues()).toEqual(["failed"]);
+
+    const untagged = setup({ scoreBySeconds: byLength });
+    await untagged.say("I'm going to take the dog out now.", 0, 4, { isSelf: null });
+    await untagged.say("Hey Hermes, lights on", 10, 11.4, { isSelf: null });
+    expect(untagged.detections.at(-1)!.reason).toBe("not_own_voice");
+
+    // A voice that doesn't sound like the user's isn't carried over the bar by theirs.
+    const stranger = setup({ scoreBySeconds: (s) => ({ self: s >= 4 ? 0.7 : 0.3, other: 0.2 }) });
+    await stranger.say("I'm going to take the dog out now.", 0, 4, { isSelf: true });
+    await stranger.say("Hey Hermes, lights on", 10, 11.4, { isSelf: null });
+    expect(stranger.detections.at(-1)).toMatchObject({
+      reason: "not_own_voice",
+      speakerScore: 0.3,
+    });
+    expect(stranger.cues()).toEqual([]);
+  });
+
+  test("the own-voice check breaks: recorded as check_error, told it failed", async () => {
+    const t = setup();
+    t.failScoring(new Error("db down"));
+    await t.say("Hey Hermes, lights on", 0, 2);
+    expect(t.detections[0]).toMatchObject({ status: "ignored", reason: "check_error" });
+    expect(t.cues()).toEqual(["failed"]);
+    // The detector keeps working.
+    t.failScoring(null);
+    await t.say("Hey Hermes, lights off", 10, 12);
+    expect(t.detections[1]!.status).toBe("pending");
   });
 
   test("wake word alone, then nothing: heard, then no command", async () => {
@@ -670,10 +859,52 @@ describe("pendant cues: one tap, one outcome", () => {
   });
 
   test("too short to check the voice: no tap, as the command isn't sent either", async () => {
+    // 0.25 s of words: 0.75 s padded, under the 0.8 s the check needs.
     const t = setup();
-    await t.say("Hey Hermes, stop", 0, 0.7);
+    await t.say("Hey Hermes, stop", 0, 0.25);
     expect(t.cues()).toEqual([]);
+    expect(t.detections[0]!.reason).toBe("clip_too_short");
+    // 0.7 s of words is enough once padded.
+    const padded = setup();
+    await padded.say("Hey Hermes, stop", 0, 0.7);
+    expect(padded.detections[0]!.status).toBe("pending");
+  });
+
+  test("no voiceprint yet: said so (not mistaken for missing audio)", async () => {
+    const t = setup({ self: null });
+    await t.say("Hey Hermes, stop", 0, 1.5);
     expect(t.detections[0]!.reason).toBe("no_voiceprint");
+  });
+
+  test("a command across a reconnect: each part's audio from its own stream", async () => {
+    const t = setup();
+    await t.say("Hey Hermes.", 0, 0.8, { isSelf: null });
+    t.audioCalls.length = 0;
+    t.audioStreams.length = 0;
+    await t.say("What's on my calendar?", 3, 5, { streamId: "s2" });
+    expect(t.audioStreams).toEqual(["s1", "s2"]);
+    expect(t.audioCalls).toEqual([
+      [-250, 1050],
+      [2750, 5250],
+    ]);
+    expect(t.detections[0]!.status).toBe("pending");
+  });
+
+  test("the wake phrase's stream is gone: the rest is checked; none left: clip_missing", async () => {
+    const t = setup();
+    await t.say("Hey Hermes.", 0, 0.8, { isSelf: null });
+    t.detector.dropSource("s1");
+    t.audioStreams.length = 0;
+    await t.say("What's on my calendar?", 3, 5, { streamId: "s2" });
+    expect(t.audioStreams).toEqual(["s2"]);
+    expect(t.detections[0]!.status).toBe("pending");
+
+    // The stream no longer has the audio: not mistaken for "no voiceprint".
+    const gone = setup();
+    gone.noAudio.add("s3");
+    await gone.say("Hey Hermes, what's on my calendar?", 0, 2, { streamId: "s3" });
+    expect(gone.detections[0]!.reason).toBe("clip_missing");
+    expect(gone.cues()).toEqual([]);
   });
 
   test("the stream ends while waiting for the command: no command", async () => {

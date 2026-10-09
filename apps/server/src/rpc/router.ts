@@ -27,7 +27,7 @@ import { invalidate } from "../realtime";
 import { clientKind, isBanned, listSessions, releasePhones, revokeSession } from "../sessions";
 import { getSettings, updateSettings } from "../settings";
 import { FeedbackError, listCommands, sendTestCommand, setFeedback } from "../voice/commands";
-import { voiceProfile } from "../voice/profile";
+import { listOwnVoiceprints, removeOwnVoiceprint, voiceProfile } from "../voice/profile";
 import {
   skipPhrase,
   startTeach,
@@ -643,6 +643,8 @@ export const router = authed.router({
           .returning({ id: people.id });
         id = row!.id;
       }
+      // Whose voiceprints are the user's own changed: the live pipeline's caches are stale.
+      if (input.isSelf !== undefined) livePipeline.voiceChanged(userId);
       invalidate(userId, ["people"]);
       const person = (await listPeople(userId)).find((p) => p.id === id);
       if (!person) throw new ORPCError("NOT_FOUND");
@@ -693,16 +695,16 @@ export const router = authed.router({
             .returning({ id: people.id })
         )[0]!.id;
       }
-      let sampleSeconds: number;
+      let learned: { sampleSeconds: number; note: string | null };
       try {
-        sampleSeconds = await livePipeline.enroll(userId, personId, input.utteranceId);
+        learned = await livePipeline.enroll(userId, personId, input.utteranceId);
       } catch (err) {
         throw new ORPCError("BAD_REQUEST", {
           message: err instanceof Error ? err.message : String(err),
         });
       }
-      invalidate(userId, ["people", "timeline"]);
-      return { personId, sampleSeconds };
+      invalidate(userId, ["people", "timeline", "voice"]);
+      return { personId, ...learned };
     }),
   },
 
@@ -807,6 +809,17 @@ export const router = authed.router({
           throw new ORPCError("BAD_REQUEST", { message: err.message });
         throw err;
       }
+    }),
+    voiceprints: authed.voice.voiceprints.handler(({ context }) =>
+      listOwnVoiceprints((context as Ctx).userId),
+    ),
+    removeVoiceprint: authed.voice.removeVoiceprint.handler(async ({ context, input }) => {
+      const { userId } = context as Ctx;
+      if (!(await removeOwnVoiceprint(userId, input.id)))
+        throw new ORPCError("NOT_FOUND", { message: "voiceprint not found" });
+      livePipeline.voiceChanged(userId);
+      invalidate(userId, ["voice", "people"]);
+      return { ok: true as const };
     }),
     test: authed.voice.test.handler(async ({ context }) => {
       const r = await sendTestCommand((context as Ctx).userId);
