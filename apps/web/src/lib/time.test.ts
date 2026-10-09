@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { dayInZone, dayRange, zonedMidnight } from "./time";
+import { dayInZone, dayRange, formatDayRelative, zonedMidnight } from "./time";
 
 describe("zonedMidnight", () => {
   test.each([
@@ -17,5 +17,23 @@ describe("zonedMidnight", () => {
     expect(dayInZone(s.getTime() - 60_000, tz) < day).toBe(true);
     const { from, to } = dayRange(day, tz);
     expect((to.getTime() - from.getTime()) / 3_600_000).toBe(hours);
+  });
+});
+
+describe("formatDayRelative", () => {
+  const now = Date.parse("2026-10-09T10:00:00Z");
+  test("by calendar day in the zone", () => {
+    expect(formatDayRelative(Date.parse("2026-10-09T00:30:00Z"), now, "UTC")).toBe("Today");
+    expect(formatDayRelative(Date.parse("2026-10-08T23:59:00Z"), now, "UTC")).toBe("Yesterday");
+    // 23:30 UTC on the 8th is already the 9th in Amsterdam.
+    expect(formatDayRelative(Date.parse("2026-10-08T23:30:00Z"), now, "Europe/Amsterdam")).toBe(
+      "Today",
+    );
+    expect(formatDayRelative(Date.parse("2026-10-07T12:00:00Z"), now, "UTC")).not.toMatch(
+      /Today|Yesterday/,
+    );
+  });
+  test("a clock slightly ahead of ours is still today", () => {
+    expect(formatDayRelative(now + 60_000, now, "UTC")).toBe("Today");
   });
 });

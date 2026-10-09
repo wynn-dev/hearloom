@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as AppRouteImport } from './routes/_app'
+import { Route as LinkRouteImport } from './routes/link'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as AppIndexRouteImport } from './routes/_app/index'
 import { Route as AppAgentRouteImport } from './routes/_app/agent'
@@ -23,6 +24,11 @@ import { Route as AppVoiceRouteImport } from './routes/_app/voice'
 
 const AppRoute = AppRouteImport.update({
   id: '/_app',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const LinkRoute = LinkRouteImport.update({
+  id: '/link',
+  path: '/link',
   getParentRoute: () => rootRouteImport,
 } as any)
 const LoginRoute = LoginRouteImport.update({
@@ -78,6 +84,7 @@ const AppVoiceRoute = AppVoiceRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof AppIndexRoute
+  '/link': typeof LinkRoute
   '/login': typeof LoginRoute
   '/agent': typeof AppAgentRoute
   '/devices': typeof AppDevicesRoute
@@ -89,6 +96,7 @@ export interface FileRoutesByFullPath {
   '/voice': typeof AppVoiceRoute
 }
 export interface FileRoutesByTo {
+  '/link': typeof LinkRoute
   '/login': typeof LoginRoute
   '/agent': typeof AppAgentRoute
   '/devices': typeof AppDevicesRoute
@@ -103,6 +111,7 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/_app': typeof AppRouteWithChildren
+  '/link': typeof LinkRoute
   '/login': typeof LoginRoute
   '/_app/agent': typeof AppAgentRoute
   '/_app/devices': typeof AppDevicesRoute
@@ -118,6 +127,7 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/link'
     | '/login'
     | '/agent'
     | '/devices'
@@ -129,6 +139,7 @@ export interface FileRouteTypes {
     | '/voice'
   fileRoutesByTo: FileRoutesByTo
   to:
+    | '/link'
     | '/login'
     | '/agent'
     | '/devices'
@@ -142,6 +153,7 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/_app'
+    | '/link'
     | '/login'
     | '/_app/agent'
     | '/_app/devices'
@@ -156,6 +168,7 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   AppRoute: typeof AppRouteWithChildren
+  LinkRoute: typeof LinkRoute
   LoginRoute: typeof LoginRoute
 }
 
@@ -166,6 +179,13 @@ declare module '@tanstack/react-router' {
       path: ''
       fullPath: '/'
       preLoaderRoute: typeof AppRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/link': {
+      id: '/link'
+      path: '/link'
+      fullPath: '/link'
+      preLoaderRoute: typeof LinkRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/login': {
@@ -269,6 +289,7 @@ const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren)
 
 const rootRouteChildren: RootRouteChildren = {
   AppRoute: AppRouteWithChildren,
+  LinkRoute: LinkRoute,
   LoginRoute: LoginRoute,
 }
 export const routeTree = rootRouteImport

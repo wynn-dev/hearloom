@@ -36,18 +36,35 @@ docs/            design.md (start here), protocol.md, models.md, ios.md, agent.m
 pnpm install
 cp .env.example .env            # then set BETTER_AUTH_SECRET (openssl rand -base64 48) and SONIOX_API_KEY
 pnpm db:up && pnpm db:migrate
-pnpm --filter @hearloom/server create-user -- --email you@example.com --name You --admin
+pnpm link-device --email you@example.com --name You --create   # first account is the admin
 pnpm --filter @hearloom/server download-models            # local VAD/sound/speaker models
 pnpm --filter @hearloom/server build:diarizer              # macOS: speaker diarization sidecar
 pnpm dev                        # development: server :3000 + worker + console :5173 (Vite)
 pnpm start                      # everyday use: builds the console, then server + worker on :3000
 ```
 
+`link-device` prints a QR code and a link that sign one device in (see below).
+
 Simulate a phone streaming audio (no hardware needed):
 
 ```sh
 HEARLOOM_EMAIL=you@example.com HEARLOOM_PASSWORD=... pnpm --filter @hearloom/server simulate-phone
 ```
+
+## Signing in (Link device)
+
+Devices sign in with a single-use code (5 minutes) from a device that is already signed in, instead of a
+password:
+
+- **iPhone**: console → Devices → Link a device → scan the QR code with the Camera app → open it in
+  Hearloom → Link this iPhone. The link carries the server address too.
+- **Browser**: open the link shown under the QR code, or paste the code (or link) on the login page.
+- **Recovery** (no device signed in): on the Mac, `pnpm link-device --email you@example.com`.
+- **Revoke**: Devices → Signed-in devices → Sign out. Removing a phone under Phones signs its app out too.
+
+Admins create accounts on the Users page (no password) and get a code for the new person's first
+device; Link a device on a user does the same later. Passwords still work for now (login page → "Sign
+in with a password instead").
 
 ## Remote access (phone, browser, agent)
 

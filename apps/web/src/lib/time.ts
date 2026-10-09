@@ -185,6 +185,18 @@ export function formatDate(date: Date | number, tz: string): string {
   ).format(date);
 }
 
+/**
+ * "Today", "Yesterday" or the date, by calendar day in `tz`: for times only known to the day (a
+ * session's last activity is recorded about once a day).
+ */
+export function formatDayRelative(date: Date | number, now: number, tz: string): string {
+  const day = dayInZone(date, tz);
+  const today = dayInZone(now, tz);
+  if (day >= today) return "Today";
+  if (day === shiftDay(today, -1)) return "Yesterday";
+  return formatDate(date, tz);
+}
+
 const relativeFormat = new Intl.RelativeTimeFormat(undefined, { numeric: "auto", style: "short" });
 
 /** "12 sec. ago", "5 min. ago", "yesterday" … relative to `now`. */

@@ -79,9 +79,13 @@ Self-hosters with their own bundle id: create your own EAS project and set `HEAR
 
 ## Server address
 
-Sign in with the server's `PUBLIC_URL`: with the setup in the README ("Remote access"), that's
-`https://your-mac.your-tailnet.ts.net` (`pnpm start` behind one `tailscale serve --bg --https=443`), the
-same address as the console.
+A "Link device" QR code or link (README, "Signing in") carries the server address, so linking sets it:
+the server's `PUBLIC_URL`, or the address of the console that made the code while `PUBLIC_URL` is still
+`localhost`.
+
+To sign in with a password instead, enter `PUBLIC_URL`: with the setup in the README ("Remote
+access"), that's `https://your-mac.your-tailnet.ts.net` (`pnpm start` behind one
+`tailscale serve --bg --https=443`), the same address as the console.
 
 Plain `http://your-mac.your-tailnet.ts.net:3000` works too (the app allows plain HTTP only for `*.ts.net`
 and local networks; Tailscale already encrypts the traffic), but not when the server listens on loopback
@@ -89,7 +93,8 @@ only (`HOST=127.0.0.1`, as the README recommends behind `tailscale serve`), and 
 `tailscale serve` handler uses port 3000: one there takes the port over on the tailnet address, and
 plain HTTP gets `400`.
 
-To change the address, sign out and sign in again with the new one; the phone keeps its record.
+To change the address, sign out and link (or sign in) again with the new one; the phone keeps its
+record.
 
 ## Tests
 

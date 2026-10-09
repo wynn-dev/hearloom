@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
-import { Ban, Check, Copy, KeyRound, ShieldCheck, Trash2, UserPlus, Users } from "lucide-react";
+import { Ban, Check, Link2, ShieldCheck, Trash2, UserPlus, Users } from "lucide-react";
 import { type FormEvent, useState } from "react";
+import { LinkDeviceDialog } from "../../components/link-device";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
 import { Card, CardBody, CardHeader, PageHeader } from "../../components/ui/card";
@@ -19,7 +20,6 @@ export const Route = createFileRoute("/_app/users")({
 });
 
 const USERS_KEY = ["admin", "users"] as const;
-const MIN_PASSWORD = 10;
 
 /** Better Auth returns `{ data, error }`; turn errors into exceptions for TanStack Query. */
 async function unwrap<T>(promise: Promise<{ data: T | null; error: unknown }>): Promise<T> {
@@ -28,15 +28,15 @@ async function unwrap<T>(promise: Promise<{ data: T | null; error: unknown }>): 
   return data as T;
 }
 
-function generatePassword(): string {
-  const alphabet = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789";
-  const bytes = crypto.getRandomValues(new Uint32Array(16));
-  const chars = Array.from(bytes, (b) => alphabet[b % alphabet.length]).join("");
-  return chars.match(/.{4}/g)!.join("-");
+/** Whose device the admin is linking (a new account, or one from the list). */
+interface LinkTarget {
+  userId: string;
+  label: string;
 }
 
 function UsersPage() {
   const me = useMe();
+  const [linking, setLinking] = useState<LinkTarget | null>(null);
   if (me.isPending) return <LoadingRows />;
   if (me.data?.user.role !== "admin") {
     return (
@@ -57,14 +57,20 @@ function UsersPage() {
         description="Hearloom is invite-only: accounts are created here by an administrator."
       />
       <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_22rem]">
-        <UserList selfId={me.data.user.id} />
-        <CreateUser />
+        <UserList selfId={me.data.user.id} onLink={setLinking} />
+        <CreateUser onCreated={setLinking} />
       </div>
+      <LinkDeviceDialog
+        open={linking !== null}
+        onClose={() => setLinking(null)}
+        userId={linking?.userId}
+        title={linking ? `Link a device for ${linking.label}` : "Link a device"}
+      />
     </>
   );
 }
 
-function UserList({ selfId }: { selfId: string }) {
+function UserList({ selfId, onLink }: { selfId: string; onLink: (target: LinkTarget) => void }) {
   const tz = useTimeZone() ?? "UTC";
   const queryClient = useQueryClient();
   const toast = useToast();
@@ -128,6 +134,16 @@ function UserList({ selfId }: { selfId: string }) {
                     <Button
                       size="sm"
                       variant="ghost"
+                      disabled={Boolean(u.banned)}
+                      title={u.banned ? "Unban them first" : "Sign one of their devices in"}
+                      onClick={() => onLink({ userId: u.id, label: u.name || u.email })}
+                    >
+                      <Link2 aria-hidden />
+                      Link a device
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
                       onClick={() =>
                         act.mutate(() =>
                           authClient.admin.setRole({
@@ -187,32 +203,27 @@ function UserList({ selfId }: { selfId: string }) {
   );
 }
 
-function CreateUser() {
+/**
+ * New accounts have no password: they sign in by linking a device. Creating one opens the link
+ * dialog for it, so the admin can show them the QR code (or send the link) right away.
+ */
+function CreateUser({ onCreated }: { onCreated: (target: LinkTarget) => void }) {
   const queryClient = useQueryClient();
   const toast = useToast();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [generated, setGenerated] = useState(false);
   const [role, setRole] = useState<"user" | "admin">("user");
-  const [created, setCreated] = useState<{ email: string; password: string | null } | null>(null);
-  const [copied, setCopied] = useState(false);
 
   const create = useMutation({
     mutationFn: () =>
-      unwrap(
-        authClient.admin.createUser({ name: name.trim(), email: email.trim(), password, role }),
-      ),
-    onSuccess: () => {
-      setCreated({ email: email.trim(), password: generated ? password : null });
+      unwrap(authClient.admin.createUser({ name: name.trim(), email: email.trim(), role })),
+    onSuccess: ({ user }) => {
       setName("");
       setEmail("");
-      setPassword("");
-      setGenerated(false);
       setRole("user");
-      setCopied(false);
       void queryClient.invalidateQueries({ queryKey: USERS_KEY });
       toast({ tone: "good", title: "User created" });
+      onCreated({ userId: user.id, label: user.name || user.email });
     },
   });
 
@@ -221,47 +232,10 @@ function CreateUser() {
     create.mutate();
   };
 
-  const tooShort = password.length > 0 && password.length < MIN_PASSWORD;
-
   return (
     <Card className="lg:sticky lg:top-6">
       <CardHeader icon={<UserPlus aria-hidden />} title="Create user" />
-      <CardBody className="flex flex-col gap-3">
-        {created ? (
-          <div className="rounded-lg border border-good/30 bg-good-soft p-3 text-[13px]">
-            <p className="font-medium text-good-ink">Account created for {created.email}</p>
-            {created.password ? (
-              <>
-                <p className="mt-1 text-xs text-ink-2">
-                  Share this password now — it won't be shown again.
-                </p>
-                <div className="mt-2 flex items-center gap-2">
-                  <code className="min-w-0 flex-1 truncate rounded-md border border-line bg-surface px-2 py-1 font-mono text-[13px] select-all">
-                    {created.password}
-                  </code>
-                  <Button
-                    size="sm"
-                    onClick={() => {
-                      void navigator.clipboard.writeText(created.password ?? "").then(() => {
-                        setCopied(true);
-                      });
-                    }}
-                  >
-                    {copied ? <Check aria-hidden /> : <Copy aria-hidden />}
-                    {copied ? "Copied" : "Copy"}
-                  </Button>
-                </div>
-              </>
-            ) : null}
-            <button
-              type="button"
-              onClick={() => setCreated(null)}
-              className="mt-2 cursor-pointer text-xs text-ink-3 underline underline-offset-2"
-            >
-              Dismiss
-            </button>
-          </div>
-        ) : null}
+      <CardBody>
         <form onSubmit={submit} className="flex flex-col gap-3">
           <Field label="Name" htmlFor="new-name">
             <Input
@@ -282,38 +256,6 @@ function CreateUser() {
               autoComplete="off"
             />
           </Field>
-          <Field
-            label="Password"
-            htmlFor="new-password"
-            error={tooShort ? `At least ${MIN_PASSWORD} characters` : undefined}
-            hint="Generate one and share it with them securely."
-          >
-            <div className="flex gap-2">
-              <Input
-                id="new-password"
-                type={generated ? "text" : "password"}
-                required
-                minLength={MIN_PASSWORD}
-                value={password}
-                onChange={(e) => {
-                  setPassword(e.target.value);
-                  setGenerated(false);
-                }}
-                aria-invalid={tooShort || undefined}
-                autoComplete="new-password"
-                className="font-mono"
-              />
-              <Button
-                onClick={() => {
-                  setPassword(generatePassword());
-                  setGenerated(true);
-                }}
-              >
-                <KeyRound aria-hidden />
-                Generate
-              </Button>
-            </div>
-          </Field>
           <Field label="Role" htmlFor="new-role">
             <Select
               id="new-role"
@@ -324,12 +266,14 @@ function CreateUser() {
               <option value="admin">Admin — can manage users</option>
             </Select>
           </Field>
+          <p className="text-xs text-ink-3">
+            No password needed: next you get a QR code and link that sign their first device in.
+          </p>
           {create.error ? <ErrorNotice error={create.error} /> : null}
           <Button
             type="submit"
             variant="primary"
             loading={create.isPending}
-            disabled={tooShort}
             className="justify-center"
           >
             <UserPlus aria-hidden />
