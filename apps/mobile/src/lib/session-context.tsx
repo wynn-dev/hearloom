@@ -89,7 +89,12 @@ async function loadSessionSafe(): Promise<Session | null> {
 export function SessionProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<SessionState>({ status: "loading" });
 
+  // The token in use. A request still in flight with a token that was replaced (signed in again with a
+  // link code) may come back 401; that must not sign out the new one.
+  const currentToken = useRef<string | null>(null);
+
   const signOutLocal = useCallback(async () => {
+    currentToken.current = null;
     await clearSession();
     OmiCapture.signOut();
     queryClient.clear();
@@ -98,8 +103,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const activate = useCallback(
     async (session: Session) => {
+      currentToken.current = session.token;
       const { client, orpc } = createRpc(session.serverURL, session.token, () => {
-        void signOutLocal();
+        if (currentToken.current === session.token) void signOutLocal();
       });
       const phoneId = await registerPhone(client);
       const full = { ...session, phoneId };
@@ -124,7 +130,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         // Server unreachable: stay signed in locally; the native engine keeps buffering.
         console.warn("session restore failed", err);
         const { client, orpc } = createRpc(session.serverURL, session.token, () => {
-          void signOutLocal();
+          if (currentToken.current === session.token) void signOutLocal();
         });
         if (session.phoneId) {
           OmiCapture.configure(session.serverURL, session.token, session.phoneId);
