@@ -35,6 +35,7 @@ export default function Notifications() {
   return (
     <SafeAreaView edges={["top"]} style={{ flex: 1, backgroundColor: t.bg }}>
       <FlatList
+        contentInsetAdjustmentBehavior="automatic"
         data={q.data ?? []}
         keyExtractor={(n) => n.id}
         contentContainerStyle={{ padding: 16, gap: 12 }}

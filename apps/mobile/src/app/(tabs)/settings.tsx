@@ -64,7 +64,7 @@ export default function Settings() {
 
   return (
     <SafeAreaView edges={["top"]} style={{ flex: 1, backgroundColor: t.bg }}>
-      <ScrollView contentContainerStyle={styles.screen}>
+      <ScrollView contentInsetAdjustmentBehavior="automatic" contentContainerStyle={styles.screen}>
         <Text style={{ fontSize: 30, fontWeight: "700", color: t.text }}>Settings</Text>
 
         <Card>
