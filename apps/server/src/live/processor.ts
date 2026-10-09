@@ -132,6 +132,8 @@ export class StreamProcessor {
   private runSamples = 0;
   private lastFrameAt: number | null = null;
   lastActivity = Date.now();
+  /** When frames last arrived (wall clock; processing may lag behind). */
+  private framesArrivedAt = Date.now();
   // Sound tagging buffer for the current run.
   private tagBuf = new Float32Array(TAG_WINDOW_SAMPLES);
   private tagFill = 0;
@@ -166,7 +168,7 @@ export class StreamProcessor {
       lastSpeechAt: () => this.lastSpeechAudioAt,
       // No more audio coming (mic asleep, connection gone): quiet from here on.
       heardUntil: () =>
-        this.lastFrameAt === null || Date.now() - this.lastActivity > RUN_GAP_MS
+        this.lastFrameAt === null || Date.now() - this.framesArrivedAt > RUN_GAP_MS
           ? Number.POSITIVE_INFINITY
           : this.heardUntil,
     };
@@ -174,6 +176,7 @@ export class StreamProcessor {
 
   /** Process frames in order (calls are serialized). */
   push(frames: AudioFrame[]): Promise<void> {
+    this.framesArrivedAt = Date.now();
     this.queue = this.queue
       .then(() => this.process(frames))
       .catch((err) => this.deps.log(`process: ${err}`));

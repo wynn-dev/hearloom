@@ -372,6 +372,8 @@ export class VoiceDetector {
     c: Omit<Cue, "at" | "seenAt">,
     via: "partial" | "final",
   ): void {
+    // Broken timings: a span nothing could ever be matched against.
+    if (c.nameEndAt <= c.startAt) return;
     const at = this.now();
     s.cues.push({ ...c, at, seenAt: at });
     this.deps.log(

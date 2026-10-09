@@ -160,7 +160,12 @@ Short pulses (100 ms), told apart by count and length:
 - **Delivery:** the live pipeline sends `voice_cue` (heard, no command, rejected) over IPC; the
   server buzzes `haptic` messages down the phone's live socket (`commands.ts` `cue`). The phone
   plays them as they come (no app update needed). Cues for one user play one after another,
-  with at least 600 ms of stillness between them. The server logs
+  with at least 600 ms of stillness between them.
+- **Known limits:**
+  - "Sent" comes after the agent answers, so with back-to-back commands it can land after the
+    next command's tap.
+  - With two streams hearing the same speech (rare), if the tapped stream mishears its own
+    finished utterance while the other gets it right, you feel heard, no command, sent. The server logs
   `[voice] wake phrase heard (partial): buzz N ms after the name ended`.
 
 ### Teaching your voice
