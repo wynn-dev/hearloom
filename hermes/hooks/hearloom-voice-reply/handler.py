@@ -50,9 +50,39 @@ def command_id(context: dict) -> str | None:
     return delivery_id
 
 
+def secret(name: str) -> str:
+    """A credential of the profile this run belongs to (multi-profile gateways), else the env."""
+    try:
+        from agent.secret_scope import get_secret
+
+        return get_secret(name, "") or ""
+    except Exception:
+        return os.environ.get(name, "")
+
+
+def is_silence(response: str) -> bool:
+    """Hermes's "stay quiet" marker: nothing is delivered, so there was no answer."""
+    try:
+        from gateway.response_filters import is_autonomous_silence_response
+
+        return bool(is_autonomous_silence_response(response))
+    except Exception:
+        return False
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect: it would carry the token to wherever it points."""
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+_opener = urllib.request.build_opener(_NoRedirect)
+
+
 def post_replied(cmd_id: str) -> str:
-    base = os.environ.get("HEARLOOM_URL", "http://127.0.0.1:3000").rstrip("/")
-    token = os.environ.get("HEARLOOM_MCP_TOKEN", "")
+    base = (os.environ.get("HEARLOOM_URL") or "http://127.0.0.1:3000").rstrip("/")
+    token = secret("HEARLOOM_MCP_TOKEN")
     if not token:
         return "no HEARLOOM_MCP_TOKEN"
     req = urllib.request.Request(
@@ -62,7 +92,7 @@ def post_replied(cmd_id: str) -> str:
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=5) as res:
+        with _opener.open(req, timeout=5) as res:
             return json.loads(res.read() or b"{}").get("status", str(res.status))
     except urllib.error.HTTPError as e:
         return f"HTTP {e.code}"
@@ -70,10 +100,22 @@ def post_replied(cmd_id: str) -> str:
         return f"error: {e}"
 
 
-async def handle(event_type: str, context: dict):
-    cmd_id = command_id(context)
-    # No response (the run failed or stayed silent): no reply, Hearloom's timeout says so.
-    if not cmd_id or not str(context.get("response") or "").strip():
-        return
+# Posts in flight (a reference keeps each task alive until it's done).
+_tasks: set = set()
+
+
+async def _report(cmd_id: str) -> None:
     status = await asyncio.to_thread(post_replied, cmd_id)
     logger.info("[hearloom-voice-reply] command %s replied: %s", cmd_id, status)
+
+
+async def handle(event_type: str, context: dict):
+    cmd_id = command_id(context)
+    response = str(context.get("response") or "").strip()
+    # No answer (the run failed or stayed silent): Hearloom's timeout tells it.
+    if not cmd_id or not response or is_silence(response):
+        return
+    # In the background: Hermes waits for its hooks before it delivers the reply.
+    task = asyncio.get_running_loop().create_task(_report(cmd_id))
+    _tasks.add(task)
+    task.add_done_callback(_tasks.discard)

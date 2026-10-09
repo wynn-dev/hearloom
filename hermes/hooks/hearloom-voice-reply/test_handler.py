@@ -58,10 +58,17 @@ class Handle(unittest.TestCase):
 
     def tearDown(self):
         self.server.shutdown()
+        self.server.server_close()
 
     def run_hook(self, response):
         ctx = {"platform": "webhook", "chat_id": chat_id("default", "hearloom-voice", CMD), "response": response}
-        asyncio.run(handler.handle("agent:end", ctx))
+
+        async def run():
+            await handler.handle("agent:end", ctx)
+            # It returns at once; the post runs in the background.
+            await asyncio.gather(*handler._tasks)
+
+        asyncio.run(run())
 
     def test_reply_posts_with_the_token(self):
         self.run_hook("It'll be sunny tomorrow.")
@@ -70,6 +77,26 @@ class Handle(unittest.TestCase):
     def test_no_response_posts_nothing(self):
         self.run_hook("")
         self.assertEqual(self.calls, [])
+
+    def test_redirects_are_not_followed(self):
+        class Redirect(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.send_response(302)
+                self.send_header("Location", "http://127.0.0.1:9/elsewhere")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Redirect)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            os.environ["HEARLOOM_URL"] = f"http://127.0.0.1:{server.server_port}"
+            self.assertEqual(handler.post_replied(CMD), "HTTP 302")
+        finally:
+            server.shutdown()
+            server.server_close()
 
 
 if __name__ == "__main__":

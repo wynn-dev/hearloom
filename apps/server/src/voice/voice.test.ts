@@ -145,6 +145,23 @@ async function row(id: string) {
   return r!;
 }
 
+test("until the agent has reported an answer: sent is silent, nothing waits", async () => {
+  expect((await getSettings(userId)).agent.voiceReplies).toBe(false);
+  setReplyTimeout(100);
+  try {
+    const d = detection();
+    await onDetection(d);
+    await Bun.sleep(400);
+    expect(buzzes).toEqual([]);
+    // Its first reported answer (here: late) turns waiting on.
+    expect(await commandReplied(userId, d.id)).toBe("late");
+    expect(buzzes).toEqual([]);
+    expect((await getSettings(userId)).agent.voiceReplies).toBe(true);
+  } finally {
+    setReplyTimeout(REPLY_TIMEOUT_MS);
+  }
+});
+
 test("a command is delivered and signed; the sent buzz waits for the agent's reply", async () => {
   const d = detection();
   await onDetection(d);
@@ -168,8 +185,9 @@ test("a command is delivered and signed; the sent buzz waits for the agent's rep
   expect(r).toMatchObject({ status: "sent", attempts: 1, httpStatus: 202, reason: null });
   expect(r.sentAt).not.toBeNull();
   expect(buzzes).toEqual([]);
-  // The agent answered: two taps. Once only.
+  // The agent answered: two taps (played after the call returns). Once only.
   expect(await commandReplied(userId, d.id)).toBe("buzzed");
+  for (let i = 0; i < 40 && buzzes.length < 2; i++) await Bun.sleep(50);
   expect(buzzes).toEqual(["short", "short"]);
   expect(await commandReplied(userId, d.id)).toBe("late");
   expect(buzzes).toEqual(["short", "short"]);
@@ -207,7 +225,10 @@ test("the replied endpoint: agent token of the command's owner only", async () =
   const ok = await post(d.id, `Bearer ${token}`);
   expect(ok.status).toBe(200);
   expect(await ok.json()).toEqual({ status: "buzzed" });
+  for (let i = 0; i < 40 && buzzes.length < 2; i++) await Bun.sleep(50);
   expect(buzzes).toEqual(["short", "short"]);
+  // A 36-character id that isn't a uuid.
+  expect((await post("0".repeat(36), `Bearer ${token}`)).status).toBe(404);
   // Someone else's token can't confirm it.
   const otherId = `test-${crypto.randomUUID()}`;
   await db

@@ -51,6 +51,11 @@ const agentFields = {
   webhookUrl: z.union([z.url(), z.literal("")]),
   /** Standard Webhooks key: `whsec_<base64>`, or any other string (used as raw bytes). */
   webhookSecret: z.string().max(256),
+  /**
+   * The agent reports when it has answered a voice command (Hearloom saw it do so): from then on
+   * the "sent" buzz waits for the answer. Set by the server, not shown.
+   */
+  voiceReplies: z.boolean(),
 };
 
 /** `whsec_` secrets are base64 keys; receivers such as Hermes refuse ones that don't decode. */
@@ -107,6 +112,7 @@ export const settingsSchema = z.object({
     .object({
       webhookUrl: agentFields.webhookUrl.default(""),
       webhookSecret: agentFields.webhookSecret.default(""),
+      voiceReplies: agentFields.voiceReplies.default(false),
     })
     .prefault({}),
   voice: z
