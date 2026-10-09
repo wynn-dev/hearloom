@@ -15,7 +15,6 @@ const KEYS: Record<InvalidateKey, QueryKey[]> = {
   settings: [orpc.settings.key(), orpc.me.key()],
   people: [orpc.people.key(), orpc.timeline.key()],
   voice: [orpc.voice.key()],
-  sessions: [orpc.sessions.key()],
 };
 
 export type RealtimeState = "connecting" | "open" | "reconnecting";
