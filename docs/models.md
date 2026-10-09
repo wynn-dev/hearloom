@@ -17,11 +17,17 @@ A child process of the server (`apps/server/src/live`) receives every stored bat
      frames held a whole bit of speech (catch-up after a stall), with lead-in from where it started
      plus 0.5 s pre-roll. It streams only while there's speech activity and closes after 45 s
      without speech, so you pay for speech rather than silence; a keepalive goes out after 5 s
-     without audio (Soniox may close a session after 20 s). If a session fails (connection, auth,
-     quota), its last unfinished utterance is kept but marked cut off (never sent as a voice
-     command), the audio it hadn't finalized and speech until the next session go to `stt-async-v5`
-     (below), and a new session is tried after 1, 2, 5, 15, then every 30 s. The failure (and
-     recovery) is logged and shown in the agent's current context.
+     without audio (Soniox may close a session after 20 s); a connection not up within 10 s has
+     failed. If a session fails (connection, auth, quota), its last unfinished utterance is kept
+     but marked cut off, and so is any voice command the user was in the middle of (never sent).
+     The audio it hadn't finalized and speech until the next session (from its padded onset) go
+     to `stt-async-v5` (below), unless that failed in the last 2 minutes too (then that speech is
+     lost, logged). A new session is tried after 1, 2, 5, 15, then every 30 s; the backoff starts
+     over once a session has lasted 30 s. A stream's transcription is reported down (logged, and
+     shown in the agent's current context) from the second failure in a row or once speech goes
+     async for lack of a session, and up again once a session has lasted 30 s (or the stream
+     ends; a pipeline restart clears it). A new session never re-sends audio that went async or
+     to the previous session (after the 4-hour rotation, too).
    - Frames stopping mid-speech (an upload or Bluetooth stall) don't end what's being said: the
      session isn't finalized and voice commands wait, for up to 10 s. If the audio doesn't come
      back, what was heard is finalized as cut off.
@@ -36,7 +42,10 @@ A child process of the server (`apps/server/src/live`) receives every stored bat
    - Backlog audio uploaded late (> 30 s old, e.g. recordings downloaded from the pendant): its VAD
      segments are stitched together (up to 0.3 s of silence between them) into batches of up to 5
      minutes of speech and transcribed with `stt-async-v5`. A batch is sent once it's full or its
-     upload has been quiet for 10 s; one batch is in flight at a time per stream. API calls retry
+     upload has been quiet for 10 s; one batch is in flight at a time per stream, in the
+     background (the live pipeline never waits for it). While a stream's audio is backlog and async
+     works, decoding waits for a waiting batch to go out; otherwise at most 10 minutes of speech
+     wait, and the oldest is dropped (logged). API calls retry
      rate limits and outages for a few minutes, then the batch is retried twice more before it's
      given up (logged). Utterances split at segment boundaries and are capped at 30 s. Backlog
      blocks and conversations aren't reported as finished (and refined) until all their batches are
@@ -45,8 +54,9 @@ A child process of the server (`apps/server/src/live`) receives every stored bat
 4. **Speakers** — 3D-Speaker CAM++ embeddings per utterance (≥ 1 s), matched against enrolled voiceprints
    (cosine ≥ `SPEAKER_MATCH_THRESHOLD`, default 0.6) and clustered within a chain (S1, S2, …).
    Soniox's labels restart with every session: each label gets the chain key of its voice cluster,
-   from its first utterance long enough to embed (never one another label of the same session
-   has); a label first heard too short to embed gets a fresh key. A Soniox label change inside a
+   from its first utterance of at least 2 s (never one another label of the same session has; if
+   the voice clearly is that one's anyway, a fresh key without a cluster); a label first heard
+   shorter gets a fresh key. A Soniox label change inside a
    word ("surpr" / "ise") is ignored. Re-attributing an utterance replaces the
    voiceprint learned from it.
 5. **Sound events** — CED-base (AudioSet, 527 classes, 16 kHz) on 2 s windows every 1 s, smoothed with

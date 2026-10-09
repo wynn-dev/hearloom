@@ -138,10 +138,15 @@ export class CommandAssembler {
     return step;
   }
 
-  /** The audio broke off mid-speech and didn't come back: an open command is cut off. */
-  cut(): Step {
+  /**
+   * The audio (or the recognizer) broke off mid-speech: an open command that started before
+   * `before` (audio time) is cut off.
+   */
+  cut(before = Number.POSITIVE_INFINITY): Step {
     const step: Step = { done: [], abandoned: [], woke: null };
     const s = this.state;
+    if (s.t === "idle" || (s.t === "armed" ? s.utterance : s.parts[0]!).startAt >= before)
+      return step;
     if (s.t === "armed")
       this.state = { t: "pending", wake: s.wake, parts: [s.utterance], commandParts: [], at: 0 };
     this.complete(step, true);

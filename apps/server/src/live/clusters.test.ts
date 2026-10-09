@@ -40,7 +40,17 @@ describe("SpeakerClusters.label", () => {
     const c = new SpeakerClusters(0.6);
     expect(c.label("soniox:aaaa:1", "soniox:aaaa:", voice(0))).toBe("S1");
     expect(c.label("soniox:aaaa:2", "soniox:aaaa:", voice(0, 0.2))).toBe("S2");
-    // Another session can have either.
-    expect(c.label("soniox:bbbb:1", "soniox:bbbb:", voice(0))).toBe("S1");
+    // Clearly the same voice as S1 though: no second cluster for it, so later sessions get S1.
+    expect(c.label("soniox:bbbb:1", "soniox:bbbb:", voice(0, 0.2))).toBe("S1");
+  });
+
+  test("taken, but only somewhat alike: a new voice of its own", () => {
+    const c = new SpeakerClusters(0.6);
+    const alike = new Float32Array(8);
+    alike[0] = 0.65; // cosine 0.65 to voice(0): over the threshold, not clearly the same
+    alike[1] = Math.sqrt(1 - 0.65 ** 2);
+    expect(c.label("soniox:aaaa:1", "soniox:aaaa:", voice(0))).toBe("S1");
+    expect(c.label("soniox:aaaa:2", "soniox:aaaa:", alike)).toBe("S2");
+    expect(c.label("soniox:bbbb:1", "soniox:bbbb:", alike)).toBe("S2");
   });
 });

@@ -7,6 +7,10 @@ export class FakeWs {
   static readonly OPEN = 1;
   static readonly CLOSED = 3;
   static instances: FakeWs[] = [];
+  /** Connect at once (else the handshake hangs). */
+  static autoOpen = true;
+  /** Answer the end of audio with `finished`. */
+  static autoFinish = true;
 
   readyState = FakeWs.CONNECTING;
   binaryType = "";
@@ -18,6 +22,7 @@ export class FakeWs {
 
   constructor() {
     FakeWs.instances.push(this);
+    if (!FakeWs.autoOpen) return;
     queueMicrotask(() => {
       this.readyState = FakeWs.OPEN;
       this.onopen?.();
@@ -26,7 +31,7 @@ export class FakeWs {
 
   send(data: string | Uint8Array): void {
     this.sent.push(data);
-    if (data === "")
+    if (data === "" && FakeWs.autoFinish)
       queueMicrotask(() => {
         this.message({ tokens: [], finished: true });
         this.close();
@@ -65,6 +70,8 @@ export class FakeWs {
   static install(): () => void {
     const real = globalThis.WebSocket;
     FakeWs.instances = [];
+    FakeWs.autoOpen = true;
+    FakeWs.autoFinish = true;
     globalThis.WebSocket = FakeWs as never;
     return () => {
       globalThis.WebSocket = real;

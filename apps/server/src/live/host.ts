@@ -333,8 +333,10 @@ export class LivePipelineHost {
         console.log(`[live] ${msg.message}`);
         return;
       case "asr_health":
-        if (!msg.ok) console.log(`[live] transcription down for ${msg.userId}: ${msg.message}`);
-        setTranscription(msg.userId, msg.ok ? null : { since: Date.now(), error: msg.message });
+        console.log(
+          `[live] transcription ${msg.ok ? "up again" : `down (${msg.message})`} for stream ${msg.streamId}`,
+        );
+        setTranscription(msg.userId, msg.streamId, msg.ok, msg.message);
         return;
       case "invalidate":
         invalidate(msg.userId, msg.keys);

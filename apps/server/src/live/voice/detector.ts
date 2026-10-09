@@ -60,6 +60,11 @@ export interface AudioSource {
    * being said is cut off). null: no stall.
    */
   stall?(): "waiting" | "cut" | null;
+  /**
+   * Audio time before which what was being said may be incomplete (the recognizer broke off while
+   * the user spoke): open commands that started before it are cut off. 0: none.
+   */
+  cutBefore?(): number;
 }
 
 export interface VoiceScore {
@@ -611,6 +616,9 @@ export class VoiceDetector {
     if (u.startAt < s.teachGraceUntil) return;
     const cfg = await this.deps.config(userId);
     if (cfg.mode === "off") return;
+    // An open command the recognizer broke off in can't be continued.
+    const cut = s.assembler.cut(source.cutBefore?.() ?? 0);
+    if (cut.done.length > 0) await this.handle(userId, s, cfg, cut);
     const step = s.assembler.push(
       u,
       cfg.wake,
@@ -638,13 +646,14 @@ export class VoiceDetector {
       const stall = s.source?.stall?.() ?? null;
       // The rest of what's being said may still come.
       if (stall === "waiting") continue;
+      let step = s.assembler.cut(
+        stall === "cut" ? Number.POSITIVE_INFINITY : (s.source?.cutBefore?.() ?? 0),
+      );
       // Without a stream (it ended), nothing more is coming: finish now.
-      const step =
-        stall === "cut"
-          ? s.assembler.cut()
-          : s.source
-            ? s.assembler.tick(s.source.lastSpeechAt(), now, s.source.heardUntil())
-            : s.assembler.tick(0, now);
+      if (s.assembler.busy)
+        step = s.source
+          ? s.assembler.tick(s.source.lastSpeechAt(), now, s.source.heardUntil())
+          : s.assembler.tick(0, now);
       if (step.done.length === 0 && step.abandoned.length === 0) continue;
       await this.handle(userId, s, await this.deps.config(userId), step);
     }

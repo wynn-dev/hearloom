@@ -50,8 +50,8 @@ export interface LiveDeps {
   ownerBar?(userId: string): Promise<number>;
   /** Ask the server to refresh clients' views for this user. */
   invalidate(userId: string, keys: Array<"timeline" | "status">): void;
-  /** Live transcription broke (`ok` false, with why) or works again. */
-  asrHealth?(userId: string, ok: boolean, message: string | null): void;
+  /** A stream's live transcription is down (`ok` false, with why) or works again. */
+  asrHealth?(userId: string, streamId: string, ok: boolean, message: string | null): void;
   /** Speech detection for a run of audio starting at `startAt` (default: Silero; tests fake it). */
   vad?(startAt: number): Vad;
   log(message: string): void;
@@ -79,8 +79,16 @@ export const SONIOX_RETRY_MS = [1_000, 2_000, 5_000, 15_000, 30_000];
  * them to resume before taking what was said so far as all there is (and cut off).
  */
 export const STALL_CAP_MS = 10_000;
+/** A live session that lasted this long worked: the retry backoff starts over. */
+const SONIOX_HEALTHY_MS = 30_000;
+/** After a Soniox async failure, it counts as down this long: live speech isn't rescued into it. */
+const ASYNC_DOWN_MS = 120_000;
+/** Speaker labels are mapped onto voices across sessions only from this much audio. */
+const MIN_LABEL_SAMPLES = 32_000; // 2 s
 /** Backlog speech sent to Soniox async per request. */
 const BACKLOG_BATCH_SAMPLES = 5 * 60 * 16_000;
+/** Speech waiting for Soniox async beyond this is dropped, oldest first (async failing, far behind). */
+const BACKLOG_QUEUE_MAX_SAMPLES = 2 * BACKLOG_BATCH_SAMPLES;
 /** Send a partial backlog batch after no new backlog speech for this long (upload paused or done). */
 const BACKLOG_IDLE_MS = 10_000;
 /** Silence between stitched backlog segments (at most their real gap), so words don't run together. */
@@ -169,10 +177,19 @@ export class StreamProcessor {
   private sonioxRetryAt = 0;
   /** Soniox sessions that failed in a row. */
   private sonioxFailures = 0;
-  /** Live transcription is broken (reported as ASR health; null: not known yet). */
-  private asrDown: boolean | null = null;
-  /** End of fresh audio sent to Soniox async because no live session could take it. */
-  private rescuedUntil = 0;
+  /** Live transcription is reported down (ASR health). */
+  private asrDown = false;
+  private lastAsrError: string | null = null;
+  /** End of the audio routed to Soniox async (backlog, or rescued from the live path). */
+  private asyncUntil = 0;
+  /** End of the audio sent to a live session. */
+  private liveUntil = 0;
+  /** Commands that started before this audio time were cut off (the recognizer broke off). */
+  private voiceCutBefore = 0;
+  /** Soniox async failed recently (see ASYNC_DOWN_MS). */
+  private asyncDownUntil = 0;
+  /** Lost live speech was logged (once per async outage). */
+  private lostLogged = false;
   /** The voice activity detector was in speech at the end of the latest fresh audio. */
   private speakingAtEnd = false;
   /** The run ended mid-speech (frames stopped): finalizing Soniox waits for them to resume. */
@@ -191,7 +208,12 @@ export class StreamProcessor {
   /** Wall-clock spans of audio that arrived too late to stream (merged, recent only). */
   private backlogSpans: { from: number; to: number }[] = [];
   private backlog: BacklogBatch | null = null;
+  /** Batches waiting for Soniox async, oldest first (one more is in flight). */
+  private backlogPending: BacklogBatch[] = [];
+  private backlogPendingSamples = 0;
+  /** Works through `backlogPending`, outside `queue`: the live pipeline never waits on it. */
   private backlogQueue: Promise<void> = Promise.resolve();
+  private backlogPumping = false;
   private backlogInFlightSamples = 0;
   private queue: Promise<void> = Promise.resolve();
 
@@ -216,6 +238,7 @@ export class StreamProcessor {
           : this.heardUntil;
       },
       stall: () => this.stall(),
+      cutBefore: () => this.voiceCutBefore,
     };
   }
 
@@ -256,9 +279,10 @@ export class StreamProcessor {
           this.stallFinalize = false;
           this.live?.finalize(true);
         }
+        this.checkHealthy(now);
         if (this.live && (now - this.lastSpeechAt > SONIOX_IDLE_MS || this.live.closed))
           await this.closeSoniox();
-        if (this.backlog && now - this.backlog.addedAt > BACKLOG_IDLE_MS) await this.sendBacklog();
+        if (this.backlog && now - this.backlog.addedAt > BACKLOG_IDLE_MS) this.sendBacklog();
       })
       .catch((err) => this.deps.log(`tick: ${err}`));
     return this.queue;
@@ -269,11 +293,13 @@ export class StreamProcessor {
     await this.endRun("end");
     await this.closeSoniox();
     await this.queue; // the closed session's last utterances
-    const pending = (this.backlog?.samples ?? 0) + this.backlogInFlightSamples;
+    // The stream is gone: it isn't down anymore.
+    this.setAsrHealth(true, null);
+    const pending =
+      (this.backlog?.samples ?? 0) + this.backlogPendingSamples + this.backlogInFlightSamples;
+    this.sendBacklog();
     const done = await Promise.race([
-      this.sendBacklog()
-        .then(() => this.backlogQueue)
-        .then(() => true),
+      this.backlogQueue.then(() => true),
       Bun.sleep(DISPOSE_WAIT_MS).then(() => false),
     ]);
     if (!done)
@@ -402,6 +428,7 @@ export class StreamProcessor {
     }
     if (fresh && this.deps.soniox) await this.transcribeLive(pcm, absAt, speaking, segments);
     for (const seg of segments) await this.onSegment(seg);
+    if (!fresh) await this.backlogBackpressure();
 
     // Sound tagging: 2 s windows every 1 s.
     if (this.deps.tagger) await this.tag(samples, fresh);
@@ -420,27 +447,50 @@ export class StreamProcessor {
     const endAt = absAt + pcm.length / 16;
     // It broke: don't feed it (and rescue what it hadn't transcribed).
     if (this.live?.closed) await this.closeSoniox();
+    this.checkHealthy(Date.now());
     // Speech still going, or that started and ended within this batch (a catch-up batch can hold a
-    // whole "Hey Adri." followed by enough quiet to end it).
+    // whole "Hey Adri." followed by enough quiet to end it): from its (padded) start, but not what
+    // was already transcribed or sent.
     if ((speaking || segments.length > 0) && !this.live) {
-      if (Date.now() >= this.sonioxRetryAt) {
-        const first = segments[0];
-        this.openSoniox(first ? Math.min(absAt, this.runStartAt + first.start / 16) : absAt, absAt);
-      } else {
-        this.markBacklog(absAt, endAt);
-        this.rescuedUntil = Math.max(this.rescuedUntil, endAt);
-      }
+      const first = segments[0];
+      const start = first ? Math.min(absAt, this.runStartAt + first.start / 16) : absAt;
+      const from = Math.max(start - PRE_ROLL_MS, this.asyncUntil, this.liveUntil);
+      if (Date.now() >= this.sonioxRetryAt) this.openSoniox(from, absAt);
+      else this.notLive(from, endAt);
     }
     const session = this.live;
     if (!session) return;
     session.send(pcm, absAt);
+    this.liveUntil = endAt;
     if (Date.now() - session.openedAt > SONIOX_MAX_SESSION_MS) await this.closeSoniox();
+  }
+
+  /**
+   * Fresh speech no live session can take (waiting to retry one) goes to Soniox async, unless
+   * that's down too. A command it was part of is cut off.
+   */
+  private notLive(from: number, to: number): void {
+    this.voiceCutBefore = Math.max(this.voiceCutBefore, to);
+    this.setAsrHealth(false, this.lastAsrError);
+    if (this.asyncDown()) this.logLost();
+    else this.markBacklog(from, to);
   }
 
   private markBacklog(from: number, to: number): void {
     const last = this.backlogSpans[this.backlogSpans.length - 1];
     if (last && from <= last.to + 1) last.to = Math.max(last.to, to);
     else this.backlogSpans.push({ from, to });
+    this.asyncUntil = Math.max(this.asyncUntil, to);
+  }
+
+  private asyncDown(): boolean {
+    return Date.now() < this.asyncDownUntil;
+  }
+
+  private logLost(): void {
+    if (this.lostLogged) return;
+    this.lostLogged = true;
+    this.deps.log("soniox: live and async transcription both failing; speech meanwhile is lost");
   }
 
   private async onSegment(seg: SpeechSegment): Promise<void> {
@@ -462,7 +512,7 @@ export class StreamProcessor {
       );
       this.addBacklog({ startAt: from, endAt: from + samples.length / 16, samples });
     }
-    if (this.backlog && this.backlog.samples >= BACKLOG_BATCH_SAMPLES) await this.sendBacklog();
+    if (this.backlog && this.backlog.samples >= BACKLOG_BATCH_SAMPLES) this.sendBacklog();
   }
 
   private addBacklog(seg: Segment): void {
@@ -477,6 +527,10 @@ export class StreamProcessor {
 
   /** Audio a failed live session hadn't transcribed goes to Soniox async (up to the last speech). */
   private rescue(session: SonioxSession): void {
+    if (this.asyncDown()) {
+      this.logLost();
+      return;
+    }
     const until = this.lastSpeechAudioAt + PRE_ROLL_MS;
     let seconds = 0;
     for (const span of session.untranscribed()) {
@@ -484,7 +538,7 @@ export class StreamProcessor {
       const samples = to > span.from ? this.history.slice(span.from, to) : null;
       if (!samples || samples.length === 0) continue;
       this.addBacklog({ startAt: span.from, endAt: span.from + samples.length / 16, samples });
-      this.rescuedUntil = Math.max(this.rescuedUntil, span.from + samples.length / 16);
+      this.asyncUntil = Math.max(this.asyncUntil, span.from + samples.length / 16);
       seconds += samples.length / 16_000;
     }
     if (seconds > 0)
@@ -492,21 +546,56 @@ export class StreamProcessor {
   }
 
   /**
-   * Transcribe the pending backlog batch in the background. At most one batch is in flight:
-   * decoding runs far ahead of transcription, so wait rather than pile up audio in memory.
+   * Queue the batch being built for Soniox async, one request at a time in the background. Never
+   * waits (see backlogBackpressure); past BACKLOG_QUEUE_MAX_SAMPLES the oldest waiting is dropped.
    */
-  private async sendBacklog(): Promise<void> {
+  private sendBacklog(): void {
     const batch = this.backlog;
     this.backlog = null;
     if (!batch) return;
-    await this.backlogQueue;
-    this.backlogInFlightSamples = batch.samples;
-    this.backlogQueue = this.transcribeBacklog(batch)
-      .catch((err) => this.deps.log(`soniox backlog: ${err}`))
-      .finally(() => {
+    this.backlogPending.push(batch);
+    this.backlogPendingSamples += batch.samples;
+    while (
+      this.backlogPendingSamples > BACKLOG_QUEUE_MAX_SAMPLES &&
+      this.backlogPending.length > 1
+    ) {
+      const old = this.backlogPending.shift()!;
+      this.backlogPendingSamples -= old.samples;
+      this.deps.blocks.release(this.stream.userId);
+      this.deps.log(
+        `soniox backlog: too much waiting; ${Math.round(old.samples / 16_000)} s of speech dropped`,
+      );
+    }
+    if (!this.backlogPumping) {
+      this.backlogPumping = true;
+      this.backlogQueue = this.pumpBacklog();
+    }
+  }
+
+  private async pumpBacklog(): Promise<void> {
+    for (let batch = this.backlogPending.shift(); batch; batch = this.backlogPending.shift()) {
+      this.backlogPendingSamples -= batch.samples;
+      this.backlogInFlightSamples = batch.samples;
+      try {
+        await this.transcribeBacklog(batch);
+      } catch (err) {
+        this.deps.log(`soniox backlog: ${err}`);
+      } finally {
         this.backlogInFlightSamples = 0;
         this.deps.blocks.release(this.stream.userId);
-      });
+      }
+    }
+    this.backlogPumping = false;
+  }
+
+  /**
+   * Decoding backlog runs far ahead of transcribing it: while this stream's audio is backlog and
+   * Soniox async works, wait for a batch to finish rather than pile up audio. Never for live audio,
+   * and not while async is failing (then the queue drops its oldest).
+   */
+  private async backlogBackpressure(): Promise<void> {
+    while (!this.fresh && !this.asyncDown() && this.backlogPendingSamples >= BACKLOG_BATCH_SAMPLES)
+      await Promise.race([this.backlogQueue, Bun.sleep(1000)]);
   }
 
   private async transcribeBacklog(batch: BacklogBatch): Promise<void> {
@@ -538,6 +627,7 @@ export class StreamProcessor {
           terms: await this.deps.terms(this.stream.userId),
         });
       } catch (err) {
+        this.asyncDownUntil = Date.now() + ASYNC_DOWN_MS;
         const wait =
           err instanceof SonioxError && err.retryable ? BACKLOG_RETRY_MS[attempt] : undefined;
         if (wait === undefined) {
@@ -548,6 +638,8 @@ export class StreamProcessor {
         await Bun.sleep(wait);
       }
     }
+    this.asyncDownUntil = 0;
+    this.lostLogged = false;
     // Speaker labels are per request: make them unique.
     const prefix = `soniox:${crypto.randomUUID().slice(0, 8)}:`;
     const assembler = new SonioxAssembler(clock, cfg.asyncModel, undefined, prefix);
@@ -558,7 +650,7 @@ export class StreamProcessor {
       await this.saveUtterance(u, sliceSegments(batch.segments, u.startAt, u.endAt), false);
   }
 
-  /** Open a live session for audio from `absAt` on, with lead-in from `from` (plus pre-roll). */
+  /** Open a live session for audio from `absAt` on, with lead-in from `from`. */
   private openSoniox(from: number, absAt: number): void {
     const cfg = this.deps.soniox!;
     const session: SonioxSession = new SonioxSession(
@@ -574,36 +666,46 @@ export class StreamProcessor {
           .catch((err) => this.deps.log(`soniox utterance: ${err}`));
       },
       (message) => {
-        // A session that worked for a while starts the backoff over.
-        if (session.responded) this.sonioxFailures = 0;
+        // A session that worked for a while starts the backoff over (not just any that answered:
+        // a Soniox that accepts sessions and then kills them would be retried every second).
+        if (session.responded && Date.now() - session.openedAt >= SONIOX_HEALTHY_MS)
+          this.sonioxFailures = 0;
         const wait = SONIOX_RETRY_MS[Math.min(this.sonioxFailures, SONIOX_RETRY_MS.length - 1)]!;
         this.sonioxFailures++;
         this.sonioxRetryAt = Date.now() + wait;
+        this.lastAsrError = message;
+        // What the user was saying, and any command it was part of, is cut off.
+        if (this.speakingAtEnd)
+          this.voiceCutBefore = Math.max(this.voiceCutBefore, this.heardUntil);
         this.deps.log(`${message}; retrying in ${wait / 1000} s (speech meanwhile: async)`);
-        this.setAsrHealth(false, message);
+        // One drop that reconnects at once isn't an outage.
+        if (this.sonioxFailures >= 2) this.setAsrHealth(false, message);
       },
       // The wake phrase as soon as the recognizer has it (the pendant buzzes): not queued behind
       // the utterances being saved.
       this.deps.voice
         ? (p) => void this.deps.voice!.partial(this.stream.userId, p, this.voiceSource)
         : undefined,
-      () => {
-        this.sonioxFailures = 0;
-        this.setAsrHealth(true, null);
-      },
     );
     this.live = session;
-    // Not what already went to Soniox async.
-    const leadFrom = Math.max(from - PRE_ROLL_MS, this.rescuedUntil);
-    const pre = leadFrom < absAt ? this.history.slice(leadFrom, absAt) : null;
+    const pre = from < absAt ? this.history.slice(from, absAt) : null;
     if (pre && pre.length > 0) session.send(toPcm16(pre), absAt - pre.length / 16);
+  }
+
+  /** The live session has worked for a while: the backoff starts over, transcription is up. */
+  private checkHealthy(now: number): void {
+    const s = this.live;
+    if (s && !s.closed && s.responded && now - s.openedAt >= SONIOX_HEALTHY_MS) {
+      this.sonioxFailures = 0;
+      this.setAsrHealth(true, null);
+    }
   }
 
   private setAsrHealth(ok: boolean, message: string | null): void {
     if (this.asrDown === !ok) return;
     this.asrDown = !ok;
     if (ok) this.deps.log("soniox: live transcription works again");
-    this.deps.asrHealth?.(this.stream.userId, ok, message);
+    this.deps.asrHealth?.(this.stream.userId, this.stream.id, ok, message);
   }
 
   private async closeSoniox(): Promise<void> {
@@ -640,13 +742,14 @@ export class StreamProcessor {
         isWearer = match.isSelf;
       }
     }
-    // The engine's labels are per session (or request): map them onto the chain's voices, so a
-    // voice keeps its key across sessions. Without labels, cluster voices within the chain.
+    // The engine's labels are per session (or request): map them onto the chain's voices (from
+    // enough audio to be sure), so a voice keeps its key across sessions. Without labels, cluster
+    // voices within the chain.
     const speakerKey = u.speakerKey
       ? placed.clusters.label(
           u.speakerKey,
           u.speakerKey.slice(0, u.speakerKey.lastIndexOf(":") + 1),
-          emb,
+          audio && audio.length >= MIN_LABEL_SAMPLES ? emb : null,
         )
       : emb && placed.clusters.assign(emb);
     if (fresh) {

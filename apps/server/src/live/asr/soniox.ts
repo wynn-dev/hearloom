@@ -8,6 +8,8 @@ const URL = "wss://stt-rt.soniox.com/transcribe-websocket";
  */
 export const KEEPALIVE_IDLE_MS = 5_000;
 const KEEPALIVE_CHECK_MS = 1_000;
+/** A connection (TLS, the start request) that isn't up by then has failed. */
+const CONNECT_TIMEOUT_MS = 10_000;
 
 export interface SonioxOptions {
   apiKey: string;
@@ -18,6 +20,8 @@ export interface SonioxOptions {
    * (audio sent meanwhile waits): they can only be given when it starts.
    */
   terms?: string[] | Promise<string[]>;
+  /** Default 10 s (tests). */
+  connectTimeoutMs?: number;
 }
 
 /**
@@ -30,6 +34,7 @@ export class SonioxSession {
   private readonly assembler: SonioxAssembler;
   private ready: Promise<void>;
   private keepalive: ReturnType<typeof setInterval>;
+  private connectTimer: ReturnType<typeof setTimeout> | undefined;
   private lastSendAt = Date.now();
   /** The start request was sent (keepalives before it aren't part of the protocol). */
   private started = false;
@@ -54,8 +59,6 @@ export class SonioxSession {
     private readonly onError: (message: string) => void,
     /** The utterance in progress, after every response that changes it (voice commands). */
     private readonly onPartial?: (p: PartialUtterance) => void,
-    /** The first response arrived: the session works. */
-    private readonly onResponse?: () => void,
   ) {
     // Speaker labels restart at 1 in every session: make them unique.
     const speakerPrefix = `soniox:${crypto.randomUUID().slice(0, 8)}:`;
@@ -88,7 +91,16 @@ export class SonioxSession {
         resolve();
       };
       this.ws.onerror = () => reject(new Error("soniox connection failed"));
+      // A hung handshake must not hold up close() (or the retry) forever.
+      this.connectTimer = setTimeout(
+        () => reject(new Error("soniox connection timed out")),
+        opts.connectTimeoutMs ?? CONNECT_TIMEOUT_MS,
+      );
     });
+    this.ready.then(
+      () => clearTimeout(this.connectTimer),
+      () => clearTimeout(this.connectTimer),
+    );
     this.ready.catch((e) => this.fail(String(e)));
     this.ws.onmessage = (ev) => this.onMessage(String(ev.data));
     this.ws.onclose = () => {
@@ -102,6 +114,8 @@ export class SonioxSession {
       if (
         this.started &&
         !this.closed &&
+        // After the end of audio, Soniox only finishes up: nothing more may be sent.
+        !this.closing &&
         Date.now() - this.lastSendAt >= KEEPALIVE_IDLE_MS &&
         this.ws.readyState === WebSocket.OPEN
       ) {
@@ -158,6 +172,7 @@ export class SonioxSession {
       try {
         await this.ready;
         if (this.closed || this.finished) return;
+        clearInterval(this.keepalive);
         if (this.ws.readyState === WebSocket.OPEN) this.ws.send("");
         await Promise.race([
           new Promise<void>((r) => {
@@ -195,10 +210,7 @@ export class SonioxSession {
       this.fail(`soniox ${msg.error_code}: ${msg.error_message ?? ""}`);
       return;
     }
-    if (!this.responded) {
-      this.responded = true;
-      this.onResponse?.();
-    }
+    this.responded = true;
     if (msg.final_audio_proc_ms) this.finalMs = Math.max(this.finalMs, msg.final_audio_proc_ms);
     if (msg.tokens) {
       let fin = false;

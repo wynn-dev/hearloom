@@ -21,20 +21,17 @@ afterEach(() => {
   setSystemTime();
 });
 
-async function open() {
+async function open(connectTimeoutMs?: number) {
   const utterances: Utterance[] = [];
   const errors: string[] = [];
-  let responses = 0;
   const session = new SonioxSession(
-    { apiKey: "k", model: "stt-rt-v5", languageHints: ["en"] },
+    { apiKey: "k", model: "stt-rt-v5", languageHints: ["en"], connectTimeoutMs },
     (u) => utterances.push(u),
     (m) => errors.push(m),
-    undefined,
-    () => responses++,
   );
   await settle();
   const ws = FakeWs.instances.at(-1)!;
-  return { session, ws, utterances, errors, responses: () => responses };
+  return { session, ws, utterances, errors };
 }
 
 describe("SonioxSession", () => {
@@ -52,7 +49,6 @@ describe("SonioxSession", () => {
       final_audio_proc_ms: 1000,
       total_audio_proc_ms: 2500,
     });
-    expect(s.responses()).toBe(1);
     expect(s.session.responded).toBe(true);
     s.ws.drop();
     expect(s.utterances).toEqual([
@@ -79,7 +75,7 @@ describe("SonioxSession", () => {
     s.session.send(new Int16Array(16 * 1000), T0);
     s.ws.drop();
     expect(s.session.untranscribed()).toEqual([{ from: T0, to: T0 + 1000 }]);
-    expect(s.responses()).toBe(0);
+    expect(s.session.responded).toBe(false);
   });
 
   test("a normal close: the last utterance is whole", async () => {
@@ -110,6 +106,31 @@ describe("SonioxSession", () => {
     expect(s.utterances.at(-1)).toMatchObject({ text: "yes" });
     expect(s.utterances.at(-1)!.cutOff).toBeUndefined();
     await s.session.close();
+  });
+
+  test("a hung handshake fails the session; close() doesn't wait on it", async () => {
+    FakeWs.autoOpen = false;
+    const s = await open(50);
+    s.session.send(new Int16Array(16 * 500), T0);
+    await Bun.sleep(80);
+    expect(s.errors).toEqual(["Error: soniox connection timed out"]);
+    expect(s.session.untranscribed()).toEqual([{ from: T0, to: T0 + 500 }]);
+    await s.session.close(); // returns
+  });
+
+  test("no keepalive after the end of audio (Soniox is only finishing up)", async () => {
+    FakeWs.autoFinish = false;
+    const s = await open();
+    const closing = s.session.close();
+    await settle();
+    expect(s.ws.sent.at(-1)).toBe("");
+    setSystemTime(new Date(Date.now() + KEEPALIVE_IDLE_MS + 100));
+    await Bun.sleep(1100);
+    expect(s.ws.controls.filter((c) => c.type === "keepalive")).toHaveLength(0);
+    expect(s.ws.sent.at(-1)).toBe("");
+    s.ws.message({ tokens: [], finished: true });
+    await closing;
+    expect(s.errors).toEqual([]);
   });
 
   test("keepalive well inside Soniox's 20 s idle limit", async () => {

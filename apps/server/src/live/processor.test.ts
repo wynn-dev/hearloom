@@ -99,7 +99,10 @@ function setup(speech: [number, number][], o: { failInsert?: boolean } = {}) {
     },
     terms: async () => [],
     invalidate: () => {},
-    asrHealth: (_userId: string, ok: boolean) => health.push(ok),
+    asrHealth: (_userId: string, streamId: string, ok: boolean) => {
+      expect(streamId).toBe("st1");
+      health.push(ok);
+    },
     vad: scriptedVad(speech),
     log: (m: string) => logs.push(m),
   } as unknown as LiveDeps;
@@ -111,11 +114,15 @@ function setup(speech: [number, number][], o: { failInsert?: boolean } = {}) {
     voiceSource: Required<AudioSource>;
     queue: Promise<void>;
     backlog: { segments: { startAt: number; endAt: number }[] } | null;
+    backlogPending: unknown[];
   };
-  /** Frames [fromMs, toMs) arrive at T0 + toMs (+ lagMs). */
-  const feed = async (fromMs: number, toMs: number, lagMs = 0) => {
+  /**
+   * Frames [fromMs, toMs) are processed at T0 + toMs (+ lagMs), having been received then (or at
+   * T0 + receivedMs).
+   */
+  const feed = async (fromMs: number, toMs: number, lagMs = 0, receivedMs?: number) => {
     setSystemTime(new Date(T0 + toMs + lagMs));
-    await p.push(frames(fromMs, toMs));
+    await p.push(frames(fromMs, toMs), receivedMs === undefined ? undefined : T0 + receivedMs);
   };
   const at = (ms: number) => {
     setSystemTime(new Date(T0 + ms));
@@ -132,6 +139,7 @@ function setup(speech: [number, number][], o: { failInsert?: boolean } = {}) {
     source: internals.voiceSource,
     idle: () => internals.queue,
     backlog: () => internals.backlog?.segments.map((s) => [s.startAt - T0, s.endAt - T0]) ?? [],
+    pending: () => internals.backlogPending.length,
     ws: (i = -1) => FakeWs.instances.at(i)!,
   };
 }
@@ -166,7 +174,7 @@ describe("StreamProcessor: opening a live session", () => {
 });
 
 describe("StreamProcessor: Soniox outage", () => {
-  test("quick retry with backoff; what wasn't transcribed live goes async; health reported", async () => {
+  test("quick retry; what wasn't transcribed live goes async; the command is cut off", async () => {
     const t = setup([[0, 3000]]);
     await t.feed(0, 1000);
     await settle();
@@ -175,17 +183,21 @@ describe("StreamProcessor: Soniox outage", () => {
       tokens: [tok("Hey", 100, 300), tok(" Adri,", 300, 500), tok(" set", 500, 600)],
       final_audio_proc_ms: 600,
     });
-    expect(t.health).toEqual([true]);
     first.drop();
     await t.idle();
     // The words it had come out, cut off: never a whole command.
     expect(t.heard).toEqual([expect.objectContaining({ text: "Hey Adri, set", cutOff: true })]);
-    expect(t.health).toEqual([true, false]);
+    // So is any command the user was in the middle of.
+    expect(t.source.cutBefore()).toBe(T0 + 1000);
     expect(t.logs.some((l) => l.includes("retrying in 1 s"))).toBe(true);
+    // One drop isn't an outage yet.
+    expect(t.health).toEqual([]);
 
-    // Within the retry wait: no session; its speech goes async.
+    // Within the retry wait: no session; its speech goes async (and that is an outage).
     await t.feed(1000, 1500);
     expect(FakeWs.instances).toHaveLength(1);
+    expect(t.source.cutBefore()).toBe(T0 + 1500);
+    expect(t.health).toEqual([false]);
     // Then a new session, without re-sending what went async.
     await t.feed(1500, 2500);
     expect(FakeWs.instances).toHaveLength(2);
@@ -197,12 +209,148 @@ describe("StreamProcessor: Soniox outage", () => {
       [600, 1000],
       [1000, 1500],
     ]);
+    // The stream goes away: it isn't down anymore.
+    await t.p.dispose();
+    expect(t.health).toEqual([false, true]);
+  });
 
-    // A session that fails before it ever worked: the backoff grows.
+  test("the backoff only starts over after a session lasted; health from the 2nd failure", async () => {
+    const t = setup([
+      [0, 300],
+      [4000, 100_000],
+    ]);
+    await t.feed(0, 1000);
+    await settle();
+    t.ws().message({ tokens: [] });
+    t.ws().drop(); // in a pause: nothing cut, nothing reported
+    await t.feed(1000, 2000);
+    expect(t.source.cutBefore()).toBe(0);
+    expect(t.health).toEqual([]);
+    // Speech again: a new session, which answers and is killed at once.
+    await t.feed(2000, 4500);
+    expect(FakeWs.instances).toHaveLength(2);
+    await settle();
+    t.ws().message({ tokens: [] });
     t.ws().drop();
-    await t.feed(4000, 4100);
+    await t.idle();
     expect(t.logs.some((l) => l.includes("retrying in 2 s"))).toBe(true);
-    expect(t.health).toEqual([true, false]);
+    expect(t.health).toEqual([false]);
+    await t.feed(4500, 7000);
+    expect(FakeWs.instances).toHaveLength(3);
+    await settle();
+    t.ws().message({ tokens: [] });
+    // It has worked for 30 s: transcription is up again.
+    await t.at(37_500);
+    expect(t.health).toEqual([false, true]);
+    await t.p.dispose();
+  });
+
+  test("speech starting during the retry wait goes async from its (padded) onset", async () => {
+    const t = setup([
+      [0, 300],
+      [1700, 3000],
+    ]);
+    await t.feed(0, 1000);
+    await settle();
+    t.ws().drop();
+    await t.feed(1000, 1800);
+    await t.feed(1800, 1960); // speech detected, still waiting to retry
+    expect(FakeWs.instances).toHaveLength(1);
+    await t.feed(1960, 4000); // a new session takes over; the speech ends
+    expect(FakeWs.instances).toHaveLength(2);
+    await settle();
+    expect(t.ws().audioMs).toBe(2040);
+    expect(t.backlog()).toEqual([
+      [0, 800], // the failed session's (up to the end of its speech + 0.5 s)
+      [1700, 1960], // from the onset, not just from when it was detected
+    ]);
+    await t.p.dispose();
+  });
+
+  test("live and async both down: the live path keeps going, nothing is rescued", async () => {
+    let calls = 0;
+    // Async refuses (as if down): the first rescued batch fails.
+    globalThis.fetch = (async () => {
+      calls++;
+      return new Response("down", { status: 401 });
+    }) as unknown as typeof fetch;
+    const t = setup([
+      [0, 3000],
+      [20_000, 23_000],
+    ]);
+    await t.feed(0, 1000);
+    await settle();
+    t.ws().drop();
+    await t.feed(1000, 3600);
+    await t.at(14_000); // the rescued batch goes to async, which fails
+    await settle();
+    expect(calls).toBe(1);
+    // Live fails again mid-speech: nothing more is rescued while async is down.
+    await t.feed(19_000, 21_000);
+    await settle();
+    t.ws().drop();
+    await t.feed(21_000, 24_000);
+    expect(t.backlog()).toEqual([]);
+    expect(t.logs.some((l) => l.includes("both failing"))).toBe(true);
+    await t.p.dispose();
+  });
+
+  test("a hung async request never holds up the live pipeline", async () => {
+    globalThis.fetch = (() => new Promise(() => {})) as unknown as typeof fetch;
+    const t = setup([
+      [0, 3000],
+      [20_000, 30_000],
+    ]);
+    await t.feed(0, 1000);
+    await settle();
+    t.ws().drop();
+    await t.feed(1000, 3600);
+    await t.at(14_000); // rescued batch in flight, forever
+    // More rescued speech: queued behind it, not waited for.
+    await t.feed(19_000, 21_000);
+    await settle();
+    t.ws().drop();
+    await t.feed(21_000, 30_000);
+    await t.at(41_000);
+    expect(t.pending()).toBe(1);
+    // Frames keep being processed, sessions keep being opened.
+    const done = await Promise.race([
+      t.feed(41_000, 42_000).then(() => "processed"),
+      Bun.sleep(500).then(() => "blocked"),
+    ]);
+    expect(done).toBe("processed");
+    expect(t.source.heardUntil()).toBe(T0 + 42_000);
+  });
+});
+
+describe("StreamProcessor: backlog to live", () => {
+  test("speech crossing the flip isn't sent to both async and live", async () => {
+    const t = setup([[1900, 2400]]);
+    // Uploaded 40 s late: backlog.
+    await t.feed(0, 2000, 40_000);
+    // The next audio arrived promptly (but is processed late): live again between utterances.
+    await t.feed(2000, 4000, 38_500, 4500);
+    expect(FakeWs.instances).toHaveLength(1);
+    await settle();
+    // Not the lead-in from 1400: up to 2000 went async.
+    expect(t.ws().audioMs).toBe(2000);
+    expect(t.backlog()).toEqual([[1900, 2000]]);
+    await t.p.dispose();
+  });
+
+  test("after a session rotation, no lead-in already sent", async () => {
+    const H4 = 4 * 3600_000;
+    const t = setup([[0, H4 + 60_000]]);
+    await t.feed(0, 1000);
+    // Four hours of speech later (only its last bit fed: the session is what's old).
+    await t.feed(H4, H4 + 2000);
+    await settle();
+    expect(FakeWs.instances).toHaveLength(1);
+    expect(t.ws(0).sent.at(-1)).toBe("");
+    await t.feed(H4 + 2000, H4 + 3000);
+    expect(FakeWs.instances).toHaveLength(2);
+    await settle();
+    expect(t.ws().audioMs).toBe(1000);
     await t.p.dispose();
   });
 });

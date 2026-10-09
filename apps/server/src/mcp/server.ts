@@ -149,11 +149,12 @@ function buildServer(userId: string): McpServer {
         }`,
         `Pendant: ${state.wearableConnected ? "connected" : "not connected"}${state.muted ? ", MUTED" : ""}${pendant?.batteryLevel != null ? `, battery ${pendant.batteryLevel}%` : ""}`,
         `Last audio: ${state.lastAudioAt ? `${Math.round((now.getTime() - state.lastAudioAt) / 1000)} s ago` : "unknown"}`,
-        ...(state.transcriptionDown
-          ? [
-              `Live transcription: DOWN since ${clock(new Date(state.transcriptionDown.since), tz, false)} (${state.transcriptionDown.error ?? "unknown error"}); recent speech is transcribed late`,
-            ]
-          : []),
+        ...[...state.transcriptionDown.values()]
+          .slice(0, 1)
+          .map(
+            (d) =>
+              `Live transcription: DOWN since ${clock(new Date(d.since), tz, false)} (${d.error ?? "unknown error"}); recent speech is transcribed late, or lost`,
+          ),
         "",
         "Last 5 minutes:",
         ...(renderLines(

@@ -10,8 +10,8 @@ export interface LiveState {
   muted: boolean;
   wearableConnected: boolean;
   lastAudioAt: number | null;
-  /** Live transcription is down (speech is transcribed later, by the async path). null: fine. */
-  transcriptionDown: { since: number; error: string | null } | null;
+  /** Streams whose live transcription is down (their speech is transcribed later, if at all). */
+  transcriptionDown: Map<string, { since: number; error: string | null }>;
 }
 
 const states = new Map<string, LiveState>();
@@ -24,7 +24,7 @@ export function liveState(userId: string): LiveState {
       muted: false,
       wearableConnected: false,
       lastAudioAt: null,
-      transcriptionDown: null,
+      transcriptionDown: new Map(),
     };
     states.set(userId, s);
   }
@@ -40,16 +40,25 @@ export function setActivity(userId: string, activity: Activity | null): void {
   updateLiveState(userId, { activity });
 }
 
-/** Live transcription broke (or works again: null). Keeps the first failure's time. */
-export function setTranscription(userId: string, down: LiveState["transcriptionDown"]): void {
-  const s = liveState(userId);
-  if (down && s.transcriptionDown) return;
-  updateLiveState(userId, { transcriptionDown: down });
+/** A stream's live transcription is down (with why), or works again (ok). */
+export function setTranscription(
+  userId: string,
+  streamId: string,
+  ok: boolean,
+  error: string | null,
+): void {
+  const down = liveState(userId).transcriptionDown;
+  if (ok) down.delete(streamId);
+  else if (!down.has(streamId)) down.set(streamId, { since: Date.now(), error });
 }
 
-/** The live pipeline stopped: nobody is in an episode it is tracking anymore. */
+/**
+ * The live pipeline stopped: nobody is in an episode it is tracking anymore, and no stream's
+ * transcription is known to be down.
+ */
 export function resetActivity(): void {
   for (const [userId, s] of states) {
     if (s.activity) setActivity(userId, null);
+    s.transcriptionDown.clear();
   }
 }
