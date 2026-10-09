@@ -7,8 +7,11 @@ export interface SonioxOptions {
   apiKey: string;
   model: string;
   languageHints: string[];
-  /** Names/terms that help recognition (people, places). */
-  terms?: string[];
+  /**
+   * Names/terms that help recognition (people, places). The session starts once they're known
+   * (audio sent meanwhile waits): they can only be given when it starts.
+   */
+  terms?: string[] | Promise<string[]>;
 }
 
 /**
@@ -44,7 +47,12 @@ export class SonioxSession {
     this.ws = new WebSocket(URL, { headers: { Authorization: `Bearer ${opts.apiKey}` } } as never);
     this.ws.binaryType = "arraybuffer";
     this.ready = new Promise((resolve, reject) => {
-      this.ws.onopen = () => {
+      this.ws.onopen = async () => {
+        const terms = await Promise.resolve(opts.terms).catch(() => undefined);
+        if (this.ws.readyState !== WebSocket.OPEN) {
+          reject(new Error("soniox connection closed before it started"));
+          return;
+        }
         this.ws.send(
           JSON.stringify({
             model: opts.model,
@@ -56,7 +64,7 @@ export class SonioxSession {
             enable_speaker_diarization: true,
             enable_endpoint_detection: true,
             max_endpoint_delay_ms: 1500,
-            ...(opts.terms?.length ? { context: { terms: opts.terms.slice(0, 100) } } : {}),
+            ...(terms?.length ? { context: { terms: terms.slice(0, 100) } } : {}),
           }),
         );
         resolve();
