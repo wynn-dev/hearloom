@@ -91,6 +91,7 @@ const deps: LiveDeps = {
   terms: (userId) => voice.terms(userId),
   ownerBar: async (userId) => (await voice.config(userId)).minScore,
   invalidate: (userId, keys) => send({ t: "invalidate", userId, keys }),
+  asrHealth: (userId, ok, message) => send({ t: "asr_health", userId, ok, message }),
   log,
 };
 

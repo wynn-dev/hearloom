@@ -55,6 +55,11 @@ export interface AudioSource {
   lastSpeechAt(): number;
   /** Audio time of the end of the audio heard so far. */
   heardUntil(): number;
+  /**
+   * The audio stopped arriving mid-speech: "waiting" for it to resume, or "cut" (given up: what was
+   * being said is cut off). null: no stall.
+   */
+  stall?(): "waiting" | "cut" | null;
 }
 
 export interface VoiceScore {
@@ -630,10 +635,16 @@ export class VoiceDetector {
         else if (now - c.at > CUE_MAX_MS) this.cueOutcome(userId, s, span, "failed");
       }
       if (!s.assembler.busy) continue;
+      const stall = s.source?.stall?.() ?? null;
+      // The rest of what's being said may still come.
+      if (stall === "waiting") continue;
       // Without a stream (it ended), nothing more is coming: finish now.
-      const step = s.source
-        ? s.assembler.tick(s.source.lastSpeechAt(), now, s.source.heardUntil())
-        : s.assembler.tick(0, now);
+      const step =
+        stall === "cut"
+          ? s.assembler.cut()
+          : s.source
+            ? s.assembler.tick(s.source.lastSpeechAt(), now, s.source.heardUntil())
+            : s.assembler.tick(0, now);
       if (step.done.length === 0 && step.abandoned.length === 0) continue;
       await this.handle(userId, s, await this.deps.config(userId), step);
     }
@@ -779,6 +790,11 @@ export class VoiceDetector {
     ) {
       this.report(userId, cfg, c, "ignored", "media_voice", score.self);
       return no;
+    }
+    // Part of it may be missing (the recognizer or the audio broke off): never sent, and told.
+    if (c.cutOff) {
+      this.report(userId, cfg, c, "ignored", "cut_off", score.self);
+      return { sent: false, tell: true };
     }
     s.recent = s.recent.filter((r) => now - r.acceptedAt < 3600_000);
     const last = s.recent.at(-1);

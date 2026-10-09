@@ -10,6 +10,8 @@ export interface LiveState {
   muted: boolean;
   wearableConnected: boolean;
   lastAudioAt: number | null;
+  /** Live transcription is down (speech is transcribed later, by the async path). null: fine. */
+  transcriptionDown: { since: number; error: string | null } | null;
 }
 
 const states = new Map<string, LiveState>();
@@ -22,6 +24,7 @@ export function liveState(userId: string): LiveState {
       muted: false,
       wearableConnected: false,
       lastAudioAt: null,
+      transcriptionDown: null,
     };
     states.set(userId, s);
   }
@@ -35,6 +38,13 @@ export function updateLiveState(userId: string, patch: Partial<LiveState>): void
 /** The user's current episode changed (started, re-classified, ended). */
 export function setActivity(userId: string, activity: Activity | null): void {
   updateLiveState(userId, { activity });
+}
+
+/** Live transcription broke (or works again: null). Keeps the first failure's time. */
+export function setTranscription(userId: string, down: LiveState["transcriptionDown"]): void {
+  const s = liveState(userId);
+  if (down && s.transcriptionDown) return;
+  updateLiveState(userId, { transcriptionDown: down });
 }
 
 /** The live pipeline stopped: nobody is in an episode it is tracking anymore. */

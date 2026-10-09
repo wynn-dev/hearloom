@@ -110,10 +110,12 @@ export class SpeakerClusters {
     this.next = first;
   }
 
-  assign(embedding: Float32Array): string {
+  /** `exclude`: keys that can't be this voice. */
+  assign(embedding: Float32Array, exclude?: ReadonlySet<string>): string {
     let best: (typeof this.clusters)[number] | null = null;
     let bestScore = -1;
     for (const c of this.clusters) {
+      if (exclude?.has(c.key)) continue;
       const s = cosine(embedding, c.centroid);
       if (s > bestScore) {
         best = c;
@@ -139,6 +141,41 @@ export class SpeakerClusters {
       key = `S${this.next++}`;
       this.aliases.set(external, key);
     }
+    return key;
+  }
+
+  /**
+   * Key for an engine's speaker label (`session`: the labels' scope, e.g. one Soniox session, whose
+   * labels restart at 1). Decided by the label's first utterance and then kept: by its voice's
+   * cluster in this chain if `embedding` is given (so a voice keeps one key across sessions), else
+   * (too short to tell) a fresh key. A cluster another label of the same session already has is
+   * someone else, per the engine.
+   */
+  label(external: string, session: string, embedding: Float32Array | null): string {
+    const known = this.aliases.get(external);
+    const taken = new Set<string>();
+    for (const [label, k] of this.aliases)
+      if (label !== external && label.startsWith(session)) taken.add(k);
+    if (known) {
+      // Keyed while too short to tell: its voice, once heard, can be matched by later sessions
+      // (unless it's already a known voice: one cluster per voice).
+      if (
+        embedding &&
+        !this.clusters.some((c) => c.key === known) &&
+        !this.clusters.some(
+          (c) => !taken.has(c.key) && cosine(embedding, c.centroid) >= this.threshold,
+        )
+      )
+        this.clusters.push({ key: known, centroid: Float32Array.from(embedding), n: 1 });
+      return known;
+    }
+    let key: string;
+    if (embedding) {
+      key = this.assign(embedding, taken);
+    } else {
+      key = `S${this.next++}`;
+    }
+    this.aliases.set(external, key);
     return key;
   }
 }

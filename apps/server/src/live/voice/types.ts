@@ -45,7 +45,9 @@ export type IgnoreReason =
   | "media_voice"
   | "rate_limited"
   | "no_command"
-  | "near_miss";
+  | "near_miss"
+  /** The audio or the recognizer broke off mid-command: what was heard may be missing its end. */
+  | "cut_off";
 
 /** A wake phrase the pipeline heard, sent to the server to store and (maybe) deliver. */
 export interface VoiceDetection {

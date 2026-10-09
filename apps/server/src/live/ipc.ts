@@ -32,6 +32,8 @@ export type HostMessage =
 export type ChildMessage =
   | { t: "ready" }
   | { t: "log"; message: string }
+  /** Live transcription for this user broke (with why), or works again. */
+  | { t: "asr_health"; userId: string; ok: boolean; message: string | null }
   | { t: "invalidate"; userId: string; keys: Array<"timeline" | "status"> }
   | { t: "activity"; userId: string; activity: Activity | null }
   | { t: "block_closed"; userId: string; blockId: string }

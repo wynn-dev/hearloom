@@ -42,6 +42,18 @@ export class SessionClock {
     return span.absMs + (sessionMs - span.sessionMs);
   }
 
+  /** Wall-clock spans of the audio sent from session time `sessionMs` on. */
+  spansFrom(sessionMs: number): { from: number; to: number }[] {
+    const out: { from: number; to: number }[] = [];
+    for (const [i, s] of this.spans.entries()) {
+      const end = this.spans[i + 1]?.sessionMs ?? this.sentMs;
+      const from = Math.max(s.sessionMs, sessionMs);
+      if (end > from)
+        out.push({ from: s.absMs + (from - s.sessionMs), to: s.absMs + (end - s.sessionMs) });
+    }
+    return out;
+  }
+
   /** Index of the contiguous stretch of sent audio that `sessionMs` falls in. */
   spanAt(sessionMs: number): number {
     let i = 0;
@@ -57,10 +69,27 @@ const NO_WORDS = /^[^\p{L}\p{N}]*$/u;
  * no space before it. Straight quotes and hyphens are left out: they can also open text ("-5", "'t").
  */
 const CLOSING = /^[.,!?;:…。，！？、)\]}”’»–—]+$/u;
+const WORD_START = /^[\p{L}\p{N}]/u;
+const WORD_END = /[\p{L}\p{N}]$/u;
+
+/**
+ * `t` carries on the word `prev` ended with ("surpr" + "ise"): Soniox can change its speaker label
+ * mid-word, which is never a real change of speaker.
+ */
+function midWord(prev: SonioxToken | undefined, t: SonioxToken): boolean {
+  return !!prev && WORD_END.test(prev.text) && WORD_START.test(t.text);
+}
+
+/** `t` with the speaker of the word it continues (a speaker change only counts between words). */
+function sameWordSpeaker(prev: SonioxToken | undefined, t: SonioxToken): SonioxToken {
+  return prev && t.speaker !== prev.speaker && midWord(prev, t)
+    ? { ...t, speaker: prev.speaker }
+    : t;
+}
 
 /**
  * Groups final Soniox tokens into utterances: a new utterance starts on the `<end>` endpoint
- * token, a speaker change, a pause longer than `maxGapMs` (wall clock), where the audio we sent
+ * token, a speaker change (between words: not inside one), a pause longer than `maxGapMs` (wall clock), where the audio we sent
  * was cut (stitched speech segments, mic sleep), or at a word boundary once the utterance is
  * longer than `maxUtteranceMs` (async results have no endpoints).
  */
@@ -75,16 +104,20 @@ export class SonioxAssembler {
     private readonly maxUtteranceMs = 30_000,
   ) {}
 
-  /** Feed one response's tokens; returns utterances completed by these tokens. */
-  push(tokens: SonioxToken[]): Utterance[] {
+  /**
+   * Feed one response's tokens; returns utterances completed by these tokens. `cutAtFin`: the
+   * utterance a `<fin>` (manual finalization) ends was cut short (the audio stalled mid-speech).
+   */
+  push(tokens: SonioxToken[], cutAtFin = false): Utterance[] {
     const out: Utterance[] = [];
-    for (const t of tokens) {
-      if (!t.is_final) continue;
-      if (t.text === "<end>" || t.text === "<fin>") {
-        const u = this.emit();
+    for (const next of tokens) {
+      if (!next.is_final) continue;
+      if (next.text === "<end>" || next.text === "<fin>") {
+        const u = this.emit(cutAtFin && next.text === "<fin>");
         if (u) out.push(u);
         continue;
       }
+      const t = sameWordSpeaker(this.current.at(-1), next);
       if (/^<\w+>$/.test(t.text)) continue;
       if (CLOSING.test(t.text)) {
         // Closing punctuation belongs to the words before it, whatever speaker or time Soniox gave
@@ -118,8 +151,9 @@ export class SonioxAssembler {
    */
   partial(tokens: SonioxToken[], processedMs = this.clock.totalSentMs): PartialUtterance | null {
     let toks = [...this.current];
-    for (const t of tokens) {
-      if (t.is_final || /^<\w+>$/.test(t.text)) continue;
+    for (const next of tokens) {
+      if (next.is_final || /^<\w+>$/.test(next.text)) continue;
+      const t = sameWordSpeaker(toks.at(-1), next);
       if (CLOSING.test(t.text)) {
         // As in push(): it belongs to the words before it.
         const prev = toks.at(-1);
@@ -169,12 +203,12 @@ export class SonioxAssembler {
     );
   }
 
-  /** Emit whatever is buffered (session ending). */
-  flush(): Utterance | null {
-    return this.emit();
+  /** Emit whatever is buffered (session ending; `cutOff`: it broke off). */
+  flush(cutOff = false): Utterance | null {
+    return this.emit(cutOff);
   }
 
-  private emit(): Utterance | null {
+  private emit(cutOff = false): Utterance | null {
     const toks = this.current;
     this.current = [];
     const text = toks
@@ -199,6 +233,7 @@ export class SonioxAssembler {
       confidence: confs.length ? confs.reduce((a, b) => a + b, 0) / confs.length : null,
       provider: "soniox",
       model: this.model,
+      ...(cutOff ? { cutOff } : {}),
     };
   }
 }

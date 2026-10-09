@@ -9,6 +9,11 @@ export interface Utterance {
   confidence: number | null;
   provider: string;
   model: string | null;
+  /**
+   * The recognizer's session broke, or the audio stalled, before the utterance was finished: its
+   * last words may be missing (never act on it as a whole command).
+   */
+  cutOff?: boolean;
 }
 
 /**

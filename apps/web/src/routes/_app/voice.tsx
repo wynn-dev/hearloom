@@ -941,6 +941,7 @@ const REASON: Record<string, string> = {
   rate_limited: "too many",
   no_command: "nothing followed",
   near_miss: "name not recognized",
+  cut_off: "audio cut off",
   teaching: "while teaching",
   restart: "server restarted",
   mode_off: "turned off meanwhile",

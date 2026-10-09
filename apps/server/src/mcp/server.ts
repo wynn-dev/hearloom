@@ -149,6 +149,11 @@ function buildServer(userId: string): McpServer {
         }`,
         `Pendant: ${state.wearableConnected ? "connected" : "not connected"}${state.muted ? ", MUTED" : ""}${pendant?.batteryLevel != null ? `, battery ${pendant.batteryLevel}%` : ""}`,
         `Last audio: ${state.lastAudioAt ? `${Math.round((now.getTime() - state.lastAudioAt) / 1000)} s ago` : "unknown"}`,
+        ...(state.transcriptionDown
+          ? [
+              `Live transcription: DOWN since ${clock(new Date(state.transcriptionDown.since), tz, false)} (${state.transcriptionDown.error ?? "unknown error"}); recent speech is transcribed late`,
+            ]
+          : []),
         "",
         "Last 5 minutes:",
         ...(renderLines(

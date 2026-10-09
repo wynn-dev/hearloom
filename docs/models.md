@@ -13,10 +13,18 @@ A child process of the server (`apps/server/src/live`) receives every stored bat
 2. **Speech detection** — Silero VAD v6 (`silero_vad_v6.onnx`) via sherpa-onnx.
 3. **Transcription** — Soniox only (`SONIOX_API_KEY` is required unless `LIVE_ASR=off`). Per-word
    language ID (EN↔NL code-switching) and speaker labels come from Soniox.
-   - Fresh audio: `stt-rt-v5` streaming. A session opens when speech starts (with 0.5 s pre-roll),
-     streams only while there's speech activity and closes after 45 s without speech, so you pay for
-     speech rather than silence. If a session fails (connection, auth, quota), the speech it didn't
-     transcribe is lost and Soniox is retried after 30 s; there is no local fallback.
+   - Fresh audio: `stt-rt-v5` streaming. A session opens when speech starts, or when a batch of
+     frames held a whole bit of speech (catch-up after a stall), with lead-in from where it started
+     plus 0.5 s pre-roll. It streams only while there's speech activity and closes after 45 s
+     without speech, so you pay for speech rather than silence; a keepalive goes out after 5 s
+     without audio (Soniox may close a session after 20 s). If a session fails (connection, auth,
+     quota), its last unfinished utterance is kept but marked cut off (never sent as a voice
+     command), the audio it hadn't finalized and speech until the next session go to `stt-async-v5`
+     (below), and a new session is tried after 1, 2, 5, 15, then every 30 s. The failure (and
+     recovery) is logged and shown in the agent's current context.
+   - Frames stopping mid-speech (an upload or Bluetooth stall) don't end what's being said: the
+     session isn't finalized and voice commands wait, for up to 10 s. If the audio doesn't come
+     back, what was heard is finalized as cut off.
    - Fresh or backlog is judged from when the server received the audio, not when the pipeline gets
      to it (a busy or restarting pipeline doesn't turn live speech into backlog, unless it falls a
      minute behind), and changes between utterances (when the VAD isn't hearing speech or a segment
@@ -35,8 +43,11 @@ A child process of the server (`apps/server/src/live`) receives every stored bat
      placed.
      Batches still in memory when the pipeline restarts are lost.
 4. **Speakers** — 3D-Speaker CAM++ embeddings per utterance (≥ 1 s), matched against enrolled voiceprints
-   (cosine ≥ `SPEAKER_MATCH_THRESHOLD`, default 0.6) and clustered within a chain (S1, S2, …;
-   Soniox's per-session labels map into the same series). Re-attributing an utterance replaces the
+   (cosine ≥ `SPEAKER_MATCH_THRESHOLD`, default 0.6) and clustered within a chain (S1, S2, …).
+   Soniox's labels restart with every session: each label gets the chain key of its voice cluster,
+   from its first utterance long enough to embed (never one another label of the same session
+   has); a label first heard too short to embed gets a fresh key. A Soniox label change inside a
+   word ("surpr" / "ise") is ignored. Re-attributing an utterance replaces the
    voiceprint learned from it.
 5. **Sound events** — CED-base (AudioSet, 527 classes, 16 kHz) on 2 s windows every 1 s, smoothed with
    hysteresis (open ≥ 0.45, close after two windows < 0.25). Speech classes are dropped.

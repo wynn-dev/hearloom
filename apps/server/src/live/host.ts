@@ -5,7 +5,7 @@ import type { StreamMeta } from "../ingest/stream-writer";
 import { invalidate } from "../realtime";
 import { FRESH_MS } from "./freshness";
 import type { ChildMessage, HostMessage } from "./ipc";
-import { resetActivity, setActivity } from "./state";
+import { resetActivity, setActivity, setTranscription } from "./state";
 import type { TeachHeard, TeachPrompt, VoiceCueEvent, VoiceDetection } from "./voice/types";
 
 type BlockClosedHandler = (userId: string, blockId: string) => void;
@@ -331,6 +331,10 @@ export class LivePipelineHost {
         return;
       case "log":
         console.log(`[live] ${msg.message}`);
+        return;
+      case "asr_health":
+        if (!msg.ok) console.log(`[live] transcription down for ${msg.userId}: ${msg.message}`);
+        setTranscription(msg.userId, msg.ok ? null : { since: Date.now(), error: msg.message });
         return;
       case "invalidate":
         invalidate(msg.userId, msg.keys);

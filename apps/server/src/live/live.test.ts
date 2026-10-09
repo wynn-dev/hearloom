@@ -53,7 +53,7 @@ describe("Soniox assembly", () => {
     const out = a.push([
       tok("Hello", 100, 400),
       tok(" there", 450, 800),
-      tok("Hoi", 900, 1200, "2", "nl"),
+      tok(" Hoi", 900, 1200, "2", "nl"),
       tok("<end>", 1200, 1200, "2"),
       tok("Later", 3100, 3500),
     ]);

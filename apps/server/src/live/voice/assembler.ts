@@ -12,6 +12,8 @@ export interface HeardUtterance {
   /** From the utterance's own embedding (null: too short to tell). */
   isSelf: boolean | null;
   chainId: string;
+  /** Its last words may be missing: the recognizer or the audio broke off mid-utterance. */
+  cutOff?: boolean;
 }
 
 export interface AssembledCommand {
@@ -25,6 +27,8 @@ export interface AssembledCommand {
   spokenAt: number;
   /** End of the last part. */
   endedAt: number;
+  /** Part of it may be missing (a part was cut off, or the audio broke off): never send it. */
+  cutOff?: boolean;
 }
 
 export interface Abandoned {
@@ -134,6 +138,16 @@ export class CommandAssembler {
     return step;
   }
 
+  /** The audio broke off mid-speech and didn't come back: an open command is cut off. */
+  cut(): Step {
+    const step: Step = { done: [], abandoned: [], woke: null };
+    const s = this.state;
+    if (s.t === "armed")
+      this.state = { t: "pending", wake: s.wake, parts: [s.utterance], commandParts: [], at: 0 };
+    this.complete(step, true);
+    return step;
+  }
+
   /** Time passes: give up on a missing command or continuation. */
   tick(lastSpeechAt: number, now: number, heardUntil = Number.POSITIVE_INFINITY): Step {
     const step: Step = { done: [], abandoned: [], woke: null };
@@ -159,7 +173,8 @@ export class CommandAssembler {
     const wake = matchWake(u.text, cfg);
     if (!wake) return;
     step.woke = { wake, utterance: u };
-    if (!wake.command) {
+    // (A bare wake phrase that was cut off may have lost its command: it isn't armed.)
+    if (!wake.command && !u.cutOff) {
       this.state = { t: "armed", wake, utterance: u, until: now + this.limits.armMs };
       return;
     }
@@ -198,10 +213,11 @@ export class CommandAssembler {
     const quiet =
       lastSpeechAt <= last.endAt + this.limits.speechAfterMs &&
       heardUntil >= last.endAt + this.limits.quietMs;
-    if (full || quiet) this.complete(step);
+    // A part that was cut off ends it: nothing after it can make it whole.
+    if (full || quiet || last.cutOff) this.complete(step);
   }
 
-  private complete(step: Step): void {
+  private complete(step: Step, cutOff = false): void {
     const s = this.state;
     this.state = { t: "idle" };
     if (s.t !== "pending") return;
@@ -216,6 +232,7 @@ export class CommandAssembler {
         .slice(0, 2 * this.limits.maxChars),
       spokenAt: s.parts[0]!.startAt,
       endedAt: s.parts.at(-1)!.endAt,
+      ...(cutOff || s.parts.some((p) => p.cutOff) ? { cutOff: true } : {}),
     });
   }
 }
