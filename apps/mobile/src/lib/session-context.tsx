@@ -108,6 +108,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         if (currentToken.current === session.token) void signOutLocal();
       });
       const phoneId = await registerPhone(client);
+      // Replaced meanwhile (linked again while this was in flight): don't store the old token.
+      if (currentToken.current !== session.token) return;
       const full = { ...session, phoneId };
       await saveSession(full);
       // Hand the server + token to the native engine so capture keeps working without JS.
