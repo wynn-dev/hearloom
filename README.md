@@ -49,23 +49,24 @@ again for another.
 Simulate a phone streaming audio (no hardware needed):
 
 ```sh
-HEARLOOM_EMAIL=you@example.com HEARLOOM_PASSWORD=... pnpm --filter @hearloom/server simulate-phone
+HEARLOOM_EMAIL=you@example.com pnpm --filter @hearloom/server simulate-phone   # signs in with a link code it makes
 ```
 
 ## Signing in (Link device)
 
-Devices sign in with a single-use code (5 minutes) from a device that is already signed in, instead of a
-password:
+There are no passwords: devices sign in with a single-use code (5 minutes) from a device that is already
+signed in, or from the Mac:
 
 - **iPhone**: console → Devices → Link a device → scan the QR code with the Camera app → open it in
   Hearloom → Link this iPhone. The link carries the server address too.
 - **Browser**: open the link shown under the QR code, or paste the code (or link) on the login page.
-- **Recovery** (no device signed in): on the Mac, `pnpm link-device --email you@example.com`.
+- **Recovery** (every device lost or signed out): on the Mac (or over SSH to it), in the Hearloom
+  checkout, `pnpm link-device --email you@example.com`. It prints a QR code for the iPhone and a link for
+  a browser.
 - **Revoke**: Devices → Signed-in devices → Sign out. Removing a phone under Phones signs its app out too.
 
 Admins create accounts on the Users page (no password) and get a code for the new person's first
-device; Link a device on a user does the same later. Passwords still work for now (login page → "Sign
-in with a password instead").
+device; Link a device on a user does the same later.
 
 ## Remote access (phone, browser, agent)
 

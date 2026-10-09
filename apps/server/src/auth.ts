@@ -299,11 +299,21 @@ export const auth = betterAuth({
   baseURL: env.PUBLIC_URL,
   secret: env.BETTER_AUTH_SECRET,
   database: (options) => hashSessionTokens(pgAdapter(options)),
-  // Invite-only: accounts are created by an admin (console) or `pnpm create-user`.
-  emailAndPassword: { enabled: true, disableSignUp: true, minPasswordLength: 10 },
-  // These take a session token from a list of sessions, which holds hashes (hashSessionTokens). Devices
-  // in the console lists and revokes sessions by id instead (rpc: sessions.*).
+  // No passwords: devices sign in with "Link device" codes (linkDevice below). Accounts are created by
+  // an admin (console → Users) or `pnpm link-device --create`; old password hashes stay unused.
+  emailAndPassword: { enabled: false, disableSignUp: true },
   disabledPaths: [
+    // Passwords (better-auth keeps some of these routes with email/password off).
+    "/sign-in/email",
+    "/sign-up/email",
+    "/change-password",
+    "/set-password",
+    "/verify-password",
+    "/request-password-reset",
+    "/reset-password",
+    "/admin/set-user-password",
+    // These take a session token from a list of sessions, which holds hashes (hashSessionTokens).
+    // Devices in the console lists and revokes sessions by id instead (rpc: sessions.*).
     "/list-sessions",
     "/revoke-session",
     "/revoke-other-sessions",
@@ -327,11 +337,11 @@ export const auth = betterAuth({
     return own ? [...staticOrigins, own] : staticOrigins;
   },
   // On whatever NODE_ENV says (`pnpm start` sets none; better-auth would only limit in production):
-  // 3 sign-ins (and password or email changes) per 10 s, 100 requests per 10 s on other auth paths.
-  // Only requests that need a CORS preflight count (needsPreflight); the auth route already refused
+  // 100 requests per 10 s per auth path, link-code sign-in included (60-bit codes can't be guessed at
+  // that rate). Only requests that need a CORS preflight count (needsPreflight); the auth route already refused
   // plain-text and form bodies (hasSimpleBody). The limiter runs before better-auth's content-type and
   // origin checks, and its buckets are shared (below), so otherwise any web page could keep them full
-  // for everyone: plain-text sign-in POSTs would hold sign-in at 429, and image loads of /get-session
+  // for everyone: plain-text POSTs would hold sign-in at 429, and image loads of /get-session
   // would make the console report the server unreachable. Every real auth call (console, app) is JSON
   // or a GET or bodiless POST without credentials.
   rateLimit: {

@@ -83,8 +83,8 @@ A "Link device" QR code or link (README, "Signing in") carries the server addres
 the server's `PUBLIC_URL`, or the address of the console that made the code while `PUBLIC_URL` is still
 `localhost`.
 
-To sign in with a password instead, enter `PUBLIC_URL`: with the setup in the README ("Remote
-access"), that's `https://your-mac.your-tailnet.ts.net` (`pnpm start` behind one
+When pasting a bare code instead of the link, the Server field takes `PUBLIC_URL`: with the setup in the
+README ("Remote access"), that's `https://your-mac.your-tailnet.ts.net` (`pnpm start` behind one
 `tailscale serve --bg --https=443`), the same address as the console.
 
 Plain `http://your-mac.your-tailnet.ts.net:3000` works too (the app allows plain HTTP only for `*.ts.net`

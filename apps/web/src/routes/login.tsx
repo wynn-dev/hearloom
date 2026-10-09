@@ -1,12 +1,11 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, useRouter } from "@tanstack/react-router";
-import { AlertTriangle, ChevronDown, Link2 } from "lucide-react";
+import { AlertTriangle, Link2 } from "lucide-react";
 import { type FormEvent, useEffect, useRef, useState } from "react";
 import { Brand } from "../components/brand";
 import { Button } from "../components/ui/button";
 import { Field, Input } from "../components/ui/input";
 import { authClient, redeemLinkCode, safeRedirect } from "../lib/auth";
-import { cn } from "../lib/cn";
 import { linkCodeFor } from "../lib/link";
 
 export const Route = createFileRoute("/login")({
@@ -32,7 +31,7 @@ function LoginPage() {
     router.history.replace(redirect ?? "/");
   }, [signedIn, redirect, router]);
 
-  /** After either way of signing in: drop anything cached, then the effect above leaves. */
+  /** After signing in: drop anything cached, then the effect above leaves. */
   const signedInNow = async () => {
     queryClient.clear();
     await session.refetch();
@@ -45,7 +44,6 @@ function LoginPage() {
           <Brand />
         </div>
         <LinkForm onSignedIn={signedInNow} />
-        <PasswordForm onSignedIn={signedInNow} />
         <p className="text-center text-xs text-ink-3">Accounts are created by an administrator.</p>
       </div>
     </main>
@@ -65,7 +63,7 @@ function ErrorLine({ error }: { error: string | null }) {
   );
 }
 
-/** The usual way in: a code (or its link) from a device that is already signed in. */
+/** The way in: a code (or its link) from a device that is already signed in, or `pnpm link-device`. */
 function LinkForm({ onSignedIn }: { onSignedIn: () => Promise<void> }) {
   const [input, setInput] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -128,84 +126,5 @@ function LinkForm({ onSignedIn }: { onSignedIn: () => Promise<void> }) {
         Link this browser
       </Button>
     </form>
-  );
-}
-
-/** Passwords still work while everyone moves to linked devices. */
-function PasswordForm({ onSignedIn }: { onSignedIn: () => Promise<void> }) {
-  const [open, setOpen] = useState(false);
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  const submit = async (event: FormEvent) => {
-    event.preventDefault();
-    setBusy(true);
-    setError(null);
-    try {
-      const result = await authClient.signIn.email({ email: email.trim(), password });
-      if (result.error) {
-        setError(result.error.message || result.error.statusText || "Sign-in failed");
-        return;
-      }
-      await onSignedIn();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Can't reach the server");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="rounded-xl border border-line bg-surface">
-      <button
-        type="button"
-        aria-expanded={open}
-        aria-controls="password-form"
-        onClick={() => setOpen((o) => !o)}
-        className="flex w-full cursor-pointer items-center justify-between gap-2 rounded-xl px-6 py-3 text-[13px] text-ink-2 hover:text-ink"
-      >
-        Sign in with a password instead
-        <ChevronDown
-          className={cn("size-4 text-ink-3 transition-transform", open && "rotate-180")}
-          aria-hidden
-        />
-      </button>
-      {open ? (
-        <form
-          id="password-form"
-          onSubmit={submit}
-          className="flex flex-col gap-4 border-t border-line px-6 pt-4 pb-6"
-        >
-          <Field label="Email" htmlFor="email">
-            <Input
-              id="email"
-              type="email"
-              autoComplete="username"
-              required
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              aria-invalid={error ? true : undefined}
-            />
-          </Field>
-          <Field label="Password" htmlFor="password">
-            <Input
-              id="password"
-              type="password"
-              autoComplete="current-password"
-              required
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              aria-invalid={error ? true : undefined}
-            />
-          </Field>
-          <ErrorLine error={error} />
-          <Button type="submit" loading={busy} className="justify-center">
-            Sign in
-          </Button>
-        </form>
-      ) : null}
-    </div>
   );
 }

@@ -448,7 +448,7 @@ test("an admin's phone token can't use admin endpoints or sign every device out"
   const phoneToken = await link(admin.id, APP_UA);
   const browserToken = await link(admin.id, SAFARI);
   for (const [path, body] of [
-    ["/admin/set-user-password", { userId: admin.id, newPassword: "a-new-password-123" }],
+    ["/admin/set-role", { userId: admin.id, role: "admin" }],
     ["/admin/impersonate-user", { userId: member.id }],
     ["/admin/ban-user", { userId: member.id }],
     ["/revoke-sessions", {}],
@@ -459,9 +459,9 @@ test("an admin's phone token can't use admin endpoints or sign every device out"
   expect((await sessionFor({ authorization: `Bearer ${browserToken}` }))?.user.id).toBe(admin.id);
   // The console can.
   const res = await authCall(
-    "/admin/set-user-password",
+    "/admin/set-role",
     browserToken,
-    { userId: member.id, newPassword: "a-new-password-123" },
+    { userId: member.id, role: "admin" },
     SAFARI,
   );
   expect(res.status).toBe(200);

@@ -22,7 +22,6 @@ import {
   redeemLinkCode,
   type Session,
   saveSession,
-  signIn,
   signOutRemote,
   storedPhoneId,
 } from "./session";
@@ -44,7 +43,6 @@ type SessionState =
 
 interface SessionApi {
   state: SessionState;
-  signIn(serverURL: string, email: string, password: string): Promise<void>;
   /** Sign in with a "Link device" code; if already signed in, that session ends once the code works. */
   linkDevice(serverURL: string, code: string): Promise<void>;
   signOut(): Promise<void>;
@@ -182,10 +180,6 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     };
     return {
       state,
-      async signIn(serverURL, email, password) {
-        const token = await signIn(serverURL, email, password);
-        await activate({ serverURL, token, email, phoneId: await storedPhoneId() });
-      },
       async linkDevice(serverURL, code) {
         const { token, email } = await redeemLinkCode(serverURL, code);
         // Redeem first: a wrong or expired code leaves the current sign-in alone. So does a failure
