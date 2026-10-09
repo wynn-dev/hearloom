@@ -166,6 +166,26 @@ describe("StreamWriter", () => {
     expect(sink.acked).toBe(9);
   });
 
+  test("isn't reported idle (and dropped) until its progress is saved", async () => {
+    const sink = new MemorySink();
+    const w = new StreamWriter(meta, -1, sink, { ...opts(), idleMs: 20 });
+    let idle = 0;
+    w.onIdle = () => idle++;
+    const save = sink.saveProgress.bind(sink);
+    sink.saveProgress = async () => {
+      throw new Error("db down");
+    };
+    await expect(w.append(run(0, 1_760_000_000_000, 10))).rejects.toThrow("db down");
+    await Bun.sleep(80); // idle flushes fail
+    expect(idle).toBe(0);
+    expect(sink.chunks).toHaveLength(1); // the chunk itself closed
+    sink.saveProgress = save;
+    await Bun.sleep(80); // retried
+    expect(idle).toBe(1);
+    expect(sink.acked).toBe(9);
+    w.dispose();
+  });
+
   test("recovers spooled frames after a crash", async () => {
     const crashed = new MemorySink();
     const w = new StreamWriter(meta, -1, crashed, opts());

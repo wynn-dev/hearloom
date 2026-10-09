@@ -1,30 +1,33 @@
 import { MSG_AUDIO } from "@hearloom/shared";
 
 /**
- * Message order on an ingest socket. Control messages run one at a time, in order. Audio for a
- * slot waits only for that slot's earlier audio and its hello: a phone uploading old streams on
- * other slots (each batch waits for disk and the database) doesn't hold up the live stream.
- * `hello`/`bye` for a slot wait for both, so audio never races ahead of its hello and a stream's
- * audio is stored before its bye.
+ * Message order on an ingest socket. Control messages run one at a time, in order. A slot's hello,
+ * audio and bye run in order on that slot's own lane; a hello also waits for the control messages
+ * before it (it binds the phone). So audio never races ahead of its hello and a slot is bound again
+ * only once its previous stream's audio and bye are done, while a phone uploading old streams on
+ * other slots (each batch waits for disk and the database; a bye muxes and uploads the last chunk)
+ * holds up neither the live stream nor pings.
  */
 export interface Lanes {
   /** Control messages. */
   queue: Promise<void>;
-  /** Per slot: its last audio batch, hello or bye. */
+  /** Per slot: its last hello, audio batch or bye. */
   slotQueues: Map<number, Promise<void>>;
 }
 
+type Kind = "audio" | "hello" | "bye";
+
 /** The slot a message is ordered with, if any (audio, hello, bye). */
-export function slotOf(message: string | Uint8Array): { slot: number; audio: boolean } | null {
+export function slotOf(message: string | Uint8Array): { slot: number; kind: Kind } | null {
   if (typeof message !== "string") {
     return message[0] === MSG_AUDIO && message.length > 1
-      ? { slot: message[1]!, audio: true }
+      ? { slot: message[1]!, kind: "audio" }
       : null;
   }
   try {
     const m = JSON.parse(message) as { t?: unknown; slot?: unknown };
     if ((m?.t === "hello" || m?.t === "bye") && Number.isInteger(m.slot))
-      return { slot: m.slot as number, audio: false };
+      return { slot: m.slot as number, kind: m.t };
   } catch {
     // Handled (and reported) by the message handler.
   }
@@ -43,14 +46,9 @@ export function schedule(
     return;
   }
   const prev = lanes.slotQueues.get(lane.slot);
-  if (lane.audio) {
-    // Before its slot's first hello on this socket, behind the control messages so far.
-    lanes.slotQueues.set(lane.slot, (prev ?? lanes.queue).then(run));
-    return;
-  }
-  const next = Promise.all([lanes.queue, prev]).then(run);
-  lanes.queue = next;
-  lanes.slotQueues.set(lane.slot, next);
+  // Audio or a bye before its slot's first hello on this socket: behind the control messages so far.
+  const after = lane.kind === "hello" ? Promise.all([lanes.queue, prev]) : (prev ?? lanes.queue);
+  lanes.slotQueues.set(lane.slot, after.then(run));
 }
 
 /** Run `fn` after everything queued so far. */

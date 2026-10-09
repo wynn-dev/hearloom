@@ -18,9 +18,13 @@ A child process of the server (`apps/server/src/live`) receives every stored bat
      speech rather than silence. If a session fails (connection, auth, quota), the speech it didn't
      transcribe is lost and Soniox is retried after 30 s; there is no local fallback.
    - Fresh or backlog is judged from when the server received the audio, not when the pipeline gets
-     to it (a busy or restarting pipeline doesn't turn live speech into backlog), and only changes
-     between utterances; backlog becomes live again once it arrives within 10 s. Backlog work (sound
-     tagging in particular) yields to the live stream.
+     to it (a busy or restarting pipeline doesn't turn live speech into backlog, unless it falls a
+     minute behind), and changes between utterances (when the VAD isn't hearing speech or a segment
+     just ended). Backlog becomes live again once it arrives within 10 s (plus up to 15 s of phone
+     clock lag), and after 3 s of that even through continuous speech; audio received or processed
+     60 s or more after capture is always backlog. Frames held while the pipeline restarted count
+     as received when they are sent if they waited over 30 s. Backlog work (sound tagging in
+     particular) yields to the live stream.
    - Backlog audio uploaded late (> 30 s old, e.g. recordings downloaded from the pendant): its VAD
      segments are stitched together (up to 0.3 s of silence between them) into batches of up to 5
      minutes of speech and transcribed with `stt-async-v5`. A batch is sent once it's full or its

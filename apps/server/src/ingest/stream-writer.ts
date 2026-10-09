@@ -146,6 +146,7 @@ export class StreamWriter {
   private chunk: OpenChunk | null = null;
   private queue: Promise<unknown> = Promise.resolve();
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  private disposed = false;
   private lastAt = 0;
   private framesSinceProgress = 0;
   private bytesSinceProgress = 0;
@@ -156,7 +157,7 @@ export class StreamWriter {
    * received them (unix ms).
    */
   onFrames?: (meta: StreamMeta, frames: AudioFrame[], receivedAt: number) => void;
-  /** Called when the writer has closed its chunk after idling. */
+  /** Called when the writer has closed its chunk and saved its progress after idling. */
   onIdle?: () => void;
 
   constructor(
@@ -286,17 +287,27 @@ export class StreamWriter {
   }
 
   private armIdle(): void {
+    if (this.disposed) return;
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = setTimeout(() => {
       this.idleTimer = null;
-      // On failure the spool files stay on disk and are recovered at the next start.
-      void this.flush()
-        .catch((err) => console.error(`[ingest] closing chunk of ${this.meta.id} failed`, err))
-        .finally(() => this.onIdle?.());
+      void this.flush().then(
+        () => {
+          if (this.savedSeq === this.ackedSeq) this.onIdle?.();
+        },
+        (err) => {
+          // Not idle yet: dropping the writer now would let the next hello resume from a stale
+          // ack in the database. Try again later (a chunk that failed to close stays in the spool,
+          // recovered at the next start).
+          console.error(`[ingest] closing chunk of ${this.meta.id} failed`, err);
+          this.armIdle();
+        },
+      );
     }, this.opts.idleMs);
   }
 
   dispose(): void {
+    this.disposed = true;
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = null;
   }

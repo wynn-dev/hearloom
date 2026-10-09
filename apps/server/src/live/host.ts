@@ -3,6 +3,7 @@ import type { Subprocess } from "bun";
 import { env } from "../env";
 import type { StreamMeta } from "../ingest/stream-writer";
 import { invalidate } from "../realtime";
+import { FRESH_MS } from "./freshness";
 import type { ChildMessage, HostMessage } from "./ipc";
 import { resetActivity, setActivity } from "./state";
 import type { TeachHeard, TeachPrompt, VoiceCueEvent, VoiceDetection } from "./voice/types";
@@ -119,17 +120,22 @@ export class LivePipelineHost {
 
   /** Newly stored frames; `receivedAt`: when the server received them (unix ms). */
   push(meta: StreamMeta, frames: AudioFrame[], receivedAt = Date.now()): void {
-    if (!this.wanted) return;
+    if (frames.length === 0) return;
+    // Also while shutting down: the child still transcribes until it's told to stop.
     if (this.running) {
       this.sendFrames({ meta, frames, receivedAt });
       return;
     }
-    // Restarting: hold them, so they are still transcribed (the time they arrived decides whether
-    // they count as live).
+    if (!this.wanted) return;
+    // Restarting: hold them, so they are still transcribed.
     this.held.push({ meta, frames, receivedAt });
     this.heldFrames += frames.length;
     while (this.heldFrames > MAX_HELD_FRAMES && this.held.length > 1) {
-      const n = this.held.shift()!.frames.length;
+      // The oldest audio goes first: backlog before the live stream's.
+      let oldest = 0;
+      for (let i = 1; i < this.held.length; i++)
+        if (this.held[i]!.frames[0]!.at < this.held[oldest]!.frames[0]!.at) oldest = i;
+      const n = this.held.splice(oldest, 1)[0]!.frames.length;
       this.heldFrames -= n;
       this.droppedFrames += n;
     }
@@ -150,8 +156,11 @@ export class LivePipelineHost {
     });
   }
 
-  /** Send what arrived while the child was down. */
-  private sendHeld(): void {
+  /**
+   * Send what arrived while the child was down. Frames held too long to count as live are sent as
+   * received now, so they go the backlog way (no wake-word buzzes or commands minutes late).
+   */
+  private sendHeld(now = Date.now()): void {
     const held = this.held;
     const dropped = this.droppedFrames;
     this.dropHeld();
@@ -159,7 +168,8 @@ export class LivePipelineHost {
       console.error(
         `[live] ${dropped} frames arrived while the pipeline was down and were dropped`,
       );
-    for (const batch of held) this.sendFrames(batch);
+    for (const batch of held)
+      this.sendFrames(now - batch.receivedAt > FRESH_MS ? { ...batch, receivedAt: now } : batch);
   }
 
   private dropHeld(): void {
@@ -256,7 +266,8 @@ export class LivePipelineHost {
 
   /**
    * The server is shutting down: don't restart the child when it exits. Call this first thing: the
-   * child is in the server's process group, so a Ctrl-C or turbo's signal reaches it too.
+   * child is in the server's process group, so a Ctrl-C or turbo's signal reaches it too. Frames
+   * still go to a running child until `stop`.
    */
   beginShutdown(): void {
     this.stopped = true;

@@ -157,8 +157,8 @@ export class StreamProcessor {
   private readonly freshness = new Freshness();
   /** Whether the audio being processed is live (see Freshness). */
   private fresh = true;
-  /** The VAD heard speech at the end of the audio processed so far. */
-  private speaking = false;
+  /** An utterance runs on at the end of the audio processed so far (see Freshness). */
+  private midUtterance = false;
   /** Wall-clock spans of audio that arrived too late to stream (merged, recent only). */
   private backlogSpans: { from: number; to: number }[] = [];
   private backlog: BacklogBatch | null = null;
@@ -284,7 +284,7 @@ export class StreamProcessor {
     this.runStartAt = at;
     this.runSamples = 0;
     this.freshness.reset();
-    this.speaking = false;
+    this.midUtterance = false;
     this.tagFill = 0;
     this.tagSinceHop = 0;
   }
@@ -309,8 +309,13 @@ export class StreamProcessor {
     this.runSamples += samples.length;
     this.history.push(absAt, samples);
     // From when the server received the audio, not when we get to it: a busy pipeline must not
-    // turn live speech into backlog.
-    const fresh = this.freshness.judge(receivedAt - absAt, this.speaking);
+    // turn live speech into backlog (unless it's minutes behind).
+    const fresh = this.freshness.judge({
+      lagMs: receivedAt - absAt,
+      ageMs: Date.now() - absAt,
+      at: absAt,
+      midUtterance: this.midUtterance,
+    });
     this.fresh = fresh;
     if (!fresh) {
       // Backlog (an old stream uploading) must not hold up the live stream's audio.
@@ -320,7 +325,8 @@ export class StreamProcessor {
 
     // Speech detection.
     const { segments, speaking } = this.vad!.accept(samples);
-    this.speaking = speaking;
+    // A segment that just ended is a boundary even if speech goes on (TV, music, a monologue).
+    this.midUtterance = speaking && segments.length === 0;
     this.heardUntil = absAt + samples.length / 16;
     if (speaking) {
       this.lastSpeechAt = Date.now();

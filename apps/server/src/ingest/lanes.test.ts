@@ -25,9 +25,9 @@ function lanes(): Lanes {
 
 describe("ingest lanes", () => {
   test("tells which slot a message belongs to", () => {
-    expect(slotOf(audio(3))).toEqual({ slot: 3, audio: true });
-    expect(slotOf(hello(2))).toEqual({ slot: 2, audio: false });
-    expect(slotOf(bye(2))).toEqual({ slot: 2, audio: false });
+    expect(slotOf(audio(3))).toEqual({ slot: 3, kind: "audio" });
+    expect(slotOf(hello(2))).toEqual({ slot: 2, kind: "hello" });
+    expect(slotOf(bye(2))).toEqual({ slot: 2, kind: "bye" });
     expect(slotOf(ping)).toBeNull();
     expect(slotOf("not json")).toBeNull();
     expect(slotOf(new Uint8Array([0x7f, 1]))).toBeNull();
@@ -75,6 +75,27 @@ describe("ingest lanes", () => {
     slowAudio.open();
     await tick();
     expect(log).toEqual(["hello", "audio 1", "audio 2", "bye"]);
+  });
+
+  test("an old stream's slow bye holds up neither a new live stream nor pings", async () => {
+    const l = lanes();
+    const log: string[] = [];
+    schedule(l, hello(1), async () => void log.push("hello 1"));
+    schedule(l, audio(1), async () => void log.push("backlog"));
+    const slowBye = gate();
+    schedule(l, bye(1), async () => {
+      await slowBye.done; // muxing and uploading the last chunk
+      log.push("bye 1");
+    });
+    schedule(l, hello(1), async () => void log.push("hello 1 again")); // the next old stream
+    schedule(l, ping, async () => void log.push("ping"));
+    schedule(l, hello(0), async () => void log.push("hello 0"));
+    schedule(l, audio(0), async () => void log.push("live"));
+    await tick();
+    expect(log.sort()).toEqual(["backlog", "hello 0", "hello 1", "live", "ping"]);
+    slowBye.open();
+    await tick();
+    expect(log.slice(-2)).toEqual(["bye 1", "hello 1 again"]);
   });
 
   test("closing runs after everything queued", async () => {
