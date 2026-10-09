@@ -13,12 +13,14 @@ import { enqueueRefine, stopJobs } from "./jobs";
 import { livePipeline } from "./live/host";
 import { stopNotifications } from "./notify/gateway";
 import { attachRealtimeServer, topicFor } from "./realtime";
+import { trackSocket, untrackSocket } from "./sessions";
 import { onDetection, recoverPending } from "./voice/commands";
 import { onTeachHeard, replayTeach } from "./voice/teach";
 
 interface RealtimeSocketData {
   kind: "realtime";
   userId: string;
+  sessionId: string;
 }
 type SocketData = IngestSocketData | RealtimeSocketData;
 
@@ -40,12 +42,13 @@ const server = Bun.serve<SocketData>({
           ? {
               kind: "ingest",
               userId: session.user.id,
+              sessionId: session.session.id,
               phoneId: null,
               slots: new Map(),
               queue: Promise.resolve(),
               closed: false,
             }
-          : { kind: "realtime", userId: session.user.id };
+          : { kind: "realtime", userId: session.user.id, sessionId: session.session.id };
       if (server.upgrade(req, { data })) return undefined;
       return new Response("websocket upgrade failed", { status: 400 });
     }
@@ -57,6 +60,7 @@ const server = Bun.serve<SocketData>({
     idleTimeout: 120,
     sendPings: true,
     open(ws) {
+      trackSocket(ws.data.sessionId, ws as ServerWebSocket<unknown>);
       if (ws.data.kind === "ingest")
         return ingestHandlers.open(ws as ServerWebSocket<IngestSocketData>);
       ws.subscribe(topicFor(ws.data.userId));
@@ -69,6 +73,7 @@ const server = Bun.serve<SocketData>({
       }
     },
     close(ws) {
+      untrackSocket(ws.data.sessionId, ws as ServerWebSocket<unknown>);
       if (ws.data.kind === "ingest") ingestHandlers.close(ws as ServerWebSocket<IngestSocketData>);
     },
   },

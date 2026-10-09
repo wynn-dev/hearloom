@@ -5,6 +5,8 @@ import type { StreamWriter } from "./stream-writer";
 export interface IngestSocketData {
   kind: "ingest";
   userId: string;
+  /** The session the socket authenticated with (closed when it is revoked). */
+  sessionId: string;
   phoneId: string | null;
   slots: Map<number, StreamWriter>;
   /** Serializes message handling for this socket. */

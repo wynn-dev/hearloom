@@ -2,7 +2,7 @@ import { contract } from "@hearloom/api";
 import { schema } from "@hearloom/db";
 import { publicSettings, voiceRenameReset } from "@hearloom/shared";
 import { implement, ORPCError } from "@orpc/server";
-import { and, asc, count, desc, eq, gte, isNull, lt, lte, max, or, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, isNull, lt, lte, max, or } from "drizzle-orm";
 import { createToken } from "../agent/tokens";
 import { generateWebhookSecret } from "../agent/webhooks";
 import { type AuthSession, getSession } from "../auth";
@@ -20,9 +20,11 @@ import {
 } from "../episodes/store";
 import { chunkUrl } from "../http/media";
 import { isPhoneOnline } from "../ingest/phones";
+import { formatCode, linkCodeStatus, linkUrls, mintLinkCode } from "../link/codes";
 import { livePipeline } from "../live/host";
 import { markOpened, notify } from "../notify/gateway";
 import { invalidate } from "../realtime";
+import { clientKind, listSessions, releasePhones, revokeSession } from "../sessions";
 import { getSettings, updateSettings } from "../settings";
 import { FeedbackError, listCommands, sendTestCommand, setFeedback } from "../voice/commands";
 import { voiceProfile } from "../voice/profile";
@@ -53,6 +55,8 @@ const {
 
 export interface RpcContext {
   headers: Headers;
+  /** The origin the request came in on, when it can be trusted as such (auth.ts, trustedOwnOrigin). */
+  origin?: string | null;
 }
 
 const os = implement(contract).$context<RpcContext>();
@@ -63,7 +67,18 @@ const authed = os.use(async ({ context, next }) => {
   return next({ context: { session, userId: session.user.id } });
 });
 
-type Ctx = { session: AuthSession; userId: string };
+type Ctx = RpcContext & { session: AuthSession; userId: string };
+
+const LOOPBACK = /^(?:localhost|127(?:\.\d+){3}|\[::1\])$/;
+
+/**
+ * The address a device should use to reach this server: PUBLIC_URL, unless that is a loopback address
+ * (not configured) and the console is on one a phone could use.
+ */
+export function linkServer(publicUrl: string, origin: string | null | undefined): string {
+  if (!LOOPBACK.test(new URL(publicUrl).hostname)) return publicUrl;
+  return origin && !LOOPBACK.test(new URL(origin).hostname) ? origin : publicUrl;
+}
 
 /** A stream counts as live if it is open and received audio in the last 2 minutes. */
 const LIVE_WINDOW_MS = 120_000;
@@ -245,9 +260,20 @@ export const router = authed.router({
 
   phones: {
     register: authed.phones.register.handler(async ({ context, input }) => {
-      const { userId } = context as Ctx;
+      const { userId, session } = context as Ctx;
+      // Signed in again on this phone: the sign-in it had before is no longer used by anyone.
+      if (input.id) {
+        const [prev] = await db
+          .select({ sessionId: phones.sessionId })
+          .from(phones)
+          .where(and(eq(phones.id, input.id), eq(phones.userId, userId)));
+        if (prev?.sessionId && prev.sessionId !== session.session.id) {
+          await revokeSession(userId, prev.sessionId);
+        }
+      }
       const values = {
         userId,
+        sessionId: session.session.id,
         name: input.name,
         model: input.model ?? null,
         osVersion: input.osVersion ?? null,
@@ -302,28 +328,71 @@ export const router = authed.router({
     list: authed.phones.list.handler(({ context }) => listPhones((context as Ctx).userId)),
     signOut: authed.phones.signOut.handler(async ({ context, input }) => {
       const { userId } = context as Ctx;
-      await db
-        .update(captureStreams)
-        .set({ endedAt: sql`coalesce(${captureStreams.lastFrameAt}, ${captureStreams.startedAt})` })
-        .where(
-          and(
-            eq(captureStreams.userId, userId),
-            eq(captureStreams.phoneId, input.id),
-            isNull(captureStreams.endedAt),
-          ),
-        );
-      await db
-        .update(phones)
-        .set({ apnsToken: null })
-        .where(and(eq(phones.id, input.id), eq(phones.userId, userId)));
+      await releasePhones(userId, eq(phones.id, input.id));
       invalidate(userId, ["phones", "status"]);
       return { ok: true as const };
     }),
+    /** Also signs the phone's app out: removing a phone must not leave its token working. */
     remove: authed.phones.remove.handler(async ({ context, input }) => {
       const { userId } = context as Ctx;
+      const [phone] = await db
+        .select({ sessionId: phones.sessionId })
+        .from(phones)
+        .where(and(eq(phones.id, input.id), eq(phones.userId, userId)));
+      if (phone?.sessionId) await revokeSession(userId, phone.sessionId);
       await db.delete(phones).where(and(eq(phones.id, input.id), eq(phones.userId, userId)));
       invalidate(userId, ["phones", "status"]);
       return { ok: true as const };
+    }),
+  },
+
+  sessions: {
+    list: authed.sessions.list.handler(({ context }) => {
+      const { userId, session } = context as Ctx;
+      return listSessions(userId, session.session.id);
+    }),
+    revoke: authed.sessions.revoke.handler(async ({ context, input }) => {
+      if (!(await revokeSession((context as Ctx).userId, input.id))) {
+        throw new ORPCError("NOT_FOUND");
+      }
+      return { ok: true as const };
+    }),
+    createLink: authed.sessions.createLink.handler(async ({ context, input }) => {
+      const { userId, session, origin } = context as Ctx;
+      // Codes come from the console: a phone's token (stolen with the phone) can't add devices.
+      if (clientKind(session.session.userAgent) !== "browser") {
+        throw new ORPCError("FORBIDDEN", { message: "Link devices from the web console." });
+      }
+      let target = session.user;
+      if (input.userId && input.userId !== userId) {
+        if ((session.user as { role?: string | null }).role !== "admin") {
+          throw new ORPCError("FORBIDDEN", { message: "Only an admin can link someone else." });
+        }
+        const [other] = await db.select().from(schema.user).where(eq(schema.user.id, input.userId));
+        if (!other) throw new ORPCError("NOT_FOUND", { message: "No such user." });
+        if (other.banned) throw new ORPCError("FORBIDDEN", { message: "That user is banned." });
+        target = other;
+      }
+      const minted = await mintLinkCode(target.id, userId);
+      return {
+        id: minted.id,
+        code: formatCode(minted.code),
+        expiresAt: minted.expiresAt,
+        email: target.email,
+        ...linkUrls(linkServer(env.PUBLIC_URL, origin), minted.code),
+      };
+    }),
+    linkStatus: authed.sessions.linkStatus.handler(async ({ context, input }) => {
+      const { userId, session } = context as Ctx;
+      const status = await linkCodeStatus(input.id, userId);
+      if (!status) throw new ORPCError("NOT_FOUND");
+      // The device, if it signed in as this user (an admin linking someone else sees only the status).
+      const device = status.sessionId
+        ? ((await listSessions(userId, session.session.id)).find(
+            (s) => s.id === status.sessionId,
+          ) ?? null)
+        : null;
+      return { status: status.status, device };
     }),
   },
 

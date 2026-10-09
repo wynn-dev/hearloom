@@ -64,6 +64,13 @@
       "when": 1791384920718,
       "tag": "0008_voice_commands",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1791566610686,
+      "tag": "0009_link_device",
+      "breakpoints": true
     }
   ]
 }

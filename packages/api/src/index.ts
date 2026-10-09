@@ -24,6 +24,40 @@ export const phoneSchema = z.object({
   online: z.boolean(),
 });
 
+/** A signed-in device: one session (the app's token or a browser's cookie). */
+export const deviceSessionSchema = z.object({
+  id: z.string(),
+  kind: z.enum(["app", "browser"]),
+  /** The phone's name for the app, e.g. "Safari on macOS" for a browser. */
+  name: z.string(),
+  /** The phone's model, for the app. */
+  detail: z.string().nullable(),
+  ipAddress: z.string().nullable(),
+  phoneId: z.uuid().nullable(),
+  /** The session this request came with. */
+  current: z.boolean(),
+  createdAt: z.date(),
+  /** Updated at most daily (when the session slides forward). */
+  lastActiveAt: z.date(),
+  expiresAt: z.date(),
+});
+
+/** A freshly minted "Link device" code; the code itself is never shown again. */
+export const linkCodeSchema = z.object({
+  id: z.uuid(),
+  /** XXXX-XXXX-XXXX */
+  code: z.string(),
+  expiresAt: z.date(),
+  /** Who the device will be signed in as. */
+  email: z.string(),
+  /** How the device reaches this server. */
+  server: z.string(),
+  /** `hearloom://link?server=…&code=…`: the iPhone app (scan the QR code with the Camera app). */
+  appUrl: z.string(),
+  /** `<server>/link#code=…`: a browser. */
+  webUrl: z.string(),
+});
+
 export const wearableSchema = z.object({
   id: z.uuid(),
   name: z.string(),
@@ -284,6 +318,26 @@ export const contract = {
   wearables: {
     list: oc.output(z.array(wearableSchema)),
   },
+  /** Signed-in devices and "Link device" codes. */
+  sessions: {
+    list: oc.output(z.array(deviceSessionSchema)),
+    /** Sign a device out for good (its phone, if any, stops getting pushes). */
+    revoke: oc.input(z.object({ id: z.string().min(1).max(200) })).output(ok),
+    /**
+     * A single-use code (5 minutes) that signs one device in. Only from a browser session (the
+     * console), so a phone's token can't add devices. `userId`: an admin linking someone else.
+     */
+    createLink: oc
+      .input(z.object({ userId: z.string().min(1).max(200).optional() }))
+      .output(linkCodeSchema),
+    linkStatus: oc.input(z.object({ id: z.uuid() })).output(
+      z.object({
+        status: z.enum(["pending", "redeemed", "expired"]),
+        /** The device that redeemed it, while it's still signed in. */
+        device: deviceSessionSchema.nullable(),
+      }),
+    ),
+  },
   status: {
     live: oc.output(liveStatusSchema),
   },
@@ -441,6 +495,8 @@ export type NotificationItem = z.infer<typeof notificationSchema>;
 export type AudioChunk = z.infer<typeof audioChunkSchema>;
 export type Person = z.infer<typeof personSchema>;
 export type ApiToken = z.infer<typeof apiTokenSchema>;
+export type DeviceSession = z.infer<typeof deviceSessionSchema>;
+export type LinkCode = z.infer<typeof linkCodeSchema>;
 export type VoiceCommand = z.infer<typeof voiceCommandSchema>;
 export type VoiceStatus = z.infer<typeof voiceStatusSchema>;
 export type TeachResultItem = z.infer<typeof teachResultSchema>;
@@ -450,7 +506,14 @@ export type RealtimeEvent =
   | {
       t: "invalidate";
       keys: Array<
-        "status" | "timeline" | "notifications" | "phones" | "settings" | "people" | "voice"
+        | "status"
+        | "timeline"
+        | "notifications"
+        | "phones"
+        | "sessions"
+        | "settings"
+        | "people"
+        | "voice"
       >;
     }
   | { t: "hello"; serverTime: number };
