@@ -1,5 +1,14 @@
 import "../test-db";
-import { afterAll, afterEach, beforeAll, beforeEach, expect, spyOn, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  expect,
+  setSystemTime,
+  spyOn,
+  test,
+} from "bun:test";
 import { schema } from "@hearloom/db";
 import type { ServerWebSocket } from "bun";
 import { eq, sql } from "drizzle-orm";
@@ -20,6 +29,7 @@ import {
   commandReplied,
   commandStarted,
   cue,
+  deliver,
   lastReplyReport,
   onDetection,
   PULSE_GAP_MS,
@@ -126,9 +136,9 @@ async function buzzed(n: number) {
 }
 
 /** A command that was sent and is awaited, as a restart finds it (no timer in this process). */
-async function awaitedBefore(deadlineAt: number) {
+async function awaitedBefore(deadlineAt: number, over: Partial<VoiceDetection> = {}) {
   await updateSettings(userId, { agent: { voiceReplies: false } });
-  const d = detection();
+  const d = detection(over);
   await onDetection(d);
   await db
     .update(schema.voiceCommands)
@@ -281,6 +291,114 @@ test("three answers in a row that never came: stop waiting until the agent repor
   }
 }, 15_000);
 
+test("a run that started but never ended shows the hook works: it doesn't count", async () => {
+  await updateSettings(userId, { voice: { haptics: false } });
+  try {
+    const timedOut = async (started: boolean) => {
+      const d = await awaitedBefore(Date.now() - 1_000);
+      if (started)
+        await db
+          .update(schema.voiceCommands)
+          .set({ replyStartedAt: new Date(Date.now() - 11 * 60_000) })
+          .where(eq(schema.voiceCommands.id, d.id));
+      await recoverReplyWaits(Date.now(), 0);
+      for (let i = 0; i < 40 && (await row(d.id)).replyStatus !== "timeout"; i++)
+        await Bun.sleep(25);
+    };
+    await timedOut(false);
+    await timedOut(true);
+    await timedOut(false);
+    await timedOut(false);
+    expect((await getSettings(userId)).agent.voiceReplies).toBe(true);
+    await timedOut(false);
+    await Bun.sleep(100);
+    expect((await getSettings(userId)).agent.voiceReplies).toBe(false);
+  } finally {
+    await updateSettings(userId, { voice: { haptics: true } });
+  }
+}, 15_000);
+
+test("a command delivered again after a restart isn't awaited again once its run ended", async () => {
+  setReplyTimeout(200, 10 * 60_000);
+  const d = detection();
+  await onDetection(d);
+  expect(await commandReplied(userId, d.id)).toBe("buzzed");
+  expect(await buzzed(2)).toEqual(CUE_PULSES.sent);
+  // The restart found it pending (its delivery's end wasn't stored) and delivered it again; the
+  // agent dedupes it, so no second report comes: no three taps for it.
+  const pending = () =>
+    db
+      .update(schema.voiceCommands)
+      .set({ status: "pending" })
+      .where(eq(schema.voiceCommands.id, d.id));
+  await pending();
+  await deliver(await row(d.id));
+  await Bun.sleep(500);
+  expect(legacy).toEqual(CUE_PULSES.sent);
+  expect(await row(d.id)).toMatchObject({ status: "sent", replyStatus: "answered" });
+
+  // Its run had started before the restart: the run's deadline holds, not a fresh 2 minutes.
+  const started = Date.now() - 60_000;
+  await db
+    .update(schema.voiceCommands)
+    .set({
+      replyStatus: "awaiting",
+      repliedAt: null,
+      replyStartedAt: new Date(started),
+      status: "pending",
+    })
+    .where(eq(schema.voiceCommands.id, d.id));
+  await deliver(await row(d.id));
+  const r = await row(d.id);
+  expect(r.replyStatus).toBe("awaiting");
+  expect(Math.abs(r.replyDeadlineAt!.getTime() - (started + 10 * 60_000))).toBeLessThan(1_000);
+  await Bun.sleep(400);
+  expect(legacy).toEqual(CUE_PULSES.sent);
+
+  // No longer waiting for answers: the old wait ends.
+  await updateSettings(userId, { agent: { voiceReplies: false } });
+  await pending();
+  await deliver(await row(d.id));
+  expect((await row(d.id)).replyStatus).toBeNull();
+  await Bun.sleep(100);
+  expect(legacy).toEqual(CUE_PULSES.sent);
+});
+
+test("a timer that fires before its deadline (clock stepped) waits on; a DB error is retried", async () => {
+  // The clock was ahead when the timer was set: it fires while the deadline is still 1.5 s off.
+  const d = await awaitedBefore(Date.now() + 1_500);
+  setSystemTime(new Date(Date.now() + 3_000));
+  await recoverReplyWaits(Date.now(), 0);
+  setSystemTime();
+  await Bun.sleep(400);
+  expect((await row(d.id)).replyStatus).toBe("awaiting");
+  expect(legacy).toEqual([]);
+  expect(await buzzed(3)).toEqual(CUE_PULSES.failed);
+  expect((await row(d.id)).replyStatus).toBe("timeout");
+
+  legacy.length = 0;
+  await db.execute(sql`create sequence hl_test_once`);
+  await db.execute(sql`
+    create function hl_test_once() returns trigger language plpgsql as $$
+    begin if nextval('hl_test_once') = 1 then raise exception 'boom once'; end if; return new; end $$`);
+  await db.execute(sql`
+    create trigger hl_test_once before update on voice_commands for each row
+    when (new.reply_status = 'timeout' and new.command = 'boom-once') execute function hl_test_once()`);
+  const error = spyOn(console, "error");
+  try {
+    const e = await awaitedBefore(Date.now() - 1_000, { command: "boom-once" });
+    await recoverReplyWaits(Date.now(), 0);
+    expect(await buzzed(3)).toEqual(CUE_PULSES.failed);
+    expect((await row(e.id)).replyStatus).toBe("timeout");
+    expect(error.mock.calls.some((c) => String(c[0]).includes("retrying"))).toBe(true);
+  } finally {
+    error.mockRestore();
+    await db.execute(sql`drop trigger hl_test_once on voice_commands`);
+    await db.execute(sql`drop function hl_test_once()`);
+    await db.execute(sql`drop sequence hl_test_once`);
+  }
+}, 15_000);
+
 test("a new webhook URL or secret stops waiting for answers until they're reported", async () => {
   await updateSettings(userId, { agent: { webhookSecret: "another-secret" } });
   expect((await getSettings(userId)).agent.voiceReplies).toBe(false);
@@ -329,6 +447,9 @@ test("phones with haptic_seq get the whole cue in one message; old builds a hapt
     },
   ]);
   expect(legacy).toEqual(CUE_PULSES.failed);
+  // The "heard" tap is only worth playing right away.
+  await cue(userId, "heard");
+  expect(seq[1]).toMatchObject({ pulses: ["short"], ttlMs: 3_000 });
 
   const warn = spyOn(console, "warn");
   try {

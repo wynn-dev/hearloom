@@ -38,6 +38,17 @@ export const PULSE_GAP_MS = 350;
 const PULSE_MS: Record<HapticPattern, number> = { short: 100, medium: 300, long: 500 };
 /** At least this much stillness between two cues, so they don't run together. */
 export const CUE_GAP_MS = 600;
+/**
+ * How late a phone that plays cues itself (`haptic_seq`; it keeps CUE_GAP_MS of stillness after
+ * the previous cue) may still play one: the "heard" tap is only worth anything right away, an
+ * outcome still means something a while later.
+ */
+export const CUE_TTL_MS: Record<VoiceCue, number> = {
+  heard: 3_000,
+  sent: 20_000,
+  no_command: 20_000,
+  failed: 20_000,
+};
 
 /** Per user: cues play one after another. */
 const buzzing = new Map<string, { chain: Promise<void>; stillAt: number }>();
@@ -76,7 +87,10 @@ export function cue(userId: string, cue: VoiceCue): Promise<void> {
     const pulses = CUE_PULSES[cue];
     // New app builds play the cue themselves: it ends when the last pulse does, either way.
     queue.stillAt = Date.now() + (pulses.length - 1) * PULSE_GAP_MS + PULSE_MS[pulses.at(-1)!];
-    const phones = await buzzUserPhones(userId, pulses, PULSE_GAP_MS, `"${cue}" cue`);
+    const phones = await buzzUserPhones(userId, pulses, PULSE_GAP_MS, {
+      ttlMs: CUE_TTL_MS[cue],
+      label: `"${cue}" cue`,
+    });
     if (phones === 0) console.warn(`[voice] the "${cue}" buzz reached no phone (none online)`);
   });
   queue.chain = run.catch(() => {});
@@ -193,21 +207,47 @@ const awaiting = eq(voiceCommands.replyStatus, "awaiting");
 /** Ends a wait that is still on, keeping an outcome that's already in. */
 const noWait = sql<null>`case when ${voiceCommands.replyStatus} = 'awaiting' then null else ${voiceCommands.replyStatus} end`;
 
-/** Start waiting for the answer, before sending: a fast agent may answer before the call returns. */
+/**
+ * Start waiting for the answer, before sending: a fast agent may answer before the call returns.
+ * Not again for a command delivered again after a restart whose run already ended (its report is
+ * in) or whose wait already ended; one whose run already started keeps its run's deadline.
+ */
 async function awaitReply(row: CommandRow): Promise<void> {
-  const deadline = Date.now() + replyTimeoutMs;
+  const fresh = new Date(Date.now() + replyTimeoutMs).toISOString();
   try {
-    await db
+    const [r] = await db
       .update(voiceCommands)
-      .set({ replyStatus: "awaiting", replyDeadlineAt: new Date(deadline) })
-      .where(eq(voiceCommands.id, row.id));
-    armReplyTimer(row.id, row.userId, deadline);
+      .set({
+        replyStatus: "awaiting",
+        replyDeadlineAt: sql`case when ${voiceCommands.replyStartedAt} is null then ${fresh}::timestamptz
+          else ${voiceCommands.replyStartedAt} + make_interval(secs => ${runTimeoutMs / 1000}) end`,
+      })
+      .where(
+        and(
+          eq(voiceCommands.id, row.id),
+          isNull(voiceCommands.repliedAt),
+          or(isNull(voiceCommands.replyStatus), awaiting),
+        ),
+      )
+      .returning({ deadline: voiceCommands.replyDeadlineAt });
+    if (r?.deadline) armReplyTimer(row.id, row.userId, r.deadline.getTime());
   } catch (err) {
     console.error(`[voice] couldn't start waiting for the answer to ${row.id}`, err);
   }
 }
 
+/** The wait's deadline came: three taps, unless it was settled or moved meanwhile. */
 async function replyTimedOut(id: string, userId: string): Promise<void> {
+  try {
+    await settleTimeout(id, userId);
+  } catch (err) {
+    console.error(`[voice] ending the wait for ${id} failed, retrying`, err);
+    await Bun.sleep(1000);
+    await settleTimeout(id, userId);
+  }
+}
+
+async function settleTimeout(id: string, userId: string): Promise<void> {
   // Not if the deadline moved meanwhile (the run started; timers may fire a little early).
   const [r] = await db
     .update(voiceCommands)
@@ -220,7 +260,17 @@ async function replyTimedOut(id: string, userId: string): Promise<void> {
       ),
     )
     .returning({ startedAt: voiceCommands.replyStartedAt });
-  if (!r) return;
+  if (!r) {
+    // Settled already, or the deadline isn't here yet (moved, or the clock was stepped): if it's
+    // still awaited, wait on until its deadline.
+    const [row] = await db
+      .select({ status: voiceCommands.replyStatus, deadline: voiceCommands.replyDeadlineAt })
+      .from(voiceCommands)
+      .where(eq(voiceCommands.id, id));
+    if (row?.status === "awaiting" && !replyTimers.has(id))
+      armReplyTimer(id, userId, Math.max(row.deadline?.getTime() ?? 0, Date.now() + 1000));
+    return;
+  }
   clearReplyTimer(id);
   invalidate(userId, ["voice"]);
   console.log(
@@ -231,13 +281,18 @@ async function replyTimedOut(id: string, userId: string): Promise<void> {
 }
 
 /**
- * Several answers in a row never came, not even late: the agent no longer reports them (its hook
- * was removed or broke). Stop waiting, so sent commands aren't told as failed; the next answer it
- * reports turns waiting on again.
+ * Several answers in a row never came, not even late, nor a report that the run started: the agent
+ * no longer reports them (its hook was removed or broke). Stop waiting, so sent commands aren't
+ * told as failed; the next answer it reports turns waiting on again. (A run that started and
+ * then never ended shows the hook works: it breaks the streak.)
  */
 async function stopWaitingIfHookGone(userId: string): Promise<void> {
   const last = await db
-    .select({ replyStatus: voiceCommands.replyStatus, repliedAt: voiceCommands.repliedAt })
+    .select({
+      replyStatus: voiceCommands.replyStatus,
+      repliedAt: voiceCommands.repliedAt,
+      startedAt: voiceCommands.replyStartedAt,
+    })
     .from(voiceCommands)
     .where(
       and(
@@ -245,6 +300,7 @@ async function stopWaitingIfHookGone(userId: string): Promise<void> {
         or(
           inArray(voiceCommands.replyStatus, ["answered", "failed", "timeout"]),
           isNotNull(voiceCommands.repliedAt),
+          isNotNull(voiceCommands.replyStartedAt),
         ),
       ),
     )
@@ -252,7 +308,7 @@ async function stopWaitingIfHookGone(userId: string): Promise<void> {
     .limit(REPLY_TIMEOUTS_TO_STOP);
   const gone =
     last.length === REPLY_TIMEOUTS_TO_STOP &&
-    last.every((r) => r.replyStatus === "timeout" && r.repliedAt === null);
+    last.every((r) => r.replyStatus === "timeout" && r.repliedAt === null && r.startedAt === null);
   if (!gone || !(await getSettings(userId)).agent.voiceReplies) return;
   console.warn(
     `[voice] the agent reported none of the answers to the last ${REPLY_TIMEOUTS_TO_STOP} commands: no longer waiting for answers until it reports one (is the reply hook installed and its token valid?)`,
@@ -356,6 +412,15 @@ export async function deliver(row: CommandRow, test = false): Promise<DeliveryOu
   const { agent } = await getSettings(row.userId);
   const wait = !test && agent.webhookUrl !== "" && agent.voiceReplies;
   if (wait) await awaitReply(row);
+  else if (row.replyStatus === "awaiting") {
+    // Delivered again after a restart, and no longer waiting for answers: end its old wait.
+    clearReplyTimer(row.id);
+    await db
+      .update(voiceCommands)
+      .set({ replyStatus: noWait })
+      .where(eq(voiceCommands.id, row.id))
+      .catch((e) => console.error("[voice] ending a reply wait failed", e));
+  }
   try {
     return await deliverAndTell(row, test, agent.webhookUrl);
   } catch (err) {

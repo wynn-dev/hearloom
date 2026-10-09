@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -77,6 +78,32 @@ class Outcome(unittest.TestCase):
             handler.run_outcome({"response": "Something went well today."}, None)[0], "answered"
         )
 
+    def test_with_the_result_only_hermes_replacement_texts_at_the_start_count(self):
+        ok = {"final_response": "x", "api_calls": 2, "completed": True}
+        for text in [
+            "HTTP 503 means the service is unavailable; try again in a minute.",
+            "API call failed? No: the API is up, your key works.",
+            "Operation interrupted is what the log says when you press stop.",
+            "Hermes said: ⚠️ Something went wrong and I couldn't finish this reply.",
+        ]:
+            self.assertEqual(handler.run_outcome({"response": text}, ok), ("answered", None), text)
+        # Hermes's own replacement for a missing answer (the run itself didn't fail).
+        no_text = "⚠️ Processing completed but no response was generated. This may be a transient error."
+        self.assertEqual(handler.run_outcome({"response": no_text}, ok)[0], "failed")
+        # Without the result, the provider-error shape counts.
+        self.assertEqual(
+            handler.run_outcome({"response": "HTTP 503 means the service is unavailable"}, None)[0],
+            "failed",
+        )
+        # Not anchored at the start: an answer quoting the error.
+        self.assertEqual(
+            handler.run_outcome(
+                {"response": "It replied: ⚠️ Something went wrong and I couldn't finish this reply."},
+                None,
+            )[0],
+            "answered",
+        )
+
     def test_the_result_is_read_from_the_calling_gateway_frame(self):
         def _hmwa_post_turn_hooks(agent_result):
             return handler.run_result()
@@ -89,7 +116,7 @@ class Outcome(unittest.TestCase):
 class HermesCatalog(unittest.TestCase):
     def test_failure_texts_in_every_language(self):
         sys.path.insert(0, os.environ["HERMES_AGENT_DIR"])
-        handler.failure_texts.cache_clear()
+        handler.failure_patterns.cache_clear()
         from agent.i18n import supported_languages, t
 
         langs = supported_languages()
@@ -111,6 +138,10 @@ class Report(unittest.TestCase):
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])) or b"{}")
                 calls.append((self.path, self.headers.get("Authorization"), body))
                 code = statuses.pop(0) if statuses else 200
+                if code == "garbage":  # not HTTP: the client raises BadStatusLine
+                    self.wfile.write(b"garbage\r\n\r\n")
+                    self.close_connection = True
+                    return
                 payload = b'{"status":"buzzed"}' if code == 200 else b"{}"
                 self.send_response(code)
                 self.send_header("Content-Length", str(len(payload)))
@@ -170,6 +201,33 @@ class Report(unittest.TestCase):
         self.statuses.extend([503, 502])
         self.run_hook("agent:end", voice_ctx(response="Sure."))
         self.assertEqual(len(self.calls), 3)
+
+    def test_a_broken_response_is_retried(self):
+        self.statuses.extend(["garbage"])
+        self.run_hook("agent:start", voice_ctx())
+        self.assertEqual(len(self.calls), 2)
+
+    def test_handle_never_waits_for_the_catalogs(self):
+        slow = handler.failure_patterns
+
+        def loading():
+            time.sleep(0.5)
+            return slow()
+
+        handler.failure_patterns = loading
+        try:
+
+            async def run():
+                started = time.monotonic()
+                await handler.handle("agent:end", voice_ctx(response="Sure."))
+                took = time.monotonic() - started
+                await asyncio.gather(*handler._tasks)
+                return took
+
+            self.assertLess(asyncio.run(run()), 0.1)
+        finally:
+            handler.failure_patterns = slow
+        self.assertEqual(self.calls[0][2], {"outcome": "answered"})
 
     def test_gives_up_with_a_warning(self):
         self.statuses.extend([503] * 10)

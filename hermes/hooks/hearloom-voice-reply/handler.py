@@ -23,11 +23,14 @@ Configuration (environment, e.g. ~/.hermes/.env):
 
 import asyncio
 import base64
+import contextvars
+import http.client
 import json
 import logging
 import os
 import re
 import sys
+import threading
 import urllib.error
 import urllib.request
 from functools import lru_cache
@@ -87,7 +90,9 @@ def is_silence(response: str) -> bool:
 # Hermes passes agent:end hooks no failure flag (the context is platform, user_id, chat_id,
 # thread_id, chat_type, session_id, message, response[:500], model, provider); a failed run's
 # `response` is its error text. So: the run's result as the gateway has it (see `run_result`),
-# else the error texts Hermes replies with.
+# then the error texts Hermes replies with in place of an answer (at the start of the response).
+# Only without the result: raw interrupted-run texts and provider-error envelopes (an answer may
+# well start with "HTTP 503 means…").
 
 # gateway.errors.* keys of replies that stand in for an answer (gateway/run.py, run_turn.py).
 FAILURE_KEYS = (
@@ -120,7 +125,7 @@ FALLBACK_FAILURE_TEXTS = (
     "⚠️ Processing completed but no response was generated.",
     "⚠️ Your message wasn't processed (the previous turn was still being cleaned up).",
     "⚠️ The model returned only a silence marker for a message that needed a reply.",
-    "{model} didn't produce a reply this time, even after retries.",
+    "⚠️ {model} didn't produce a reply this time, even after retries.",
 )
 # Raw texts of interrupted or abandoned runs (the webhook surface gets them unsanitized).
 FAILURE_PREFIXES = ("Operation interrupted", "Turn abandoned")
@@ -150,33 +155,56 @@ def run_result() -> dict | None:
     return None
 
 
-def _literal_part(template: str) -> str:
-    """The longest fixed part of a catalog text (placeholders like {reason} cut out), ≤ 80 chars."""
-    parts = re.split(r"\{[^{}]*\}", template)
-    return max((p.strip() for p in parts), key=len, default="")[:80]
+def _start_pattern(template: str):
+    """How a reply made from a catalog text starts: its first 40 fixed characters, a placeholder
+    ({reason}, {model}…) matching anything. None if too little of it is fixed to tell."""
+    pieces, fixed = [], 0
+    for tok in re.split(r"(\{[^{}]*\})", template.strip()):
+        if fixed >= 40:
+            break
+        if tok.startswith("{") and tok.endswith("}"):
+            pieces.append(".*?")
+        elif tok:
+            take = tok[: 40 - fixed]
+            pieces.append(re.escape(take))
+            fixed += len(take)
+    return re.compile("".join(pieces), re.S) if fixed >= 12 else None
 
 
 @lru_cache(maxsize=1)
-def failure_texts() -> tuple:
-    """A fixed part of each Hermes failure reply, in every language Hermes has."""
+def failure_patterns() -> tuple:
+    """How each Hermes failure reply starts, in every language Hermes has. Loading the catalogs
+    takes seconds: never called on the gateway's event loop (warmed in a thread at load)."""
     texts = set()
     try:
         from agent.i18n import supported_languages, t
+        from agent.turn_explainers import EMPTY_RESPONSE_EXPLANATION
 
         for lang in supported_languages():
             for key in FAILURE_KEYS:
                 text = t(f"gateway.errors.{key}", lang=lang)
                 if text and not text.startswith("gateway."):
                     texts.add(text)
-        from agent.turn_explainers import EMPTY_RESPONSE_EXPLANATION
-
-        texts.add(EMPTY_RESPONSE_EXPLANATION)
+            warn = t("gateway.shared.warn_passthrough", lang=lang)
+            if "{error}" in warn:
+                texts.add(warn.replace("{error}", EMPTY_RESPONSE_EXPLANATION))
     except Exception:
         pass
     if not texts:
         texts.update(FALLBACK_FAILURE_TEXTS)
-    parts = {_literal_part(t) for t in texts}
-    return tuple(sorted(p for p in parts if len(p) >= 12))
+    patterns = {_start_pattern(t) for t in texts}
+    return tuple(p for p in patterns if p is not None)
+
+
+def _warm() -> None:
+    try:
+        failure_patterns()
+    except Exception:
+        pass
+
+
+# In this profile's context (its HERMES_HOME), off the event loop.
+threading.Thread(target=contextvars.copy_context().run, args=(_warm,), daemon=True).start()
 
 
 def looks_like_provider_error(text: str) -> bool:
@@ -189,7 +217,7 @@ def looks_like_provider_error(text: str) -> bool:
 
 
 def run_outcome(context: dict, result: dict | None) -> tuple:
-    """("answered", None), or ("failed", why)."""
+    """("answered", None), or ("failed", why). Blocks while the catalogs load: not on the loop."""
     if isinstance(result, dict):
         if result.get("failed"):
             return "failed", str(result.get("failure_reason") or "failed")[:100]
@@ -202,9 +230,12 @@ def run_outcome(context: dict, result: dict | None) -> tuple:
         return "failed", "no response"
     if is_silence(response):
         return "failed", "stayed silent"
-    if response.startswith(FAILURE_PREFIXES) or looks_like_provider_error(response):
+    if any(p.match(response) for p in failure_patterns()):
         return "failed", "error reply"
-    if any(part in response for part in failure_texts()):
+    # Without the run's result only: an answer may start like a provider error ("HTTP 503 means…").
+    if result is None and (
+        response.startswith(FAILURE_PREFIXES) or looks_like_provider_error(response)
+    ):
         return "failed", "error reply"
     return "answered", None
 
@@ -241,8 +272,8 @@ def post(cmd_id: str, what: str, body: dict) -> tuple:
     except urllib.error.HTTPError as e:
         e.close()
         return False, f"HTTP {e.code}", e.code >= 500 or e.code == 429
-    except (urllib.error.URLError, OSError, ValueError) as e:
-        return False, f"error: {e}", True
+    except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as e:
+        return False, f"error: {e!r}", True
     try:
         status = json.loads(raw or b"{}").get("status", status)
     except (ValueError, AttributeError):
@@ -289,6 +320,10 @@ async def handle(event_type: str, context: dict):
         _spawn(report(cmd_id, "started", {}))
     elif event_type == "agent:end":
         # Before anything is awaited: the gateway's frames are still the ones that ran the hook.
-        outcome, reason = run_outcome(context, run_result())
-        body = {"outcome": outcome, **({"reason": reason} if reason else {})}
-        _spawn(report(cmd_id, "replied", body))
+        _spawn(_report_end(cmd_id, dict(context), run_result()))
+
+
+async def _report_end(cmd_id: str, context: dict, result: dict | None) -> None:
+    outcome, reason = await asyncio.to_thread(run_outcome, context, result)
+    body = {"outcome": outcome, **({"reason": reason} if reason else {})}
+    await report(cmd_id, "replied", body)

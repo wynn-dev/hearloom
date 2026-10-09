@@ -89,7 +89,7 @@ export function sendConfigToUser(userId: string, config: PhoneConfig): void {
 
 // ---- pendant buzz cues ------------------------------------------------------------------------
 
-/** How long a phone may still play a `haptic_seq` after receiving it. */
+/** How long a phone may still play a `haptic_seq` after receiving it (unless the cue says less). */
 export const HAPTIC_SEQ_TTL_MS = 20_000;
 /** An ack later than the ttl plus this is reported missing. */
 const ACK_GRACE_MS = 5_000;
@@ -101,14 +101,15 @@ const awaitingAck = new Map<string, { phoneId: string; label: string; timer: Tim
  * Buzz the pendants of the user's online phones with a cue of pulses `intervalMs` apart (start to
  * start). A phone whose newest connection has the `haptic_seq` feature gets the whole cue in one
  * message and plays it itself; older builds get one `haptic` per pulse, timed here (they buzz
- * medium for any pattern they don't know, so they never get anything new). Resolves once the
- * last legacy pulse is sent; returns how many phones it was sent to.
+ * medium for any pattern they don't know, so they never get anything new). `ttlMs`: how late the
+ * phone may still play it (it holds a cue back to keep it apart from the previous one). Resolves
+ * once the last legacy pulse is sent; returns how many phones it was sent to.
  */
 export async function buzzUserPhones(
   userId: string,
   pulses: HapticPattern[],
   intervalMs: number,
-  label = "cue",
+  { ttlMs = HAPTIC_SEQ_TTL_MS, label = "cue" }: { ttlMs?: number; label?: string } = {},
 ): Promise<number> {
   const sockets = userSockets(userId);
   let reached = 0;
@@ -124,7 +125,7 @@ export async function buzzUserPhones(
       id,
       pulses,
       intervalMs,
-      ttlMs: HAPTIC_SEQ_TTL_MS,
+      ttlMs,
     };
     if (ws.send(JSON.stringify(msg)) === 0) continue;
     reached++;
@@ -132,7 +133,7 @@ export async function buzzUserPhones(
     const timer = setTimeout(() => {
       if (!awaitingAck.delete(id)) return;
       console.warn(`[haptics] phone ${phoneId} never acked ${label} ${id}`);
-    }, HAPTIC_SEQ_TTL_MS + ACK_GRACE_MS);
+    }, ttlMs + ACK_GRACE_MS);
     timer.unref();
     awaitingAck.set(id, { phoneId, label, timer });
   }

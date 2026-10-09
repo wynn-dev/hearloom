@@ -199,7 +199,8 @@ Short pulses (100 ms), told apart by count and length:
   server sends each cue down the newest live socket of each of the user's phones (`commands.ts`
   `cue`, `ingest/phones.ts` `buzzUserPhones`). App builds that advertise the `haptic_seq` feature
   get the whole cue in one `haptic_seq` message (pulses 350 ms apart, start to start) and play it
-  themselves, then answer `haptic_ack`; older builds get one `haptic` per pulse, timed by the
+  themselves, at least 600 ms after the previous cue ended, then answer `haptic_ack`. A "heard"
+  tap may play up to 3 s late (`ttlMs`), an outcome up to 20 s; later ones are dropped. Older builds get one `haptic` per pulse, timed by the
   server. Cues for one user play one after another, with at least 600 ms of stillness between
   them. The server logs a warning when a cue reached no phone, or a phone didn't play it (or
   never acked it).
@@ -368,11 +369,15 @@ Facts below were checked against the Hermes docs (messaging/webhooks) and its so
      when it ends.
    - **Failed runs:** Hermes gives `agent:end` hooks no failure flag, and a failed run's
      `response` is its error text. The hook reads the run's result (`failed`, `interrupted`) from
-     the gateway code that called it; failing that, it recognizes Hermes's error replies
-     (`gateway.errors.*`, in every language Hermes has, read from its catalog), interrupted-run
-     texts and provider-error envelopes. Those, and runs with no answer, are reported as
-     `{"outcome": "failed"}`.
-   - **Retries:** connection errors, 5xx and 429 are retried for about 30 s (1, 2, 4, 8, 8, 8 s
+     the gateway code that called it. Otherwise a run failed if its response is empty, Hermes's
+     silence marker, or starts with one of Hermes's replies in place of an answer
+     (`gateway.errors.*`, in every language Hermes has, read from its catalog in a thread at
+     load, never on the gateway's event loop). Only when the run's result can't be found do
+     interrupted-run texts and provider-error envelopes count too (with it, an answer starting
+     "HTTP 503 means…" is an answer). Failed runs are reported as `{"outcome": "failed"}`.
+   - **Runs that crash:** a run that dies in Hermes's exception path never fires `agent:end`.
+     It gets its three taps when the wait runs out: 10 minutes after it started.
+   - **Retries:** connection errors, broken HTTP responses, 5xx and 429 are retried for about 30 s (1, 2, 4, 8, 8, 8 s
      apart), so a Hearloom restart doesn't lose a report. Reports that fail anyway (a 401: wrong
      token) are logged at WARNING.
    - **Auth:** `HEARLOOM_MCP_TOKEN`, the token Hermes already uses for MCP. No new secret.
