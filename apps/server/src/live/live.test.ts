@@ -87,14 +87,16 @@ describe("Soniox assembly", () => {
     expect(a.partial(first)).toEqual({
       text: "Hey Adri",
       startAt: 1_000_100,
-      ends: [
-        { offset: 3, endAt: 1_000_300 },
-        { offset: 5, endAt: 1_000_500 },
-        { offset: 8, endAt: 1_000_700 },
+      tokens: [
+        { offset: 3, startAt: 1_000_100, endAt: 1_000_300 },
+        { offset: 5, startAt: 1_000_400, endAt: 1_000_500 },
+        { offset: 8, startAt: 1_000_500, endAt: 1_000_700 },
       ],
       audioAt: 1_002_000,
       speakerKey: "soniox:1",
     });
+    // How far the recognizer got, when it says.
+    expect(a.partial(first, 900)!.audioAt).toBe(1_000_900);
     // The guesses are replaced by the next response's; a new speaker starts a new utterance.
     const next = [
       tok(" Adri", 400, 700, true),

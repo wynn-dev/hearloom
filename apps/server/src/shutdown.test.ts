@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { shutdownDeadline, stopServer } from "./shutdown";
+import { isStopping, shutdownDeadline, stopServer } from "./shutdown";
 
 test("stopping the server lets a request finish, and doesn't wait for open websockets", async () => {
   const server = Bun.serve({
@@ -24,6 +24,8 @@ test("stopping the server lets a request finish, and doesn't wait for open webso
   await stopServer(server, 2000);
   expect(Date.now() - t0).toBeLessThan(1500);
   expect(await slow).toBe("slow");
+  // New requests are refused meanwhile (index.ts answers 503).
+  expect(isStopping()).toBe(true);
   await closed;
 });
 

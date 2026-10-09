@@ -14,7 +14,7 @@ import { livePipeline } from "./live/host";
 import { stopNotifications } from "./notify/gateway";
 import { attachRealtimeServer, topicFor } from "./realtime";
 import { trackSocket, untrackSocket } from "./sessions";
-import { shutdownDeadline, stopServer } from "./shutdown";
+import { isStopping, shutdownDeadline, stopServer } from "./shutdown";
 import { onCue, onDetection, recoverPending } from "./voice/commands";
 import { onTeachHeard, replayTeach } from "./voice/teach";
 
@@ -34,6 +34,7 @@ const server = Bun.serve<SocketData>({
   port: env.PORT,
   idleTimeout: 60,
   async fetch(req, server) {
+    if (isStopping()) return new Response("shutting down", { status: 503 });
     const url = new URL(req.url);
     if (url.pathname === "/ingest" || url.pathname === "/realtime") {
       const session = await getSession(req.headers);

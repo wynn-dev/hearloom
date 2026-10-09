@@ -62,8 +62,9 @@ pendant ─▶ phone ─▶ server ─▶ live pipeline child                   
   - Spellings marked as false triggers are **blocked** from loose matching.
   - **Renaming the agent clears the learned and blocked spellings.**
 - **Command assembly** (`assembler.ts`):
-  - **One utterance:** sent as soon as the user stops talking. The assembler checks whether voice
-    activity shows speech after the utterance's end.
+  - **One utterance:** sent once 1.2 s of audio after it has been heard without speech (voice
+    activity; the end of speech comes from the finished VAD segment). A shorter pause ("call
+    mom … at five") is a continuation.
   - **"Hey Hermes." alone:** the next utterance from the same speaker within 8 s becomes the
     command. If nothing comes, the detection is stored as ignored with reason `no_command`.
   - **Still talking:** continuations from the same speaker are appended. Each must start within
@@ -151,12 +152,15 @@ Short pulses (100 ms), told apart by count and length:
   the detector (`VoiceDetector.partial`) checks the audio so far is your voice (the same voiceprint
   bar as a command) and taps. A name that's the last word so far must stay unchanged for 400 ms of
   audio first ("Adri" could still become "Adrian").
+  - The tap is tied to the greeting's own time, so earlier words in the same breath ("I'm off.
+    Hey Adri, …") don't count. The same words heard by a second stream don't tap again.
   - If the finished utterance has no wake phrase after all, or none arrives within 10 s of the
     last guess, that's "no command".
   - If the guesses never showed it, the finished utterance does (a second or two later).
 - **Delivery:** the live pipeline sends `voice_cue` (heard, no command, rejected) over IPC; the
   server buzzes `haptic` messages down the phone's live socket (`commands.ts` `cue`). The phone
-  plays them as they come (no app update needed). The server logs
+  plays them as they come (no app update needed). Cues for one user play one after another,
+  with at least 600 ms of stillness between them. The server logs
   `[voice] wake phrase heard (partial): buzz N ms after the name ended`.
 
 ### Teaching your voice

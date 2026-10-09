@@ -123,3 +123,16 @@ describe("CommandAssembler", () => {
     expect(step.done.map((c) => c.command)).toEqual(["first", "second"]);
   });
 });
+
+describe("CommandAssembler: quiet after a command", () => {
+  test("a short pause is a continuation; quiet completes it", () => {
+    const a = new CommandAssembler();
+    // Recognized 0.9 s after it ended: not yet 1.2 s of quiet.
+    const first = a.push(utt("Hey Hermes, call mom", 0, 2), cfg, quiet(2), at(2.9), at(2.9));
+    expect(first.done).toEqual([]);
+    const second = a.push(utt("at five.", 3, 3.8), cfg, quiet(3.8), at(4.7), at(4.7));
+    expect(second.done).toEqual([]);
+    const done = a.tick(quiet(3.8), at(5.1), at(5.1));
+    expect(done.done[0]!.command).toBe("call mom at five.");
+  });
+});

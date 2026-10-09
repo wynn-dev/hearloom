@@ -140,6 +140,8 @@ export class SonioxSession {
   private onMessage(text: string): void {
     let msg: {
       tokens?: SonioxToken[];
+      /** How much of the audio the recognizer has processed. */
+      total_audio_proc_ms?: number;
       finished?: boolean;
       error_code?: number;
       error_message?: string;
@@ -157,7 +159,7 @@ export class SonioxSession {
       for (const u of this.assembler.push(msg.tokens)) this.onUtterance(u);
       // Also without new tokens: more audio after the last word can settle it as the name.
       if (this.onPartial) {
-        const p = this.assembler.partial(msg.tokens);
+        const p = this.assembler.partial(msg.tokens, msg.total_audio_proc_ms);
         if (p) this.onPartial(p);
       }
     }

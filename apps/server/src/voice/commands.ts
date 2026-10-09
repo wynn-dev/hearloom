@@ -34,6 +34,12 @@ export const CUE_PULSES: Record<VoiceCue, HapticPattern[]> = {
 };
 /** From the start of one pulse to the start of the next. */
 const PULSE_GAP_MS = 350;
+const PULSE_MS: Record<HapticPattern, number> = { short: 100, medium: 300, long: 500 };
+/** At least this much stillness between two cues, so they don't run together. */
+export const CUE_GAP_MS = 600;
+
+/** Per user: cues play one after another (the phone plays each pulse the moment it arrives). */
+const buzzing = new Map<string, { chain: Promise<void>; stillAt: number }>();
 
 /** The `voice.command` webhook body (plus `userId` and `sentAt`, added by the sender). */
 export function commandEvent(row: CommandRow, attempt: number, test = false) {
@@ -58,20 +64,31 @@ export function commandEvent(row: CommandRow, attempt: number, test = false) {
  * command buzzes are off. (Shadow mode never buzzes: the pipeline only cues, and only delivers,
  * commands in "on" mode.)
  */
-export async function cue(userId: string, cue: VoiceCue): Promise<void> {
-  if (!(await getSettings(userId)).voice.haptics) return;
-  for (const [i, pattern] of CUE_PULSES[cue].entries()) {
-    if (i > 0) await Bun.sleep(PULSE_GAP_MS);
-    sendToUserPhones(userId, { t: "haptic", pattern });
-  }
+export function cue(userId: string, cue: VoiceCue): Promise<void> {
+  const queue = buzzing.get(userId) ?? { chain: Promise.resolve(), stillAt: 0 };
+  buzzing.set(userId, queue);
+  const run = queue.chain.then(async () => {
+    if (!(await getSettings(userId)).voice.haptics) return;
+    const wait = queue.stillAt + CUE_GAP_MS - Date.now();
+    if (wait > 0) await Bun.sleep(wait);
+    const pulses = CUE_PULSES[cue];
+    for (const [i, pattern] of pulses.entries()) {
+      if (i > 0) await Bun.sleep(PULSE_GAP_MS);
+      sendToUserPhones(userId, { t: "haptic", pattern });
+    }
+    queue.stillAt = Date.now() + PULSE_MS[pulses.at(-1)!];
+  });
+  queue.chain = run.catch(() => {});
+  return run;
 }
 
 /** A cue from the live pipeline: the wake phrase was heard, or nothing came of it. */
 export async function onCue(e: VoiceCueEvent): Promise<void> {
   if (e.cue === "heard" && e.nameEndAt !== null) {
     const now = Date.now();
+    const what = e.via === "partial" ? "name" : "utterance";
     console.log(
-      `[voice] wake phrase heard (${e.via}): buzz ${now - e.nameEndAt} ms after the name ended (pipeline ${e.at - e.nameEndAt} ms)`,
+      `[voice] wake phrase heard (${e.via}): buzz ${now - e.nameEndAt} ms after the ${what} ended (pipeline ${e.at - e.nameEndAt} ms)`,
     );
   }
   await cue(e.userId, e.cue);
@@ -79,6 +96,8 @@ export async function onCue(e: VoiceCueEvent): Promise<void> {
 
 /** A wake phrase from the live pipeline: store it, and deliver it if it should go to the agent. */
 export async function onDetection(d: VoiceDetection): Promise<void> {
+  // A command to send was buzzed as heard: if it can't even be stored, say it wasn't sent.
+  const failed = () => (d.status === "pending" ? cue(d.userId, "failed") : undefined);
   const [row] = await db
     .insert(voiceCommands)
     .values({
@@ -103,9 +122,14 @@ export async function onDetection(d: VoiceDetection): Promise<void> {
         : { status: d.status, reason: d.reason }),
     })
     .onConflictDoNothing()
-    .returning();
+    .returning()
+    .catch(async (err) => {
+      await failed();
+      throw err;
+    });
   invalidate(d.userId, ["voice"]);
-  if (row && row.status === "pending") await deliver(row);
+  if (row?.status === "pending") await deliver(row);
+  else if (row) await failed(); // stored as ignored (teaching)
 }
 
 /**

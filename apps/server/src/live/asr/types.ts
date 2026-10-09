@@ -18,9 +18,9 @@ export interface Utterance {
 export interface PartialUtterance {
   text: string;
   startAt: number;
-  /** Where each token ends: its end offset in `text`, and its end time. */
-  ends: { offset: number; endAt: number }[];
-  /** End of the audio sent to the recognizer so far. */
+  /** Each token: its end offset in `text`, and its times. */
+  tokens: { offset: number; startAt: number; endAt: number }[];
+  /** End of the audio the recognizer has processed so far. */
   audioAt: number;
   speakerKey: string | null;
 }

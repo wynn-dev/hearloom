@@ -6,13 +6,19 @@ import type { ServerWebSocket } from "bun";
 import { and, eq, sql } from "drizzle-orm";
 import { webhookSignature } from "../agent/webhooks";
 import { db } from "../db";
-import { type IngestSocketData, registerPhoneSocket } from "../ingest/phones";
+import {
+  type IngestSocketData,
+  registerPhoneSocket,
+  unregisterPhoneSocket,
+} from "../ingest/phones";
 import { livePipeline } from "../live/host";
 import { TEACH_GRACE_MS } from "../live/voice/detector";
 import type { VoiceDetection } from "../live/voice/types";
 import { getSettings, updateSettings } from "../settings";
 import {
+  CUE_GAP_MS,
   CUE_PULSES,
+  cue,
   onCue,
   onDetection,
   recoverPending,
@@ -185,7 +191,7 @@ test("a rejected command: the failed buzz and a silent notification", async () =
     );
   expect(n).toMatchObject({ interruptionLevel: "passive", deepLink: "/voice" });
   expect(n!.body).toContain("secret was rejected");
-});
+}, 10_000);
 
 test("ignored and shadow detections are stored, never sent", async () => {
   const ignored = detection({ status: "ignored", reason: "not_own_voice", speakerScore: 0.4 });
@@ -223,6 +229,36 @@ test("pipeline cues buzz the pendant, distinctly; not with voice buzzes off", as
     expect(buzzes).toHaveLength(0);
   } finally {
     await updateSettings(userId, { voice: { haptics: true } });
+  }
+});
+
+test("cues play one after another, with a pause between them", async () => {
+  const times: number[] = [];
+  const pulses: string[] = [];
+  registerPhoneSocket(`${phoneId}-timing`, {
+    data: { kind: "ingest", userId, phoneId: `${phoneId}-timing` } as IngestSocketData,
+    send: (msg: string) => {
+      pulses.push(JSON.parse(msg).pattern);
+      times.push(Date.now());
+      return 1;
+    },
+  } as unknown as ServerWebSocket<IngestSocketData>);
+  await Promise.all([cue(userId, "heard"), cue(userId, "failed")]);
+  expect(pulses).toEqual(["short", "short", "short", "short"]);
+  // The heard tap (100 ms) ends, then at least CUE_GAP_MS of stillness.
+  expect(times[1]! - times[0]!).toBeGreaterThanOrEqual(100 + CUE_GAP_MS - 5);
+  expect(times[2]! - times[1]!).toBeLessThan(CUE_GAP_MS);
+  unregisterPhoneSocket({ data: { phoneId: `${phoneId}-timing` } } as never);
+});
+
+test("a command to send that is stored as ignored (teaching) buzzes failed", async () => {
+  await startTeach(userId, "Tester", "sample");
+  try {
+    await onDetection(detection({ spokenAt: Date.now() }));
+    expect(received).toHaveLength(0);
+    expect(buzzes).toEqual(CUE_PULSES.failed);
+  } finally {
+    resetTeach();
   }
 });
 

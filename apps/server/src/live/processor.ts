@@ -145,6 +145,8 @@ export class StreamProcessor {
   private lastSpeechAt = 0;
   /** Audio time of the end of the latest speech (voice commands wait while the user talks on). */
   private lastSpeechAudioAt = 0;
+  /** Audio time of the end of the audio processed so far. */
+  private heardUntil = 0;
   private readonly voiceSource: AudioSource;
   /** Wall-clock spans of audio that arrived too late to stream (merged, recent only). */
   private backlogSpans: { from: number; to: number }[] = [];
@@ -162,6 +164,7 @@ export class StreamProcessor {
       streamId: stream.id,
       audio: (from, to) => this.history.slice(from, to),
       lastSpeechAt: () => this.lastSpeechAudioAt,
+      heardUntil: () => this.heardUntil,
     };
   }
 
@@ -289,6 +292,7 @@ export class StreamProcessor {
 
     // Speech detection.
     const { segments, speaking } = this.vad!.accept(samples);
+    this.heardUntil = absAt + samples.length / 16;
     if (speaking) {
       this.lastSpeechAt = Date.now();
       this.lastSpeechAudioAt = absAt + samples.length / 16;
