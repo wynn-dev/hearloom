@@ -411,12 +411,30 @@ test("requests any page can send don't count toward the shared limits", async ()
   }
 });
 
+test("JSON lookalikes better-auth also parses count toward the limit", async () => {
+  nextRateLimitWindow();
+  const statuses: number[] = [];
+  for (let i = 0; i < 101; i++) {
+    const res = await app.fetch(
+      new Request(`http://127.0.0.1:3000${SIGN_IN}`, {
+        method: "POST",
+        headers: { "content-type": "application/jsonx" },
+        body: JSON.stringify({ code: generateCode() }),
+      }),
+    );
+    statuses.push(res.status);
+  }
+  expect(statuses.at(-1)).toBe(429);
+  // Open again after the window (and leave the bucket nearly empty for the tests after this one).
+  nextRateLimitWindow();
+  expect((await postSignIn(`http://127.0.0.1:3000${SIGN_IN}`, {})).status).toBe(401);
+});
+
 test("passwords are off: no password sign-in, sign-up or password changes", async () => {
   for (const path of [
     "/sign-in/email",
     "/sign-up/email",
     "/change-password",
-    "/set-password",
     "/verify-password",
     "/request-password-reset",
     "/reset-password",
@@ -432,6 +450,15 @@ test("passwords are off: no password sign-in, sign-up or password changes", asyn
     );
     expect(res.status).toBe(404);
   }
+  // A client from before says why.
+  const old = await app.fetch(
+    new Request("http://127.0.0.1:3000/api/auth/sign-in/email", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "x@test.local", password: "x".repeat(12) }),
+    }),
+  );
+  expect(await old.json()).toMatchObject({ code: "PASSWORDS_OFF" });
 });
 
 test("no CORS preflight is granted, so a page elsewhere can't send X-Forwarded-* to auth", async () => {

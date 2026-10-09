@@ -21,6 +21,16 @@ app.on(["GET", "POST"], "/api/auth/*", (c) => {
   if (c.req.method === "POST" && hasSimpleBody(c.req.raw)) {
     return c.json({ message: "Send JSON", code: "UNSUPPORTED_MEDIA_TYPE" }, 415);
   }
+  // An app or console from before passwords were turned off: say why, instead of a bare 404.
+  if (c.req.path.replace(/\/+$/, "") === "/api/auth/sign-in/email") {
+    return c.json(
+      {
+        message: "Passwords are off: sign in with a Link device code (Devices → Link a device).",
+        code: "PASSWORDS_OFF",
+      },
+      404,
+    );
+  }
   return auth.handler(c.req.raw);
 });
 

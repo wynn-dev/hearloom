@@ -90,8 +90,8 @@ export default function Login() {
             />
           </Card>
           <Body style={{ color: t.muted, fontSize: 13 }}>
-            Accounts are created by your server's admin (invite-only). Lost every device? On the
-            Mac, run pnpm link-device --email you@… for a new code.
+            Accounts are created by your server's admin (invite-only), who can also give you a code.
+            Lost every device and you run the server? On the Mac, run pnpm link-device --email you@…
           </Body>
         </ScrollView>
       </KeyboardAvoidingView>

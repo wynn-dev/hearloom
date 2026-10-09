@@ -301,13 +301,13 @@ export const auth = betterAuth({
   database: (options) => hashSessionTokens(pgAdapter(options)),
   // No passwords: devices sign in with "Link device" codes (linkDevice below). Accounts are created by
   // an admin (console → Users) or `pnpm link-device --create`; old password hashes stay unused.
-  emailAndPassword: { enabled: false, disableSignUp: true },
+  emailAndPassword: { enabled: false },
   disabledPaths: [
-    // Passwords (better-auth keeps some of these routes with email/password off).
+    // Passwords (better-auth keeps some of these routes with email/password off; a stale client asking
+    // for sign-in gets a clear 404 from http/app.ts first).
     "/sign-in/email",
     "/sign-up/email",
     "/change-password",
-    "/set-password",
     "/verify-password",
     "/request-password-reset",
     "/reset-password",
@@ -360,10 +360,16 @@ export const auth = betterAuth({
   },
   hooks: {
     // Managing users and signing every device out are for the console: an admin's phone token (stolen
-    // with the phone) must not set a password, impersonate someone, or sign the owner's browsers out,
-    // which would also get it a browser session to mint link codes with.
+    // with the phone) must not impersonate someone (which would get it a browser session to mint link
+    // codes with) or sign the owner's browsers out.
     before: createAuthMiddleware(async (ctx) => {
       if (!ctx.path.startsWith("/admin/") && ctx.path !== "/revoke-sessions") return;
+      // No passwords: an account made with one would only store a hash nobody can use.
+      if (ctx.path === "/admin/create-user" && (ctx.body as { password?: unknown })?.password) {
+        throw new APIError("BAD_REQUEST", {
+          message: "Passwords are off: create the account without one, then link a device.",
+        });
+      }
       // From the request (this runs before the bearer plugin turns a token into a cookie).
       const headers = ctx.request?.headers ?? ctx.headers;
       const session = headers ? await auth.api.getSession({ headers }) : null;
