@@ -202,7 +202,7 @@ function ManageCard({ voice, status }: { voice: VoiceSettings; status: VoiceStat
           description={
             voice.mode === "on"
               ? "One tap when it hears “hey …”. Then: two taps, sent; one longer buzz, no command came; three taps, not sent."
-              : "Only when Mode is On: nothing buzzes now. Then: one tap when it hears “hey …”; two taps, sent; one longer buzz, no command came; three taps, not sent."
+              : "Only in mode On, so nothing buzzes now. In On: one tap when it hears “hey …”; then two taps, sent; one longer buzz, no command came; three taps, not sent."
           }
         >
           <Switch
