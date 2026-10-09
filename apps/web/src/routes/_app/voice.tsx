@@ -196,6 +196,7 @@ function ManageCard({ voice, status }: { voice: VoiceSettings; status: VoiceStat
             <Dot tone={status.pipelineRunning ? "good" : "bad"} />
             {status.pipelineRunning ? "Live pipeline running" : "Live pipeline not running"}
           </span>
+          <ReplyReports replies={status.replies} />
         </div>
         <NamesRow voice={voice} />
         <SettingRow
@@ -203,8 +204,8 @@ function ManageCard({ voice, status }: { voice: VoiceSettings; status: VoiceStat
           htmlFor="voice-haptics"
           description={
             voice.mode === "on"
-              ? "One tap when it hears “hey …”; two taps when the agent has answered. If something went wrong: one longer buzz, no command came; three taps, not sent or no answer within two minutes."
-              : "Only in mode On, so nothing buzzes now. In On: one tap when it hears “hey …”; two taps when the agent has answered. If something went wrong: one longer buzz, no command came; three taps, not sent or no answer within two minutes."
+              ? "One tap when it hears “hey …”; two taps when the agent has answered. If something went wrong: one longer buzz, no command came; three taps, not sent, the agent's run failed, or no answer in time."
+              : "Only in mode On, so nothing buzzes now. In On: one tap when it hears “hey …”; two taps when the agent has answered. If something went wrong: one longer buzz, no command came; three taps, not sent, the agent's run failed, or no answer in time."
           }
         >
           <Switch
@@ -218,6 +219,27 @@ function ManageCard({ voice, status }: { voice: VoiceSettings; status: VoiceStat
         <TryPhrase voice={voice} />
       </CardBody>
     </Card>
+  );
+}
+
+/** The agent's last report of an answer (its reply hook): the second buzz depends on them. */
+function ReplyReports({ replies }: { replies: VoiceStatus["replies"] }) {
+  const tz = useTimeZone() ?? "UTC";
+  const now = useNow();
+  const { last, waiting } = replies;
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <Dot tone={!last ? "muted" : waiting && last.outcome === "answered" ? "good" : "warn"} />
+      {last ? (
+        <span>
+          Agent last reported {last.outcome === "answered" ? "an answer" : "a failed run"}{" "}
+          <RelTime date={last.at} now={now} tz={tz} />
+          {waiting ? "" : " · not waiting for answers"}
+        </span>
+      ) : (
+        "No answer reported by the agent yet (reply hook)"
+      )}
+    </span>
   );
 }
 

@@ -71,6 +71,13 @@
       "when": 1791566610686,
       "tag": "0009_link_device",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1791583011033,
+      "tag": "0010_voice_reply_tracking",
+      "breakpoints": true
     }
   ]
 }

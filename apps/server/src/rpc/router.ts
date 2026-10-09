@@ -26,7 +26,13 @@ import { markOpened, notify } from "../notify/gateway";
 import { invalidate } from "../realtime";
 import { clientKind, isBanned, listSessions, releasePhones, revokeSession } from "../sessions";
 import { getSettings, updateSettings } from "../settings";
-import { FeedbackError, listCommands, sendTestCommand, setFeedback } from "../voice/commands";
+import {
+  FeedbackError,
+  lastReplyReport,
+  listCommands,
+  sendTestCommand,
+  setFeedback,
+} from "../voice/commands";
 import { listOwnVoiceprints, removeOwnVoiceprint, voiceProfile } from "../voice/profile";
 import {
   skipPhrase,
@@ -758,9 +764,10 @@ export const router = authed.router({
   voice: {
     status: authed.voice.status.handler(async ({ context }) => {
       const { userId } = context as Ctx;
-      const [profile, settings, live] = await Promise.all([
+      const [profile, settings, lastReply, live] = await Promise.all([
         voiceProfile(userId),
         getSettings(userId),
+        lastReplyReport(userId),
         db
           .select({ phoneId: captureStreams.phoneId })
           .from(captureStreams)
@@ -778,6 +785,7 @@ export const router = authed.router({
         pendantLive: live.some((s) => s.phoneId !== null && isPhoneOnline(s.phoneId)),
         pipelineRunning: livePipeline.running,
         webhookConfigured: settings.agent.webhookUrl !== "",
+        replies: { waiting: settings.agent.voiceReplies, last: lastReply },
       };
     }),
     commands: authed.voice.commands.handler(async ({ context, input }) => {

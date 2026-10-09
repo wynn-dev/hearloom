@@ -1,12 +1,20 @@
-"""Hermes gateway hook: tell Hearloom that a voice command was answered.
+"""Hermes gateway hook: tell Hearloom how Hermes's run on a voice command went.
 
 Hearloom sends each "hey <agent>" command to the `hearloom-voice` webhook route, with the command's
 id as the `webhook-id` header. Hermes uses that header as the delivery id and encodes it in the
-run's chat id (`webhook:v2:<base64url of [profile, route, delivery_id]>`). When that run ends with
-a response, this hook POSTs `/api/voice/commands/<id>/replied` to Hearloom, which buzzes the pendant
-twice. No reply within 2 minutes and Hearloom buzzes three times instead.
+run's chat id (`webhook:v2:<base64url of [profile, route, delivery_id]>`). For runs on that route:
 
-Install: copy this directory to ~/.hermes/hooks/ and restart the gateway (`hermes gateway restart`).
+- agent:start  POST /api/voice/commands/<id>/started: Hearloom then waits up to 10 minutes for the
+               end of the run instead of 2.
+- agent:end    POST /api/voice/commands/<id>/replied with {"outcome": "answered"} (the pendant
+               buzzes twice) or {"outcome": "failed", "reason": ...} when the run failed, was
+               interrupted or ended without an answer (three times).
+
+Reports are retried for about 30 s on connection errors and 5xx (Hearloom restarting answers 503).
+Failures are logged at WARNING.
+
+Install: copy this directory to ~/.hermes/hooks/ and restart the gateway (`hermes gateway restart`):
+hooks are loaded once, when the gateway starts.
 Configuration (environment, e.g. ~/.hermes/.env):
   HEARLOOM_MCP_TOKEN    the Hearloom agent token Hermes already uses for MCP (required)
   HEARLOOM_URL          default http://127.0.0.1:3000
@@ -19,17 +27,21 @@ import json
 import logging
 import os
 import re
+import sys
 import urllib.error
 import urllib.request
+from functools import lru_cache
 
 logger = logging.getLogger("hooks.hearloom-voice-reply")
 
 PREFIX = "webhook:v2:"
 COMMAND_ID = re.compile(r"^[0-9a-fA-F-]{36}$")
+# Pauses between attempts at a report (s): about 30 s in all, enough for Hearloom to restart.
+RETRY_DELAYS = (1, 2, 4, 8, 8, 8)
 
 
 def command_id(context: dict) -> str | None:
-    """The voice command id of a finished run on the Hearloom voice route; None for anything else."""
+    """The voice command id of a run on the Hearloom voice route; None for anything else."""
     if context.get("platform") != "webhook":
         return None
     chat_id = str(context.get("chat_id") or "")
@@ -70,6 +82,136 @@ def is_silence(response: str) -> bool:
         return False
 
 
+# ---- did the run answer? ----------------------------------------------------------------------
+#
+# Hermes passes agent:end hooks no failure flag (the context is platform, user_id, chat_id,
+# thread_id, chat_type, session_id, message, response[:500], model, provider); a failed run's
+# `response` is its error text. So: the run's result as the gateway has it (see `run_result`),
+# else the error texts Hermes replies with.
+
+# gateway.errors.* keys of replies that stand in for an answer (gateway/run.py, run_turn.py).
+FAILURE_KEYS = (
+    "generic_failed",
+    "generic_failed_with_hint",
+    "interrupted_before_start",
+    "stopped_before_finishing",
+    "no_response",
+    "previous_turn_cleanup",
+    "unexpected_silence",
+    "context_overflow",
+    "session_storage_unavailable",
+    "session_storage_unavailable_disk",
+    "history_unavailable",
+    "no_credentials",
+    "provider_kept_failing",
+    "rate_limited",
+    "usage_limit_resets",
+    "auth_failed",
+    "bad_request",
+    "connection_interrupted",
+    "unreachable",
+    "connection_unknown",
+)
+# Used only where Hermes's catalog can't be loaded (the English texts, 2026-10).
+FALLBACK_FAILURE_TEXTS = (
+    "⚠️ Something went wrong and I couldn't finish this reply.",
+    "⚠️ Your message was interrupted before processing started",
+    "⚠️ I had to stop before finishing",
+    "⚠️ Processing completed but no response was generated.",
+    "⚠️ Your message wasn't processed (the previous turn was still being cleaned up).",
+    "⚠️ The model returned only a silence marker for a message that needed a reply.",
+    "{model} didn't produce a reply this time, even after retries.",
+)
+# Raw texts of interrupted or abandoned runs (the webhook surface gets them unsanitized).
+FAILURE_PREFIXES = ("Operation interrupted", "Turn abandoned")
+# Hermes's provider-error shape (gateway/run.py `_GATEWAY_PROVIDER_ERROR_SHAPE_RE`), abridged.
+PROVIDER_ERROR = re.compile(
+    r"^\s*(\W*\s*)?(api\s+(call\s+)?failed|provider\s+authentication\s+failed|non-retryable\s+error"
+    r"|rate\s+limited\s+after\s+\d+\s+retries|error\s+code\s*:|http\s*\d{3}\b"
+    r"|incorrect\s+api\s+key|invalid\s+api\s+key)",
+    re.IGNORECASE,
+)
+
+
+def run_result() -> dict | None:
+    """The result of the run that just ended, from the gateway code that fired this hook (its
+    `agent_result`, a few frames up: Hermes awaits its hooks in place). None if not found."""
+    try:
+        frame = sys._getframe(1)
+        for _ in range(16):
+            if frame is None:
+                return None
+            value = frame.f_locals.get("agent_result")
+            if isinstance(value, dict):
+                return value
+            frame = frame.f_back
+    except Exception:
+        pass
+    return None
+
+
+def _literal_part(template: str) -> str:
+    """The longest fixed part of a catalog text (placeholders like {reason} cut out), ≤ 80 chars."""
+    parts = re.split(r"\{[^{}]*\}", template)
+    return max((p.strip() for p in parts), key=len, default="")[:80]
+
+
+@lru_cache(maxsize=1)
+def failure_texts() -> tuple:
+    """A fixed part of each Hermes failure reply, in every language Hermes has."""
+    texts = set()
+    try:
+        from agent.i18n import supported_languages, t
+
+        for lang in supported_languages():
+            for key in FAILURE_KEYS:
+                text = t(f"gateway.errors.{key}", lang=lang)
+                if text and not text.startswith("gateway."):
+                    texts.add(text)
+        from agent.turn_explainers import EMPTY_RESPONSE_EXPLANATION
+
+        texts.add(EMPTY_RESPONSE_EXPLANATION)
+    except Exception:
+        pass
+    if not texts:
+        texts.update(FALLBACK_FAILURE_TEXTS)
+    parts = {_literal_part(t) for t in texts}
+    return tuple(sorted(p for p in parts if len(p) >= 12))
+
+
+def looks_like_provider_error(text: str) -> bool:
+    try:
+        from gateway.run import _looks_like_gateway_provider_error
+
+        return bool(_looks_like_gateway_provider_error(text))
+    except Exception:
+        return len(text) <= 400 and text.count("\n") <= 4 and bool(PROVIDER_ERROR.search(text))
+
+
+def run_outcome(context: dict, result: dict | None) -> tuple:
+    """("answered", None), or ("failed", why)."""
+    if isinstance(result, dict):
+        if result.get("failed"):
+            return "failed", str(result.get("failure_reason") or "failed")[:100]
+        if result.get("interrupted"):
+            return "failed", "interrupted"
+    if context.get("failed") is True:  # in case Hermes ever says so itself
+        return "failed", "failed"
+    response = str(context.get("response") or "").strip()
+    if not response:
+        return "failed", "no response"
+    if is_silence(response):
+        return "failed", "stayed silent"
+    if response.startswith(FAILURE_PREFIXES) or looks_like_provider_error(response):
+        return "failed", "error reply"
+    if any(part in response for part in failure_texts()):
+        return "failed", "error reply"
+    return "answered", None
+
+
+# ---- reporting --------------------------------------------------------------------------------
+
+
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     """Never follow a redirect: it would carry the token to wherever it points."""
 
@@ -80,42 +222,73 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 _opener = urllib.request.build_opener(_NoRedirect)
 
 
-def post_replied(cmd_id: str) -> str:
+def post(cmd_id: str, what: str, body: dict) -> tuple:
+    """POST /api/voice/commands/<id>/<what>: (done, detail, worth retrying)."""
     base = (os.environ.get("HEARLOOM_URL") or "http://127.0.0.1:3000").rstrip("/")
     token = secret("HEARLOOM_MCP_TOKEN")
     if not token:
-        return "no HEARLOOM_MCP_TOKEN"
+        return False, "no HEARLOOM_MCP_TOKEN", False
     req = urllib.request.Request(
-        f"{base}/api/voice/commands/{cmd_id}/replied",
-        data=b"{}",
+        f"{base}/api/voice/commands/{cmd_id}/{what}",
+        data=json.dumps(body).encode(),
         method="POST",
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
     )
     try:
         with _opener.open(req, timeout=5) as res:
-            return json.loads(res.read() or b"{}").get("status", str(res.status))
+            raw = res.read()
+            status = str(res.status)
     except urllib.error.HTTPError as e:
-        return f"HTTP {e.code}"
+        e.close()
+        return False, f"HTTP {e.code}", e.code >= 500 or e.code == 429
     except (urllib.error.URLError, OSError, ValueError) as e:
-        return f"error: {e}"
+        return False, f"error: {e}", True
+    try:
+        status = json.loads(raw or b"{}").get("status", status)
+    except (ValueError, AttributeError):
+        pass
+    return True, status, False
 
 
-# Posts in flight (a reference keeps each task alive until it's done).
+async def report(cmd_id: str, what: str, body: dict) -> None:
+    """Report to Hearloom, retrying while it can't take it (restarting, unreachable)."""
+    detail = ""
+    for delay in (*RETRY_DELAYS, None):
+        done, detail, retry = await asyncio.to_thread(post, cmd_id, what, body)
+        if done:
+            logger.info("[hearloom-voice-reply] command %s %s %s: %s", cmd_id, what, body, detail)
+            return
+        if not retry or delay is None:
+            break
+        await asyncio.sleep(delay)
+    logger.warning(
+        "[hearloom-voice-reply] couldn't tell Hearloom that command %s %s (%s): %s",
+        cmd_id,
+        what,
+        body.get("outcome", "-"),
+        detail,
+    )
+
+
+# Reports in flight (a reference keeps each task alive until it's done).
 _tasks: set = set()
 
 
-async def _report(cmd_id: str) -> None:
-    status = await asyncio.to_thread(post_replied, cmd_id)
-    logger.info("[hearloom-voice-reply] command %s replied: %s", cmd_id, status)
+def _spawn(coro) -> None:
+    # In the background: Hermes waits for its hooks before it runs the agent or delivers the reply.
+    task = asyncio.get_running_loop().create_task(coro)
+    _tasks.add(task)
+    task.add_done_callback(_tasks.discard)
 
 
 async def handle(event_type: str, context: dict):
     cmd_id = command_id(context)
-    response = str(context.get("response") or "").strip()
-    # No answer (the run failed or stayed silent): Hearloom's timeout tells it.
-    if not cmd_id or not response or is_silence(response):
+    if not cmd_id:
         return
-    # In the background: Hermes waits for its hooks before it delivers the reply.
-    task = asyncio.get_running_loop().create_task(_report(cmd_id))
-    _tasks.add(task)
-    task.add_done_callback(_tasks.discard)
+    if event_type == "agent:start":
+        _spawn(report(cmd_id, "started", {}))
+    elif event_type == "agent:end":
+        # Before anything is awaited: the gateway's frames are still the ones that ran the hook.
+        outcome, reason = run_outcome(context, run_result())
+        body = {"outcome": outcome, **({"reason": reason} if reason else {})}
+        _spawn(report(cmd_id, "replied", body))

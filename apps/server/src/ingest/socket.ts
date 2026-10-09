@@ -20,7 +20,13 @@ import { onSocketAck } from "../notify/gateway";
 import { invalidate } from "../realtime";
 import { getSettings, phoneConfig } from "../settings";
 import { afterAll, schedule } from "./lanes";
-import { type IngestSocketData, registerPhoneSocket, unregisterPhoneSocket } from "./phones";
+import {
+  type IngestSocketData,
+  onHapticAck,
+  registerPhoneSocket,
+  setSocketFeatures,
+  unregisterPhoneSocket,
+} from "./phones";
 import { dbChunkSink } from "./sink";
 import { SeqGapError, type StreamMeta, StreamWriter } from "./stream-writer";
 
@@ -162,6 +168,7 @@ async function attachPhone(ws: Ws, v: number, phoneId: string): Promise<boolean>
 }
 
 async function onPresence(ws: Ws, msg: Extract<ClientMessage, { t: "presence" }>): Promise<void> {
+  setSocketFeatures(ws, msg.features);
   if (!(await attachPhone(ws, msg.v, msg.phoneId))) return;
   const settings = await getSettings(ws.data.userId);
   send(ws, { t: "ready", serverTime: Date.now(), config: phoneConfig(settings) });
@@ -172,6 +179,7 @@ async function onHello(ws: Ws, msg: Extract<ClientMessage, { t: "hello" }>): Pro
   if (!SUPPORTED_CODECS.has(msg.stream.codec)) {
     return fail(ws, "codec", `codec ${msg.stream.codec} not supported`, false, msg.slot);
   }
+  setSocketFeatures(ws, msg.features);
   if (!(await attachPhone(ws, msg.v, msg.phoneId))) return;
 
   const wearableId = msg.wearable ? await upsertWearable(userId, msg.wearable) : null;
@@ -275,6 +283,8 @@ async function onControl(ws: Ws, msg: ClientMessage): Promise<void> {
     case "notify_ack":
       if (ws.data.phoneId) onSocketAck(msg.id, ws.data.phoneId);
       return;
+    case "haptic_ack":
+      return onHapticAck(ws.data.phoneId, msg);
     case "wearable": {
       const wearableId = await upsertWearable(userId, msg.wearable);
       await deviceEvent(
@@ -338,7 +348,9 @@ async function handleMessage(ws: Ws, message: string | Buffer, receivedAt: numbe
   if (ws.data.closed) return;
   try {
     if (typeof message === "string") {
-      await onControl(ws, parseClientMessage(message));
+      // null: a message type from a newer app build, ignored.
+      const msg = parseClientMessage(message);
+      if (msg) await onControl(ws, msg);
     } else if (message[0] === MSG_AUDIO) {
       await onAudio(
         ws,
