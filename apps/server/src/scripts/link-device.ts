@@ -92,7 +92,7 @@ iPhone: scan this with the Camera app, then open it in Hearloom.
 
 ${terminalQR(urls.appUrl)}
 
-  or in the app: Link device → paste ${urls.appUrl}
+  or paste this into the app's sign-in screen ("Link or code"): ${urls.appUrl}
 
 Browser: open ${urls.webUrl}
 
