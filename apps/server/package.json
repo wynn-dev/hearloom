@@ -8,6 +8,7 @@
     "dev": "bun --env-file=../../.env --watch src/index.ts",
     "start": "bun --env-file=../../.env src/index.ts",
     "create-user": "bun --env-file=../../.env src/scripts/create-user.ts",
+    "link-device": "bun --env-file=../../.env src/scripts/link-device.ts",
     "typecheck": "tsc -p tsconfig.json",
     "test": "bun --env-file=../../.env test",
     "simulate-phone": "bun --env-file=../../.env src/scripts/simulate-phone.ts",
@@ -18,22 +19,23 @@
   },
   "dependencies": {
     "@hearloom/api": "workspace:*",
+    "@hearloom/audio": "workspace:*",
     "@hearloom/db": "workspace:*",
+    "@hearloom/inference": "workspace:*",
     "@hearloom/shared": "workspace:*",
+    "@modelcontextprotocol/sdk": "1.32.1",
     "@orpc/server": "1.15.4",
     "better-auth": "1.7.7",
     "drizzle-orm": "0.45.3",
     "hono": "4.13.13",
     "jose": "6.2.12",
     "mediabunny": "1.61.3",
-    "zod": "4.6.5",
-    "@hearloom/audio": "workspace:*",
-    "@hearloom/inference": "workspace:*",
     "pg-boss": "12.36.0",
-    "@modelcontextprotocol/sdk": "1.32.1"
+    "toqr": "0.1.1",
+    "zod": "4.6.5"
   },
   "devDependencies": {
-    "@types/bun": "1.4.2",
-    "@orpc/client": "1.15.4"
+    "@orpc/client": "1.15.4",
+    "@types/bun": "1.4.2"
   }
 }

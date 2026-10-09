@@ -16,6 +16,7 @@
     "test": "turbo run test",
     "check": "biome check .",
     "fix": "biome check --write .",
+    "link-device": "pnpm --silent --filter @hearloom/server link-device",
     "db:up": "docker compose -f infra/docker-compose.yml up -d postgres",
     "db:down": "docker compose -f infra/docker-compose.yml down",
     "db:generate": "pnpm --filter @hearloom/db generate",

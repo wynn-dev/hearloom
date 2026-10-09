@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { RPCHandler } from "@orpc/server/fetch";
 import { Hono } from "hono";
-import { auth, hasSimpleBody } from "../auth";
+import { auth, hasSimpleBody, trustedOwnOrigin } from "../auth";
 import { env } from "../env";
 import { handleMcp } from "../mcp/server";
 import { router } from "../rpc/router";
@@ -25,7 +25,7 @@ app.on(["GET", "POST"], "/api/auth/*", (c) => {
 app.all("/rpc/*", async (c) => {
   const { matched, response } = await rpc.handle(c.req.raw, {
     prefix: "/rpc",
-    context: { headers: c.req.raw.headers },
+    context: { headers: c.req.raw.headers, origin: trustedOwnOrigin(c.req.raw) },
   });
   return matched ? response : c.notFound();
 });

@@ -15,7 +15,7 @@ import {
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
-import { user } from "./auth";
+import { session, user } from "./auth";
 
 const id = () => uuid().primaryKey().default(sql`uuidv7()`);
 const owner = () =>
@@ -62,10 +62,12 @@ export const phones = pgTable(
     apnsToken: text(),
     apnsEnv: text().$type<"sandbox" | "production">(),
     pushEnabled: boolean().notNull().default(true),
+    /** The app's sign-in on this phone (set when it registers): removing the phone ends it. */
+    sessionId: text().references(() => session.id, { onDelete: "set null" }),
     lastSeenAt: ts(),
     createdAt: createdAt(),
   },
-  (t) => [uniqueIndex().on(t.apnsToken)],
+  (t) => [uniqueIndex().on(t.apnsToken), index().on(t.sessionId)],
 );
 
 /**
@@ -442,6 +444,29 @@ export const apiTokens = pgTable(
     createdAt: createdAt(),
   },
   (t) => [uniqueIndex().on(t.tokenHash), index().on(t.userId)],
+);
+
+/**
+ * Single-use "Link device" codes: a signed-in console (or `pnpm link-device` on the server) mints one
+ * for a user, and the device that redeems it within a few minutes is signed in as that user. Only a
+ * SHA-256 hash of the code is stored.
+ */
+export const linkCodes = pgTable(
+  "link_codes",
+  {
+    id: id(),
+    /** Who the redeeming device is signed in as. */
+    userId: owner(),
+    codeHash: text().notNull(),
+    /** Who minted it (an admin may mint for someone else); null from the CLI. */
+    createdBy: text().references(() => user.id, { onDelete: "set null" }),
+    expiresAt: ts().notNull(),
+    redeemedAt: ts(),
+    /** The session the code turned into. */
+    sessionId: text().references(() => session.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+  },
+  (t) => [uniqueIndex().on(t.codeHash), index().on(t.userId)],
 );
 
 /**

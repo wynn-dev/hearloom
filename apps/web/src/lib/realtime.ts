@@ -11,6 +11,7 @@ const KEYS: Record<InvalidateKey, QueryKey[]> = {
   timeline: [orpc.timeline.key()],
   notifications: [orpc.notifications.key()],
   phones: [orpc.phones.key(), orpc.status.key()],
+  sessions: [orpc.sessions.key()],
   settings: [orpc.settings.key(), orpc.me.key()],
   people: [orpc.people.key(), orpc.timeline.key()],
   voice: [orpc.voice.key()],

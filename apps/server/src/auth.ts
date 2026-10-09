@@ -1,9 +1,16 @@
 import { schema } from "@hearloom/db";
-import { betterAuth } from "better-auth";
+import { type BetterAuthPlugin, betterAuth, type DBAdapter, type Where } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
+import { APIError, createAuthEndpoint, createAuthMiddleware } from "better-auth/api";
+import { setSessionCookie } from "better-auth/cookies";
 import { admin, bearer } from "better-auth/plugins";
+import { eq } from "drizzle-orm";
+import { z } from "zod";
 import { db } from "./db";
 import { env } from "./env";
+import { attachLinkSession, consumeLinkCode, sha256Hex } from "./link/codes";
+import { invalidate } from "./realtime";
+import { clientKind, closeSockets, releasePhones } from "./sessions";
 
 const extraOrigins = env.TRUSTED_ORIGINS.split(",")
   .map((o) => o.trim())
@@ -119,21 +126,190 @@ export function needsPreflight(req: Request): boolean {
   return !!type && !SIMPLE_CONTENT_TYPES.has(type);
 }
 
+/** A stored session token: the SHA-256 (hex) of the token the client holds. */
+const STORED_TOKEN = /^[0-9a-f]{64}$/;
+
+/**
+ * Store session tokens hashed, so a copy of the database (a backup, a dump) can't be used to sign in
+ * as anyone. better-auth reads and writes the session row by its token; this adapter hashes the token
+ * on the way in and hands the caller's own token back on the way out (better-auth sets it as the cookie
+ * again when a session slides forward). Rows found by listing (findMany) carry the hash, so endpoints
+ * that take a token from such a list are disabled below (disabledPaths); Devices revokes by session id.
+ *
+ * Rows still holding a plain token (stored before migration 0009 hashed them, or by an older server
+ * against the same database) are found by it once and hashed then. A 64-hex token is never looked up
+ * plainly: that is what a stored hash looks like, and presenting one must not match its row.
+ */
+export function hashSessionTokens(adapter: DBAdapter): DBAdapter {
+  const isSession = (args: { model: string }) => args.model === "session";
+  const hashWhere = (where: Where[] | undefined) =>
+    where?.map((w) => {
+      if (w.field !== "token") return w;
+      const value = Array.isArray(w.value)
+        ? (w.value as unknown[]).map((v) => (typeof v === "string" ? sha256Hex(v) : v))
+        : typeof w.value === "string"
+          ? sha256Hex(w.value)
+          : w.value;
+      return { ...w, value } as Where;
+    });
+  /** The token a where clause looks a single row up by, which is handed back in place of the hash. */
+  const tokenOf = (where: Where[] | undefined) => {
+    const w = where?.find((w) => w.field === "token" && (w.operator ?? "eq") === "eq");
+    return typeof w?.value === "string" ? w.value : undefined;
+  };
+  const withToken = <T>(row: T, token: string | undefined): T =>
+    row && token !== undefined && typeof row === "object" && "token" in row
+      ? { ...row, token }
+      : row;
+  const hashUpdate = <U>(update: U): U => {
+    const u = update as Record<string, unknown>;
+    return typeof u?.token === "string" ? ({ ...u, token: sha256Hex(u.token) } as U) : update;
+  };
+  const whereOnly = <K extends "findMany" | "count" | "updateMany" | "delete" | "deleteMany">(
+    key: K,
+  ) =>
+    (async (args: { model: string; where?: Where[] }) =>
+      (adapter[key] as (a: unknown) => Promise<unknown>)(
+        isSession(args) ? { ...args, where: hashWhere(args.where) } : args,
+      )) as unknown as DBAdapter[K];
+
+  const wrapped: DBAdapter = {
+    ...adapter,
+    create: (async (args: Parameters<DBAdapter["create"]>[0]) => {
+      const token = args.data.token;
+      if (!isSession(args) || typeof token !== "string") return adapter.create(args);
+      return withToken(
+        await adapter.create({ ...args, data: { ...args.data, token: sha256Hex(token) } }),
+        token,
+      );
+    }) as DBAdapter["create"],
+    findOne: (async (args: Parameters<DBAdapter["findOne"]>[0]) => {
+      if (!isSession(args)) return adapter.findOne(args);
+      const token = tokenOf(args.where);
+      const row = await adapter.findOne({ ...args, where: hashWhere(args.where) ?? [] });
+      if (row || token === undefined || STORED_TOKEN.test(token)) return withToken(row, token);
+      // A row from before hashing: find it by its plain token once, and hash it.
+      const legacy = await adapter.findOne<{ id: string; token: string }>(args);
+      if (!legacy || legacy.token !== token) {
+        // A concurrent request may have just hashed it.
+        return withToken(
+          await adapter.findOne({ ...args, where: hashWhere(args.where) ?? [] }),
+          token,
+        );
+      }
+      await adapter.update({
+        model: "session",
+        where: [{ field: "id", value: legacy.id }],
+        update: { token: sha256Hex(token) },
+      });
+      return legacy;
+    }) as DBAdapter["findOne"],
+    update: (async (args: Parameters<DBAdapter["update"]>[0]) => {
+      if (!isSession(args)) return adapter.update(args);
+      const update = args.update as Record<string, unknown>;
+      const token = typeof update.token === "string" ? update.token : tokenOf(args.where);
+      return withToken(
+        await adapter.update({
+          ...args,
+          where: hashWhere(args.where) ?? [],
+          update: hashUpdate(args.update),
+        }),
+        token,
+      );
+    }) as DBAdapter["update"],
+    updateMany: (async (args: Parameters<DBAdapter["updateMany"]>[0]) =>
+      adapter.updateMany(
+        isSession(args)
+          ? { ...args, where: hashWhere(args.where) ?? [], update: hashUpdate(args.update) }
+          : args,
+      )) as DBAdapter["updateMany"],
+    findMany: whereOnly("findMany"),
+    count: whereOnly("count"),
+    delete: whereOnly("delete"),
+    deleteMany: whereOnly("deleteMany"),
+    consumeOne: (async (args: Parameters<DBAdapter["consumeOne"]>[0]) => {
+      if (!isSession(args)) return adapter.consumeOne(args);
+      return withToken(
+        await adapter.consumeOne({ ...args, where: hashWhere(args.where) ?? [] }),
+        tokenOf(args.where),
+      );
+    }) as DBAdapter["consumeOne"],
+    incrementOne: (async (args: Parameters<DBAdapter["incrementOne"]>[0]) =>
+      adapter.incrementOne(
+        isSession(args) ? { ...args, where: hashWhere(args.where) ?? [] } : args,
+      )) as DBAdapter["incrementOne"],
+    // Work done in a transaction goes through the adapter it is handed: hash there too.
+    transaction: ((cb: (trx: DBAdapter) => Promise<unknown>) =>
+      adapter.transaction((trx) =>
+        cb(hashSessionTokens(trx as DBAdapter)),
+      )) as DBAdapter["transaction"],
+  };
+  return wrapped;
+}
+
+const pgAdapter = drizzleAdapter(db, {
+  provider: "pg",
+  schema: {
+    user: schema.user,
+    session: schema.session,
+    account: schema.account,
+    verification: schema.verification,
+  },
+});
+
+/**
+ * "Link device": a device signs in with a single-use code (link/codes.ts) instead of a password. It
+ * gets a session of its own, like a password sign-in: a cookie for a browser, and `set-auth-token`
+ * (bearer plugin) for the app. Same protections as sign-in: JSON only (http/app.ts), origin-checked.
+ */
+const linkDevice = () =>
+  ({
+    id: "link-device",
+    endpoints: {
+      redeemLinkCode: createAuthEndpoint(
+        "/link/redeem",
+        {
+          method: "POST",
+          body: z.object({ code: z.string().max(64) }),
+        },
+        async (ctx) => {
+          const code = await consumeLinkCode(ctx.body.code);
+          if (!code) {
+            throw new APIError("UNAUTHORIZED", {
+              message: "That code is wrong, expired or already used. Make a new one.",
+              code: "INVALID_LINK_CODE",
+            });
+          }
+          const user = await ctx.context.internalAdapter.findUserById(code.userId);
+          if (!user)
+            throw new APIError("UNAUTHORIZED", { message: "That account no longer exists." });
+          // Refused for a banned user (admin plugin's session hook).
+          const session = await ctx.context.internalAdapter.createSession(user.id);
+          await attachLinkSession(code.id, session.id);
+          await setSessionCookie(ctx, { session, user });
+          invalidate(user.id, ["sessions"]);
+          return ctx.json({ user: { id: user.id, email: user.email, name: user.name } });
+        },
+      ),
+    },
+  }) satisfies BetterAuthPlugin;
+
 export const auth = betterAuth({
   appName: "Hearloom",
   baseURL: env.PUBLIC_URL,
   secret: env.BETTER_AUTH_SECRET,
-  database: drizzleAdapter(db, {
-    provider: "pg",
-    schema: {
-      user: schema.user,
-      session: schema.session,
-      account: schema.account,
-      verification: schema.verification,
-    },
-  }),
+  database: (options) => hashSessionTokens(pgAdapter(options)),
   // Invite-only: accounts are created by an admin (console) or `pnpm create-user`.
   emailAndPassword: { enabled: true, disableSignUp: true, minPasswordLength: 10 },
+  // These take a session token from a list of sessions, which holds hashes (hashSessionTokens). Devices
+  // in the console lists and revokes sessions by id instead (rpc: sessions.*).
+  disabledPaths: [
+    "/list-sessions",
+    "/revoke-session",
+    "/revoke-other-sessions",
+    "/admin/list-user-sessions",
+    "/admin/revoke-user-session",
+  ],
   session: {
     // The phone stays signed in for months; sessions slide forward on use.
     expiresIn: 60 * 60 * 24 * 180,
@@ -172,7 +348,36 @@ export const auth = betterAuth({
     // better-auth warning about "a single shared per-path bucket" is this, on purpose.
     ipAddress: { ipAddressHeaders: [] },
   },
-  plugins: [admin(), bearer()],
+  hooks: {
+    // Managing users and signing every device out are for the console: an admin's phone token (stolen
+    // with the phone) must not set a password, impersonate someone, or sign the owner's browsers out,
+    // which would also get it a browser session to mint link codes with.
+    before: createAuthMiddleware(async (ctx) => {
+      if (!ctx.path.startsWith("/admin/") && ctx.path !== "/revoke-sessions") return;
+      // From the request (this runs before the bearer plugin turns a token into a cookie).
+      const headers = ctx.request?.headers ?? ctx.headers;
+      const session = headers ? await auth.api.getSession({ headers }) : null;
+      if (session && clientKind(session.session.userAgent) !== "browser") {
+        throw new APIError("FORBIDDEN", { message: "Use the web console for this." });
+      }
+    }),
+  },
+  databaseHooks: {
+    session: {
+      delete: {
+        // However a session ends (sign-out, ban, user removed, all devices signed out): its phone stops
+        // getting pushes and its open sockets close. Before the delete, which unsets phones.session_id.
+        before: async (s) => {
+          await releasePhones(s.userId, eq(schema.phones.sessionId, s.id));
+        },
+        after: async (s) => {
+          closeSockets(s.id);
+          invalidate(s.userId, ["sessions", "phones", "status"]);
+        },
+      },
+    },
+  },
+  plugins: [admin(), bearer(), linkDevice()],
 });
 
 export type AuthSession = NonNullable<Awaited<ReturnType<typeof auth.api.getSession>>>;
