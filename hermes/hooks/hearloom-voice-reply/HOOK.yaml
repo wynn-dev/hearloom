@@ -1,0 +1,4 @@
+name: hearloom-voice-reply
+description: Tell Hearloom when Hermes has answered a voice command, so the pendant buzzes twice
+events:
+  - agent:end
