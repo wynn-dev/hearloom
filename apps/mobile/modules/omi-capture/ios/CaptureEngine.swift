@@ -17,7 +17,7 @@ final class CaptureEngine: NSObject {
   private lazy var ble: OmiBLE = {
     let b = OmiBLE(queue: queue)
     b.delegate = self
-    b.hapticWriterChanged = { [weak self] writer in self?.haptics.setWriter(writer) }
+    b.hapticPendantChanged = { [weak self] pendant in self?.haptics.setPendant(pendant) }
     return b
   }()
   /// Server-sent buzz patterns (`haptic_seq`), timed on their own queue.
@@ -64,6 +64,8 @@ final class CaptureEngine: NSObject {
     var acked: Int64 = -1
     var sent: Int64 = -1
     var byeSent = false
+    /// Paces resends from the ack (`seq_gap`, `store_failed`) while the ack doesn't move.
+    var resend = ResendThrottle()
   }
   private var slots: [Int: Slot] = [:]
   private var nextSlot = 0
@@ -298,7 +300,7 @@ final class CaptureEngine: NSObject {
     guard [1, 2, 5].contains(code) else { return }
     sendIfOpen(["t": "event", "kind": "button", "value": code, "at": nowMs()])
     let action: String
-    switch buttonFilter.gesture(code: code, at: nowMs()) {
+    switch buttonFilter.gesture(code: code, at: monotonicMs()) {
     case .tap: action = settings.button.tap
     case .doubleTap: action = settings.button.doubleTap
     case .hold: action = settings.button.hold
@@ -839,7 +841,16 @@ extension CaptureEngine: IngestClientDelegate {
 
   private func hapticFinished(_ outcome: HapticOutcome) {
     if !outcome.played { Log.info("haptics: \(outcome.id) not played (\(outcome.reason ?? "?"))") }
-    sendIfOpen(outcome.json)
+    // Through the outbox, so an ack due while the socket reconnects isn't lost.
+    enqueueEvent(outcome.json)
+  }
+
+  /// Send a slot's frames again from the server's ack (it refused or couldn't store what followed).
+  private func resendFromAck(_ slotId: Int) {
+    guard var s = slots[slotId] else { return }
+    s.sent = s.acked
+    slots[slotId] = s
+    pump()
   }
 
   private func serverError(code: String, message: String, fatal: Bool, slot slotId: Int?) {
@@ -855,9 +866,17 @@ extension CaptureEngine: IngestClientDelegate {
     switch SlotError.action(for: code) {
     case .resendFromAck:
       var s = slot
-      s.sent = s.acked
+      guard let wait = s.resend.request(acked: s.acked, now: monotonicMs()) else { return } // scheduled
       slots[slotId] = s
-      pump()
+      if wait == 0 { return resendFromAck(slotId) }
+      let conn = connection
+      let streamId = slot.streamId
+      queue.asyncAfter(deadline: .now() + .milliseconds(Int(wait))) { [weak self] in
+        guard let self, conn == self.connection, var s = self.slots[slotId], s.streamId == streamId else { return }
+        let go = s.resend.due(acked: s.acked)
+        self.slots[slotId] = s
+        if go { self.resendFromAck(slotId) }
+      }
     case .refuseStream:
       lastServerError = "\(code): \(message)"
       lastServerErrorCode = code

@@ -86,24 +86,65 @@ enum SlotError {
   }
 }
 
+/// Paces resends from the server's ack. One lost batch makes the server refuse every batch after it,
+/// and during a server storage outage every batch fails: each refusal asks for a resend, so without
+/// pacing the phone would re-upload the same window as fast as the link allows. The first resend
+/// happens at once; while the ack doesn't move, the next waits 1, 2, 4 … 16 s; requests in between
+/// collapse into one scheduled resend (so the slot never stalls with its window full).
+struct ResendThrottle {
+  static let firstDelayMs: Int64 = 1_000
+  static let maxDelayMs: Int64 = 16_000
+
+  private var lastAcked: Int64?
+  /// When the last resend happened (or is scheduled).
+  private var lastAt: Int64 = 0
+  /// Wait after `lastAt` before another resend without ack progress.
+  private var delayMs: Int64 = 0
+  /// A resend is scheduled and not done yet.
+  private(set) var scheduled = false
+
+  /// A resend from `acked` was asked for at `now` (monotonic ms). Returns how long to wait before doing
+  /// it (0 = now), or nil if one is already scheduled.
+  mutating func request(acked: Int64, now: Int64) -> Int64? {
+    if scheduled { return nil }
+    if lastAcked != acked { delayMs = 0 } // the ack moved: the last resend helped
+    let wait = max(0, lastAt + delayMs - now)
+    lastAcked = acked
+    lastAt = now + wait
+    delayMs = delayMs == 0 ? ResendThrottle.firstDelayMs : min(delayMs * 2, ResendThrottle.maxDelayMs)
+    scheduled = wait > 0
+    return wait
+  }
+
+  /// The scheduled resend is due; returns whether to do it. Not if the ack moved meanwhile: the earlier
+  /// resend worked, and a refusal still pending will ask again (and go at once, the ack having moved).
+  mutating func due(acked: Int64) -> Bool {
+    scheduled = false
+    return acked == lastAcked
+  }
+}
+
 /// Notices a half-dead socket (nothing arrives, sends still "succeed"): after a ping the server must say
-/// something (a pong or any message) within `timeout`. Times are seconds of uptime.
+/// something (a pong or any message) within `timeout`. Times are monotonic seconds that keep counting
+/// through sleep.
 struct ReplyDeadline {
   enum Verdict: Equatable {
     /// Heard from the server since the ping (or still within the deadline).
     case alive
     /// Silence past the deadline: reconnect.
     case dead
-    /// The check ran far later than scheduled, so the app was suspended and the silence proves
-    /// nothing yet: ping again.
+    /// The check itself ran more than `maxLateness` after its deadline, so the app was suspended or
+    /// the device asleep and the silence proves nothing yet: ping again.
     case stale
   }
 
   let timeout: Double
+  let maxLateness: Double
   private(set) var waitingSince: Double?
 
-  init(timeout: Double = 10) {
+  init(timeout: Double = 10, maxLateness: Double = 2) {
     self.timeout = timeout
+    self.maxLateness = maxLateness
   }
 
   mutating func pinged(at now: Double) {
@@ -117,8 +158,21 @@ struct ReplyDeadline {
   /// Run `timeout` after a ping.
   func verdict(at now: Double) -> Verdict {
     guard let since = waitingSince else { return .alive }
-    let waited = now - since
-    if waited < timeout { return .alive }
-    return waited > timeout * 2 ? .stale : .dead
+    let late = now - (since + timeout)
+    if late < 0 { return .alive }
+    return late > maxLateness ? .stale : .dead
+  }
+}
+
+/// When a network change (see `IngestClient.pathChanged`) may reconnect without the backoff: only a
+/// socket that had been up a while. One that just opened goes through the backoff, so flapping
+/// Wi-Fi/cellular can't make it reconnect over and over.
+enum NetworkChange {
+  static let settledMs: Int64 = 10_000
+
+  /// `openForMs`: how long the socket has been open (nil while still connecting).
+  static func reconnectAtOnce(openForMs: Int64?) -> Bool {
+    guard let openForMs else { return false }
+    return openForMs >= settledMs
   }
 }

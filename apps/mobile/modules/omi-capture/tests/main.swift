@@ -231,17 +231,44 @@ do {
   now = 3_000
   outcomes = h.run(now: now, write: writer)
   check(writes.map(\.pattern) == [3] && outcomes == [.played("h2")], "plays once ready")
-  check(h.nextWakeAt(ready: true) == 3_350, "next sequence waits one interval after the last pulse")
-  now = 3_350
+  // Long pulse (500 ms) + 600 ms of stillness before the next sequence.
+  check(h.nextWakeAt(ready: true) == 4_100, "next sequence waits for the last pulse to end + stillness")
+  now = 4_099
+  check(h.run(now: now, write: writer).isEmpty && writes.count == 1, "not before the stillness")
+  now = 4_100
   outcomes = h.run(now: now, write: writer)
   check(writes.map(\.pattern) == [3, 2] && outcomes == [.played("h3")], "second held sequence")
-  now = 3_700
+  now = 5_000 // medium (300 ms) + 600
   outcomes = h.run(now: now, write: writer)
   check(writes.map(\.pattern) == [3, 2, 1] && outcomes.isEmpty, "third starts")
   // The pendant goes away mid-sequence: no_pendant, nothing replayed later.
-  now = 3_800
+  now = 5_100
   outcomes = h.run(now: now, write: { _ in false })
   check(outcomes == [.noPendant("h4")] && h.held.isEmpty && h.nextWakeAt(ready: true) == nil, "lost mid-sequence")
+
+  // Two queued sequences ("heard" then "failed"): each keeps its own spacing, with stillness between
+  // them, so they're felt as 1 + 3 rather than 4 even taps.
+  writes = []
+  var two = HapticQueue()
+  _ = two.add(seq("heard", [1], interval: 250, expiresAt: 20_000))
+  _ = two.add(seq("failed", [1, 1, 1], interval: 250, expiresAt: 20_000))
+  var acks2: [HapticOutcome] = []
+  now = 10_000
+  var steps = 0
+  while let at = two.nextWakeAt(ready: true), steps < 20 { // drive it like the player's timer does
+    now = max(now, at)
+    acks2 += two.run(now: now, write: writer)
+    steps += 1
+  }
+  check(writes.map(\.at) == [10_000, 10_700, 10_950, 11_200], "two sequences: \(writes.map(\.at))")
+  check(acks2 == [.played("heard"), .played("failed")], "two sequences acked in order: \(acks2)")
+
+  // A pendant that can't buzz ends everything at once.
+  var none = HapticQueue()
+  _ = none.add(seq("n1", [1]))
+  _ = none.add(seq("n2", [2]))
+  check(none.dropAll() == [.noPendant("n1"), .noPendant("n2")] && none.nextWakeAt(ready: true) == nil, "dropAll")
+  check(HapticSequence.durationMs(1) == 100 && HapticSequence.durationMs(2) == 300 && HapticSequence.durationMs(3) == 500, "pulse durations")
 
   // TTL: a sequence that can't start in time is dropped as expired.
   var t = HapticQueue()
@@ -270,17 +297,26 @@ do {
   }
   player.play(HapticSequence(id: "rt", pulses: [1, 2, 3], intervalMs: 150, expiresAt: HapticPlayer.now() + 5_000))
   Thread.sleep(forTimeInterval: 0.1) // no pendant yet: held
-  player.setWriter { _ in lock.lock(); stamps.append(HapticPlayer.now()); lock.unlock(); return true }
+  player.setPendant(.ready { _ in lock.lock(); stamps.append(HapticPlayer.now()); lock.unlock(); return true })
   check(done.wait(timeout: .now() + 3) == .success, "player finished")
   lock.lock()
   let gaps = zip(stamps.dropFirst(), stamps).map { $0 - $1 }
   check(acks == [.played("rt")] && gaps.count == 2 && gaps.allSatisfy { $0 >= 150 && $0 <= 230 }, "player spacing \(gaps) \(acks)")
   lock.unlock()
-  player.setWriter(nil)
+  player.setPendant(.away)
   player.play(HapticSequence(id: "gone", pulses: [1], intervalMs: 150, expiresAt: HapticPlayer.now() + 200))
   check(done.wait(timeout: .now() + 3) == .success, "player expiry")
   lock.lock()
   check(acks.last == .expired("gone"), "player TTL drop \(acks)")
+  lock.unlock()
+  // A pendant without a haptic motor: held and new sequences end at once with no_pendant.
+  player.play(HapticSequence(id: "held", pulses: [1], intervalMs: 150, expiresAt: HapticPlayer.now() + 60_000))
+  player.setPendant(.cannotBuzz)
+  check(done.wait(timeout: .now() + 1) == .success, "held dropped when the pendant can't buzz")
+  player.play(HapticSequence(id: "new", pulses: [1], intervalMs: 150, expiresAt: HapticPlayer.now() + 60_000))
+  check(done.wait(timeout: .now() + 1) == .success, "new dropped when the pendant can't buzz")
+  lock.lock()
+  check(Array(acks.suffix(2)) == [.noPendant("held"), .noPendant("new")], "cannotBuzz acks \(acks)")
   lock.unlock()
 }
 
@@ -333,7 +369,50 @@ do {
   d.pinged(at: 120)
   d.pinged(at: 125) // a second ping doesn't extend the first one's deadline
   check(d.verdict(at: 130.5) == .dead, "deadline from the first unanswered ping")
-  check(d.verdict(at: 300) == .stale, "check ran late (app suspended): ping again, don't condemn")
+  check(d.verdict(at: 132) == .dead, "up to 2 s late is still a verdict")
+  check(d.verdict(at: 132.1) == .stale, "check ran >2 s late (suspended/asleep): ping again, don't condemn")
+  check(d.verdict(at: 300) == .stale, "check ran very late")
+}
+
+// --- network change: reconnect at once only if the socket had settled ---
+check(!NetworkChange.reconnectAtOnce(openForMs: nil), "connecting: backoff")
+check(!NetworkChange.reconnectAtOnce(openForMs: 9_999), "just opened: backoff")
+check(NetworkChange.reconnectAtOnce(openForMs: 10_000), "settled socket: reconnect at once")
+
+// --- resend from ack: paced while the ack doesn't move ---
+do {
+  var r = ResendThrottle()
+  check(r.request(acked: 99, now: 0) == 0, "first resend at once")
+  check(r.request(acked: 99, now: 50) == 950 && r.scheduled, "next one waits 1 s")
+  check(r.request(acked: 99, now: 60) == nil, "requests collapse into the scheduled one")
+  check(r.due(acked: 99) && !r.scheduled, "scheduled resend runs (ack unchanged)")
+  check(r.request(acked: 99, now: 1_100) == 1_900, "then 2 s")
+  _ = r.due(acked: 99)
+  check(r.request(acked: 99, now: 3_000) == 4_000, "then 4 s")
+  _ = r.due(acked: 99)
+  var waits: [Int64] = []
+  var t: Int64 = 7_000
+  for _ in 0..<4 {
+    let w = r.request(acked: 99, now: t) ?? -1
+    waits.append(w)
+    t += w
+    _ = r.due(acked: 99)
+  }
+  check(waits == [8_000, 16_000, 16_000, 16_000], "capped at 16 s: \(waits)")
+  // The ack moved: back to resending at once.
+  check(r.request(acked: 500, now: t + 10) == 0, "ack progress resets the pacing")
+  check(r.request(acked: 500, now: t + 20) == 990, "and pacing starts over at 1 s")
+  check(!r.due(acked: 700), "a scheduled resend is skipped if the ack moved meanwhile")
+  check(r.request(acked: 700, now: t + 1_100) == 0, "next refusal after progress goes at once")
+  // Over a 60 s outage with refusals arriving constantly, only a handful of resends happen.
+  var o = ResendThrottle()
+  var resends = 0
+  var nextDue: Int64?
+  for ms in stride(from: Int64(0), to: 60_000, by: 20) {
+    if let d = nextDue, ms >= d { nextDue = nil; if o.due(acked: 5) { resends += 1 } }
+    if let w = o.request(acked: 5, now: ms) { if w == 0 { resends += 1 } else { nextDue = ms + w } }
+  }
+  check(resends <= 8, "outage resends paced (\(resends))")
 }
 
 // --- pendant button: the release after a tap is not a hold ---

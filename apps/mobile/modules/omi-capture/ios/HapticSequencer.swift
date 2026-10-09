@@ -33,6 +33,9 @@ struct HapticSequence: Equatable {
 
   /// The haptic characteristic byte for a pattern name (unknown names buzz medium, as always).
   static func pattern(_ name: String?) -> UInt8 { name == "short" ? 1 : name == "long" ? 3 : 2 }
+
+  /// How long the motor runs for a pattern byte (firmware: 1 = 100 ms, 2 = 300 ms, 3 = 500 ms).
+  static func durationMs(_ pattern: UInt8) -> Int64 { pattern == 1 ? 100 : pattern == 3 ? 500 : 300 }
 }
 
 /// How a sequence ended, reported to the server as `haptic_ack`.
@@ -58,10 +61,13 @@ struct HapticOutcome: Equatable {
 /// in a small queue until its TTL; a pendant that goes away mid-sequence ends it.
 struct HapticQueue {
   static let maxHeld = 3
+  /// Stillness between the end of one sequence's last pulse and the next sequence, so two patterns
+  /// (e.g. "heard" then "failed") are felt as two, not one long run of taps.
+  static let stillnessMs: Int64 = 600
 
   private(set) var held: [HapticSequence] = []
   private var current: (seq: HapticSequence, next: Int, nextAt: Int64)?
-  /// The next sequence starts no earlier than one interval after the previous one's last pulse.
+  /// The next sequence starts no earlier than this (see `stillnessMs`).
   private var notBefore: Int64 = 0
 
   var isPlaying: Bool { current != nil }
@@ -71,6 +77,16 @@ struct HapticQueue {
     var out: [HapticOutcome] = []
     if held.count >= HapticQueue.maxHeld { out.append(.noPendant(held.removeFirst().id)) }
     held.append(seq)
+    return out
+  }
+
+  /// The pendant can't buzz at all (no haptic characteristic): end everything with `no_pendant`.
+  mutating func dropAll() -> [HapticOutcome] {
+    var out: [HapticOutcome] = []
+    if let c = current { out.append(.noPendant(c.seq.id)) }
+    out += held.map { .noPendant($0.id) }
+    current = nil
+    held = []
     return out
   }
 
@@ -104,7 +120,8 @@ struct HapticQueue {
       }
       out.append(.played(c.seq.id))
       current = nil
-      notBefore = now + c.seq.intervalMs
+      let last = c.seq.pulses[c.seq.pulses.count - 1]
+      notBefore = now + HapticSequence.durationMs(last) + HapticQueue.stillnessMs
     }
     return out
   }
@@ -121,15 +138,25 @@ struct HapticQueue {
   }
 }
 
-/// Plays `haptic_seq` patterns on the pendant with exact spacing. Runs on its own high-priority queue,
-/// not the capture queue, so journal and upload work can't delay or bunch pulses; the BLE layer hands
-/// it a writer (`setWriter`) that is nil while the pendant isn't connected.
+/// Whether the pendant can buzz, as published by the BLE layer.
+enum HapticPendant {
+  /// Not connected (or not set up yet): sequences wait, up to their TTL.
+  case away
+  /// Connected, but it has no haptic motor/characteristic: sequences end now with `no_pendant`.
+  case cannotBuzz
+  /// Ready; the writer queues one pulse write (returns false if it can't).
+  case ready(HapticPlayer.Writer)
+}
+
+/// Plays `haptic_seq` patterns on the pendant with exact spacing. The timing runs on its own
+/// high-priority queue, not the capture queue, so the pulse schedule never drifts with journal and
+/// upload work; each write itself is handed to the BLE queue (see `OmiBLE.updateHapticPendant`).
 final class HapticPlayer {
   typealias Writer = (UInt8) -> Bool
 
   private let queue = DispatchQueue(label: "hearloom.haptics", qos: .userInteractive)
   private var line = HapticQueue()
-  private var writer: Writer?
+  private var pendant = HapticPendant.away
   private var timer: DispatchSourceTimer?
   /// Called on the player's queue when a sequence is played or dropped.
   private let finished: (HapticOutcome) -> Void
@@ -139,7 +166,7 @@ final class HapticPlayer {
   }
 
   /// Monotonic ms, counting time asleep (TTLs are real time).
-  static func now() -> Int64 { Int64(clock_gettime_nsec_np(CLOCK_MONOTONIC) / 1_000_000) }
+  static func now() -> Int64 { monotonicMs() }
 
   func play(_ seq: HapticSequence) {
     queue.async {
@@ -148,15 +175,21 @@ final class HapticPlayer {
     }
   }
 
-  func setWriter(_ writer: Writer?) {
+  func setPendant(_ pendant: HapticPendant) {
     queue.async {
-      self.writer = writer
+      self.pendant = pendant
       self.run()
     }
   }
 
   private func run() {
     let now = HapticPlayer.now()
+    var writer: Writer?
+    switch pendant {
+    case .away: writer = nil
+    case .cannotBuzz: line.dropAll().forEach(finished)
+    case .ready(let w): writer = w
+    }
     line.run(now: now, write: writer).forEach(finished)
     guard let at = line.nextWakeAt(ready: writer != nil) else {
       timer?.cancel()
