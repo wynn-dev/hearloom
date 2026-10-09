@@ -19,6 +19,7 @@ import {
   createRpc,
   loadSession,
   type Rpc,
+  redeemLinkCode,
   type Session,
   saveSession,
   signIn,
@@ -44,6 +45,8 @@ type SessionState =
 interface SessionApi {
   state: SessionState;
   signIn(serverURL: string, email: string, password: string): Promise<void>;
+  /** Sign in with a "Link device" code; if already signed in, that session ends once the code works. */
+  linkDevice(serverURL: string, code: string): Promise<void>;
   signOut(): Promise<void>;
   refreshPush(): Promise<void>;
 }
@@ -156,31 +159,37 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     return () => sub.remove();
   }, [signedInSession, activate]);
 
-  const api = useMemo<SessionApi>(
-    () => ({
+  const api = useMemo<SessionApi>(() => {
+    const signOut = async () => {
+      if (state.status === "signedIn") {
+        // End this phone's open streams and stop pushes before the token is revoked.
+        await state.rpc.phones
+          .signOut({ id: state.session.phoneId })
+          .catch((err) => console.warn("phones.signOut failed", err));
+        await signOutRemote(state.session.serverURL, state.session.token);
+      }
+      await signOutLocal();
+    };
+    return {
       state,
       async signIn(serverURL, email, password) {
         const token = await signIn(serverURL, email, password);
         await activate({ serverURL, token, email, phoneId: await storedPhoneId() });
       },
-      async signOut() {
-        if (state.status === "signedIn") {
-          // End this phone's open streams and stop pushes before the token is revoked.
-          await state.rpc.phones
-            .signOut({ id: state.session.phoneId })
-            .catch((err) => console.warn("phones.signOut failed", err));
-          await signOutRemote(state.session.serverURL, state.session.token);
-        }
-        await signOutLocal();
+      async linkDevice(serverURL, code) {
+        const { token, email } = await redeemLinkCode(serverURL, code);
+        // Redeem first: a wrong or expired code leaves the current session alone.
+        if (state.status === "signedIn") await signOut();
+        await activate({ serverURL, token, email, phoneId: await storedPhoneId() });
       },
+      signOut,
       async refreshPush() {
         if (state.status !== "signedIn") return;
         const push = await registerForPush(state.rpc, state.session.phoneId);
         setState((s) => (s.status === "signedIn" ? { ...s, push } : s));
       },
-    }),
-    [state, activate, signOutLocal],
-  );
+    };
+  }, [state, activate, signOutLocal]);
 
   return <Ctx.Provider value={api}>{children}</Ctx.Provider>;
 }

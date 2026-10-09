@@ -64,26 +64,55 @@ export async function storedServerURL(): Promise<string | null> {
   return SecureStore.getItemAsync(KEYS.server, STORE_OPTS);
 }
 
-/** Email/password sign-in; returns the bearer session token. */
-export async function signIn(serverURL: string, email: string, password: string): Promise<string> {
-  let res: Response;
+/** POST JSON to one of the server's auth endpoints, as a sign-in does. */
+async function postAuth(serverURL: string, path: string, body: unknown): Promise<Response> {
   try {
-    res = await fetch(`${serverURL}/api/auth/sign-in/email`, {
+    return await fetch(`${serverURL}/api/auth${path}`, {
       method: "POST",
       headers: { "content-type": "application/json", origin: serverURL },
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify(body),
     });
   } catch {
     throw new Error(`Can't reach ${serverURL}. Is the server running and Tailscale connected?`);
   }
-  if (!res.ok) {
-    const body = (await res.json().catch(() => null)) as { message?: string } | null;
-    throw new Error(body?.message ?? `Sign-in failed (${res.status})`);
-  }
+}
+
+function sessionToken(res: Response): string {
   const token = res.headers.get("set-auth-token");
   if (!token)
     throw new Error("Server did not return a session token (is the bearer plugin enabled?)");
   return token;
+}
+
+/** Email/password sign-in; returns the bearer session token. */
+export async function signIn(serverURL: string, email: string, password: string): Promise<string> {
+  const res = await postAuth(serverURL, "/sign-in/email", { email, password });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { message?: string } | null;
+    throw new Error(body?.message ?? `Sign-in failed (${res.status})`);
+  }
+  return sessionToken(res);
+}
+
+/**
+ * "Link device" sign-in with a single-use code from the console (Devices → Link a device) or
+ * `pnpm link-device`; returns the bearer session token and the account it signs in to.
+ */
+export async function redeemLinkCode(
+  serverURL: string,
+  code: string,
+): Promise<{ token: string; email: string }> {
+  const res = await postAuth(serverURL, "/link/redeem", { code });
+  const body = (await res.json().catch(() => null)) as {
+    message?: string;
+    user?: { email?: string };
+  } | null;
+  if (res.status === 404)
+    throw new Error(
+      `${serverURL} can't link devices: check the server address, or update the server.`,
+    );
+  if (!res.ok) throw new Error(body?.message ?? `Linking failed (${res.status})`);
+  return { token: sessionToken(res), email: body?.user?.email ?? "" };
 }
 
 export async function signOutRemote(serverURL: string, token: string): Promise<void> {

@@ -54,6 +54,9 @@ function Gate() {
         <Stack.Protected guard={!signedIn}>
           <Stack.Screen name="login" />
         </Stack.Protected>
+        {/* hearloom://link?server=…&code=… (a scanned "Link device" QR code), signed in or out. Also on
+            a cold start: the navigation state is seeded from the launch URL while Gate is still loading. */}
+        <Stack.Screen name="link" />
       </Stack>
     </>
   );
