@@ -65,6 +65,8 @@ type State =
 export interface Step {
   done: AssembledCommand[];
   abandoned: Abandoned[];
+  /** A wake phrase that starts a command (it may be done already, or still waiting for one). */
+  woke: { wake: WakeMatch; utterance: HeardUtterance } | null;
 }
 
 /**
@@ -89,7 +91,7 @@ export class CommandAssembler {
   }
 
   push(u: HeardUtterance, cfg: WakeConfig, lastSpeechAt: number, now: number): Step {
-    const step: Step = { done: [], abandoned: [] };
+    const step: Step = { done: [], abandoned: [], woke: null };
     const s = this.state;
     if (s.t === "armed") {
       if (now <= s.until && this.sameSpeaker(s.utterance, u) && !matchWake(u.text, cfg)) {
@@ -121,7 +123,7 @@ export class CommandAssembler {
 
   /** Time passes: give up on a missing command or continuation. */
   tick(lastSpeechAt: number, now: number): Step {
-    const step: Step = { done: [], abandoned: [] };
+    const step: Step = { done: [], abandoned: [], woke: null };
     const s = this.state;
     if (s.t === "armed" && now > s.until) {
       step.abandoned.push({ wake: s.wake, utterance: s.utterance, reason: "no_command" });
@@ -142,6 +144,7 @@ export class CommandAssembler {
   ): void {
     const wake = matchWake(u.text, cfg);
     if (!wake) return;
+    step.woke = { wake, utterance: u };
     if (!wake.command) {
       this.state = { t: "armed", wake, utterance: u, until: now + this.limits.armMs };
       return;

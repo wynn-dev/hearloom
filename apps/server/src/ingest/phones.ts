@@ -36,6 +36,17 @@ export function isPhoneOnline(phoneId: string): boolean {
   return (byPhone.get(phoneId)?.size ?? 0) > 0;
 }
 
+/** Send to the newest connection of each of the user's online phones; how many were sent to. */
+export function sendToUserPhones(userId: string, msg: ServerMessage): number {
+  const text = JSON.stringify(msg);
+  let sent = 0;
+  for (const set of byPhone.values()) {
+    const ws = [...set].at(-1);
+    if (ws?.data.userId === userId && ws.send(text) !== 0) sent++;
+  }
+  return sent;
+}
+
 /** Send to the phone's newest connection. Returns false if the phone is offline. */
 export function sendToPhone(phoneId: string, msg: ServerMessage): boolean {
   const set = byPhone.get(phoneId);

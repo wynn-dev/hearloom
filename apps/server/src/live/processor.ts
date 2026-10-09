@@ -292,6 +292,12 @@ export class StreamProcessor {
     if (speaking) {
       this.lastSpeechAt = Date.now();
       this.lastSpeechAudioAt = absAt + samples.length / 16;
+    } else if (segments.length > 0) {
+      // Speech just stopped: the segment says exactly where. (`speaking` stays on for the VAD's
+      // minimum silence, 0.6 s, so the time above runs past the end of the words: a finished
+      // voice command would look continued and wait for the assembler's timeout.)
+      const last = segments.at(-1)!;
+      this.lastSpeechAudioAt = this.runStartAt + (last.start + last.samples.length) / 16;
     }
     if (fresh && this.deps.soniox) {
       if (speaking && !this.live && Date.now() >= this.sonioxRetryAt) this.openSoniox(absAt);
@@ -425,6 +431,11 @@ export class StreamProcessor {
         this.deps.log(`${message}; retrying in ${SONIOX_RETRY_MS / 1000} s`);
         this.sonioxRetryAt = Date.now() + SONIOX_RETRY_MS;
       },
+      // The wake phrase as soon as the recognizer has it (the pendant buzzes): not queued behind
+      // the utterances being saved.
+      this.deps.voice
+        ? (p) => void this.deps.voice!.partial(this.stream.userId, p, this.voiceSource)
+        : undefined,
     );
     this.live = session;
     const pre = this.history.slice(absAt - PRE_ROLL_MS, absAt);

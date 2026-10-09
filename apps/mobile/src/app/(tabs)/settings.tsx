@@ -134,6 +134,15 @@ export default function Settings() {
                 />
               }
             />
+            <Row
+              label="Buzz pendant for voice commands"
+              right={
+                <Switch
+                  value={s.voice.haptics}
+                  onValueChange={(v) => update.mutate({ voice: { haptics: v } })}
+                />
+              }
+            />
             <Row label="Timezone" value={s.timezone} />
             <Text style={{ color: t.muted, fontSize: 13 }}>More options in the web console.</Text>
           </Card>

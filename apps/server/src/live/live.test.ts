@@ -67,6 +67,52 @@ describe("Soniox assembly", () => {
     expect(last.startAt).toBe(1_060_100);
   });
 
+  test("the utterance in progress: its final tokens plus the current guesses", () => {
+    const clock = new SessionClock();
+    clock.sent(1_000_000, 2000);
+    const a = new SonioxAssembler(clock, "stt-rt-v5");
+    const tok = (text: string, s: number, e: number, is_final: boolean, speaker = "1") => ({
+      text,
+      start_ms: s,
+      end_ms: e,
+      is_final,
+      speaker,
+    });
+    const first = [
+      tok("Hey", 100, 300, true),
+      tok(" A", 400, 500, false),
+      tok("dri", 500, 700, false),
+    ];
+    expect(a.push(first)).toEqual([]);
+    expect(a.partial(first)).toEqual({
+      text: "Hey Adri",
+      startAt: 1_000_100,
+      ends: [
+        { offset: 3, endAt: 1_000_300 },
+        { offset: 5, endAt: 1_000_500 },
+        { offset: 8, endAt: 1_000_700 },
+      ],
+      audioAt: 1_002_000,
+      speakerKey: "soniox:1",
+    });
+    // The guesses are replaced by the next response's; a new speaker starts a new utterance.
+    const next = [
+      tok(" Adri", 400, 700, true),
+      tok(",", 700, 700, false),
+      tok("Yes", 900, 1100, false, "2"),
+    ];
+    a.push(next);
+    expect(a.partial(next)).toMatchObject({
+      text: "Yes",
+      startAt: 1_000_900,
+      speakerKey: "soniox:2",
+    });
+    // Nothing in progress after an endpoint.
+    const end = [tok(",", 700, 700, true), tok("<end>", 700, 700, true)];
+    expect(a.push(end).map((u) => u.text)).toEqual(["Hey Adri,"]);
+    expect(a.partial(end)).toBeNull();
+  });
+
   describe("punctuation", () => {
     const tok = (text: string, s: number, e: number, speaker = "1") => ({
       text,

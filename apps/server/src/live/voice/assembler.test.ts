@@ -39,7 +39,7 @@ describe("CommandAssembler", () => {
   test("non-wake speech is ignored", () => {
     const a = new CommandAssembler();
     const step = a.push(utt("I asked Hermes yesterday.", 0, 2), cfg, quiet(2), at(3.5));
-    expect(step).toEqual({ done: [], abandoned: [] });
+    expect(step).toEqual({ done: [], abandoned: [], woke: null });
     expect(a.busy).toBe(false);
   });
 

@@ -70,6 +70,8 @@ const voiceFields = {
   aliases: z.array(wakeWord).max(20),
   /** Spellings that caused false triggers: never matched loosely again. */
   blocked: z.array(wakeWord).max(20),
+  /** Buzz the pendant when the wake phrase is heard, and again with how the command went. */
+  haptics: z.boolean(),
 };
 
 export const settingsSchema = z.object({
@@ -113,6 +115,7 @@ export const settingsSchema = z.object({
       names: voiceFields.names.default(["Hermes"]),
       aliases: voiceFields.aliases.default([]),
       blocked: voiceFields.blocked.default([]),
+      haptics: voiceFields.haptics.default(true),
     })
     .prefault({}),
 });

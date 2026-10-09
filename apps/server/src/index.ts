@@ -14,7 +14,7 @@ import { livePipeline } from "./live/host";
 import { stopNotifications } from "./notify/gateway";
 import { attachRealtimeServer, topicFor } from "./realtime";
 import { trackSocket, untrackSocket } from "./sessions";
-import { onDetection, recoverPending } from "./voice/commands";
+import { onCue, onDetection, recoverPending } from "./voice/commands";
 import { onTeachHeard, replayTeach } from "./voice/teach";
 
 interface RealtimeSocketData {
@@ -85,6 +85,10 @@ setFrameListener((meta, frames) => livePipeline.push(meta, frames));
 // "Hey <agent>, …": store what was heard, deliver commands to the agent; teaching samples.
 livePipeline.onVoiceCommand((d) => {
   void onDetection(d).catch((err) => console.error("[voice] command failed", err));
+});
+// The pendant buzzes as soon as the wake phrase is heard, and when nothing came of it.
+livePipeline.onVoiceCue((e) => {
+  void onCue(e).catch((err) => console.error("[voice] buzz failed", err));
 });
 // A restarted pipeline forgets teaching prompts: without them, read phrases would be commands.
 livePipeline.onReady(replayTeach);

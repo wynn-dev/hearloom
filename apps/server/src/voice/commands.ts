@@ -3,9 +3,9 @@ import { aliasWorthLearning, compactName, type HapticPattern } from "@hearloom/s
 import { and, desc, eq, lt } from "drizzle-orm";
 import { sendWebhook } from "../agent/webhooks";
 import { db } from "../db";
-import { isPhoneOnline, sendToPhone } from "../ingest/phones";
+import { sendToUserPhones } from "../ingest/phones";
 import { livePipeline } from "../live/host";
-import type { VoiceDetection } from "../live/voice/types";
+import type { VoiceCue, VoiceCueEvent, VoiceDetection } from "../live/voice/types";
 import { notify } from "../notify/gateway";
 import { invalidate } from "../realtime";
 import { getSettings, updateSettings } from "../settings";
@@ -19,11 +19,21 @@ import {
 import { insertVoiceprint, selfPersonId } from "./profile";
 import { isTeaching } from "./teach";
 
-const { voiceCommands, voiceSamples, voiceprints, phones } = schema;
+const { voiceCommands, voiceSamples, voiceprints } = schema;
 type CommandRow = typeof voiceCommands.$inferSelect;
 
-/** Gap between the two pulses of the failure buzz. */
-const DOUBLE_BUZZ_GAP_MS = 350;
+/**
+ * The pendant's pulses for each cue (short 100 ms, medium 300 ms, long 500 ms), told apart by count
+ * and length: heard · , sent · · , nothing came of it — , not sent · · · .
+ */
+export const CUE_PULSES: Record<VoiceCue, HapticPattern[]> = {
+  heard: ["short"],
+  sent: ["short", "short"],
+  no_command: ["medium"],
+  failed: ["short", "short", "short"],
+};
+/** From the start of one pulse to the start of the next. */
+const PULSE_GAP_MS = 350;
 
 /** The `voice.command` webhook body (plus `userId` and `sentAt`, added by the sender). */
 export function commandEvent(row: CommandRow, attempt: number, test = false) {
@@ -43,14 +53,28 @@ export function commandEvent(row: CommandRow, attempt: number, test = false) {
   };
 }
 
-/** Buzz the pendant(s) of every online phone of the user. */
-async function buzz(userId: string, pattern: HapticPattern, times = 1): Promise<void> {
-  const rows = await db.select({ id: phones.id }).from(phones).where(eq(phones.userId, userId));
-  const online = rows.filter((p) => isPhoneOnline(p.id));
-  for (let i = 0; i < times; i++) {
-    if (i > 0) await Bun.sleep(DOUBLE_BUZZ_GAP_MS);
-    for (const p of online) sendToPhone(p.id, { t: "haptic", pattern });
+/**
+ * Tell the user about a voice command on the pendant(s) of their online phones, unless voice
+ * command buzzes are off. (Shadow mode never buzzes: the pipeline only cues, and only delivers,
+ * commands in "on" mode.)
+ */
+export async function cue(userId: string, cue: VoiceCue): Promise<void> {
+  if (!(await getSettings(userId)).voice.haptics) return;
+  for (const [i, pattern] of CUE_PULSES[cue].entries()) {
+    if (i > 0) await Bun.sleep(PULSE_GAP_MS);
+    sendToUserPhones(userId, { t: "haptic", pattern });
   }
+}
+
+/** A cue from the live pipeline: the wake phrase was heard, or nothing came of it. */
+export async function onCue(e: VoiceCueEvent): Promise<void> {
+  if (e.cue === "heard" && e.nameEndAt !== null) {
+    const now = Date.now();
+    console.log(
+      `[voice] wake phrase heard (${e.via}): buzz ${now - e.nameEndAt} ms after the name ended (pipeline ${e.at - e.nameEndAt} ms)`,
+    );
+  }
+  await cue(e.userId, e.cue);
 }
 
 /** A wake phrase from the live pipeline: store it, and deliver it if it should go to the agent. */
@@ -85,8 +109,8 @@ export async function onDetection(d: VoiceDetection): Promise<void> {
 }
 
 /**
- * Send a command to the agent with retries, then tell the user how it went: a short buzz when the
- * agent took it; a double buzz and a silent notification when it didn't.
+ * Send a command to the agent with retries, then tell the user how it went: the "sent" buzz when
+ * the agent took it; the "failed" buzz and a silent notification when it didn't.
  */
 export async function deliver(row: CommandRow, test = false): Promise<DeliveryOutcome> {
   const { agent } = await getSettings(row.userId);
@@ -114,9 +138,9 @@ export async function deliver(row: CommandRow, test = false): Promise<DeliveryOu
   invalidate(row.userId, ["voice"]);
   if (test) return outcome;
   if (outcome.status === "sent") {
-    await buzz(row.userId, "short");
+    await cue(row.userId, "sent");
   } else {
-    await buzz(row.userId, "short", 2);
+    await cue(row.userId, "failed");
     await notify({
       userId: row.userId,
       category: "voice_command",

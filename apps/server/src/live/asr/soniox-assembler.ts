@@ -1,4 +1,4 @@
-import type { Utterance } from "./types";
+import type { PartialUtterance, Utterance } from "./types";
 
 /** One token from the Soniox real-time API. */
 export interface SonioxToken {
@@ -110,15 +110,50 @@ export class SonioxAssembler {
     return out;
   }
 
-  private splitsBefore(t: SonioxToken): boolean {
-    const prev = this.current[this.current.length - 1];
+  /**
+   * The utterance in progress after `push(tokens)`: its final tokens plus the non-final ones in
+   * `tokens` (Soniox sends the current guesses with every response). Null if there are no words.
+   */
+  partial(tokens: SonioxToken[]): PartialUtterance | null {
+    let toks = [...this.current];
+    for (const t of tokens) {
+      if (t.is_final || /^<\w+>$/.test(t.text)) continue;
+      if (CLOSING.test(t.text)) {
+        if (toks.length > 0) toks.push({ ...t, end_ms: toks.at(-1)!.end_ms });
+        continue;
+      }
+      if (this.splitsBefore(t, toks)) toks = [];
+      toks.push(t);
+    }
+    const first = toks[0];
+    if (!first) return null;
+    const ends: PartialUtterance["ends"] = [];
+    let raw = "";
+    for (const t of toks) {
+      raw += t.text;
+      ends.push({ offset: raw.length, endAt: this.clock.toAbs(t.end_ms ?? t.start_ms ?? 0) });
+    }
+    const lead = raw.length - raw.trimStart().length;
+    const text = raw.trim();
+    if (NO_WORDS.test(text)) return null;
+    return {
+      text,
+      startAt: this.clock.toAbs(first.start_ms ?? 0),
+      ends: ends.map((e) => ({ offset: Math.max(0, e.offset - lead), endAt: e.endAt })),
+      audioAt: this.clock.toAbs(this.clock.totalSentMs),
+      speakerKey: first.speaker !== undefined ? `${this.speakerPrefix}${first.speaker}` : null,
+    };
+  }
+
+  private splitsBefore(t: SonioxToken, current = this.current): boolean {
+    const prev = current[current.length - 1];
     if (!prev) return false;
     if (t.speaker !== undefined && t.speaker !== prev.speaker) return true;
     if (t.start_ms === undefined || prev.end_ms === undefined) return false;
     const { clock } = this;
     if (clock.toAbs(t.start_ms) - clock.toAbs(prev.end_ms) > this.maxGapMs) return true;
     if (clock.spanAt(t.start_ms) !== clock.spanAt(prev.start_ms ?? prev.end_ms)) return true;
-    const first = this.current[0]!;
+    const first = current[0]!;
     return (
       t.text.startsWith(" ") &&
       clock.toAbs(t.start_ms) - clock.toAbs(first.start_ms ?? t.start_ms) > this.maxUtteranceMs

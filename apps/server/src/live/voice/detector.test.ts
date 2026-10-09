@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import type { PartialUtterance } from "../asr/types";
 import type { HeardUtterance } from "./assembler";
 import {
   type AudioSource,
+  CUE_CONFIRM_MS,
   commandThreshold,
   DEFAULT_MIN_SCORE,
   logLearnVerdict,
@@ -12,13 +14,14 @@ import {
   teachVoiceVerdict,
   VoiceDetector,
 } from "./detector";
-import type { TeachHeard, VoiceConfig, VoiceDetection } from "./types";
+import type { TeachHeard, VoiceConfig, VoiceCueEvent, VoiceDetection } from "./types";
 
 const T = 1_800_000_000_000;
 
 function setup(over: { config?: Partial<VoiceConfig>; self?: number | null; other?: number } = {}) {
   let now = T;
   const detections: VoiceDetection[] = [];
+  const cueEvents: VoiceCueEvent[] = [];
   const taught: TeachHeard[] = [];
   const learned: number[] = [];
   const audioCalls: [number, number][] = [];
@@ -27,6 +30,7 @@ function setup(over: { config?: Partial<VoiceConfig>; self?: number | null; othe
     mode: "on",
     wake: { names: ["Hermes"], aliases: [] },
     minScore: 0.65,
+    haptics: true,
     ...over.config,
   };
   const scores = { self: over.self === undefined ? 0.8 : over.self, other: over.other ?? 0.2 };
@@ -39,6 +43,7 @@ function setup(over: { config?: Partial<VoiceConfig>; self?: number | null; othe
       return [0.1, 0.2];
     },
     detected: (d) => detections.push(d),
+    cue: (e) => cueEvents.push(e),
     taught: (_u, r) => taught.push(r),
     log: () => {},
     now: () => now,
@@ -76,9 +81,31 @@ function setup(over: { config?: Partial<VoiceConfig>; self?: number | null; othe
       source,
     );
   };
+  /**
+   * The recognizer's running transcript at `nowS`: `words` with their end times (s), audio sent
+   * up to `audioS`.
+   */
+  const hear = (words: [string, number][], startS: number, audioS: number, nowS = audioS + 0.3) => {
+    now = T + nowS * 1000;
+    lastSpeech = T + audioS * 1000;
+    let text = "";
+    const ends: PartialUtterance["ends"] = [];
+    for (const [w, endS] of words) {
+      text += (text && !/^[,.?!]/.test(w) ? " " : "") + w;
+      ends.push({ offset: text.length, endAt: T + endS * 1000 });
+    }
+    return detector.partial(
+      "u1",
+      { text, startAt: T + startS * 1000, ends, audioAt: T + audioS * 1000, speakerKey: "S1" },
+      source,
+    );
+  };
   return {
     detector,
     detections,
+    cueEvents,
+    cues: () => cueEvents.map((e) => (e.via ? `${e.cue}:${e.via}` : e.cue)),
+    hear,
     taught,
     learned,
     audioCalls,
@@ -326,4 +353,204 @@ test("commandThreshold", () => {
   expect(commandThreshold([0.7, 0.75, 0.8, 0.85, 0.9])).toBeCloseTo(0.65);
   expect(commandThreshold([0.3, 0.4, 0.5])).toBe(0.55);
   expect(commandThreshold([0.95, 0.95, 0.95])).toBe(0.75);
+});
+
+describe("pendant cues", () => {
+  test("a one-breath command: heard when it's finished (the server buzzes sent)", async () => {
+    const t = setup();
+    await t.say("Hey Hermes, what's 17 times 23?", 0, 2.5);
+    expect(t.cues()).toEqual(["heard:final"]);
+    expect(t.cueEvents[0]).toMatchObject({ userId: "u1", nameEndAt: T + 2500, at: T + 4000 });
+    expect(t.detections[0]!.status).toBe("pending");
+  });
+
+  test("heard from the running transcript, before the utterance is finished", async () => {
+    const t = setup();
+    await t.hear(
+      [
+        ["Hey", 0.3],
+        ["Hermes,", 0.8],
+        ["what's", 1.1],
+      ],
+      0,
+      1.2,
+    );
+    expect(t.cues()).toEqual(["heard:partial"]);
+    expect(t.cueEvents[0]).toMatchObject({ nameEndAt: T + 800, at: T + 1500 });
+    // Later guesses and the finished utterance don't buzz again.
+    await t.hear(
+      [
+        ["Hey", 0.3],
+        ["Hermes,", 0.8],
+        ["what's", 1.1],
+        ["17", 1.6],
+      ],
+      0,
+      1.7,
+    );
+    await t.say("Hey Hermes, what's 17 times 23?", 0, 2.5);
+    expect(t.cues()).toEqual(["heard:partial"]);
+    expect(t.detections[0]!.status).toBe("pending");
+  });
+
+  test("a name at the end of the running transcript waits until it can't grow", async () => {
+    const t = setup();
+    await t.hear(
+      [
+        ["Hey", 0.3],
+        ["Hermes", 0.8],
+      ],
+      0,
+      1.0,
+    );
+    expect(t.cues()).toEqual([]);
+    await t.hear(
+      [
+        ["Hey", 0.3],
+        ["Hermes", 0.8],
+      ],
+      0,
+      1.3,
+    );
+    expect(t.cues()).toEqual(["heard:partial"]);
+  });
+
+  test("not the user's voice: no buzz at all", async () => {
+    const t = setup({ self: 0.5 });
+    await t.hear(
+      [
+        ["Hey", 0.3],
+        ["Hermes,", 0.8],
+        ["what's", 1.1],
+      ],
+      0,
+      1.2,
+    );
+    await t.say("Hey Hermes, what's 17 times 23?", 0, 2.5);
+    expect(t.cues()).toEqual([]);
+    expect(t.detections[0]!.reason).toBe("not_own_voice");
+  });
+
+  test("wake word alone, then nothing: heard, then no command", async () => {
+    const t = setup();
+    await t.say("Hey Hermes.", 0, 0.8, { isSelf: null });
+    t.setNow(12);
+    await t.detector.tick();
+    expect(t.cues()).toEqual(["heard:final", "no_command"]);
+    expect(t.detections[0]).toMatchObject({ reason: "no_command" });
+  });
+
+  test("wake word, then someone else talks: no command", async () => {
+    const t = setup();
+    await t.say("Hey Hermes.", 0, 0.8, { isSelf: null });
+    await t.say("Dinner's ready!", 2, 3, { speakerKey: "S2", isSelf: false });
+    expect(t.cues()).toEqual(["heard:final", "no_command"]);
+  });
+
+  test("wake word, then the command: heard once", async () => {
+    const t = setup();
+    await t.say("Hey Hermes.", 0, 0.8, { isSelf: null });
+    await t.say("What's the weather tomorrow?", 2.5, 4.5);
+    expect(t.cues()).toEqual(["heard:final"]);
+    expect(t.detections[0]!.status).toBe("pending");
+  });
+
+  test("heard, then rejected here: failed", async () => {
+    const t = setup();
+    await t.say("Hey Hermes, lights on", 0, 2);
+    // Within the 2 s cooldown.
+    await t.say("Hey Hermes, lights off", 2.2, 3);
+    expect(t.cues()).toEqual(["heard:final", "heard:final", "failed"]);
+    expect(t.detections[1]!.reason).toBe("rate_limited");
+
+    const media = setup();
+    media.media.add("c1:S4");
+    await media.say("Hey Hermes, buy now", 0, 2, { speakerKey: "S4" });
+    expect(media.cues()).toEqual(["heard:final", "failed"]);
+  });
+
+  test("the running transcript's wake phrase isn't in the finished utterance: no command", async () => {
+    const t = setup();
+    await t.hear(
+      [
+        ["Hey", 0.3],
+        ["Hermes,", 0.8],
+        ["house", 1.1],
+      ],
+      0,
+      1.2,
+    );
+    await t.say("Hey, her messy house.", 0, 1.5);
+    expect(t.cues()).toEqual(["heard:partial", "no_command"]);
+    expect(t.detections.map((d) => d.status)).not.toContain("pending");
+  });
+
+  test("the running utterance never finishes: no command, after a while", async () => {
+    const t = setup();
+    await t.hear(
+      [
+        ["Hey", 0.3],
+        ["Hermes,", 0.8],
+        ["what's", 1.1],
+      ],
+      0,
+      1.2,
+    );
+    // Still being spoken (and recognized) after the confirm window: no verdict yet.
+    await t.hear(
+      [
+        ["Hey", 0.3],
+        ["Hermes,", 0.8],
+        ["what's", 1.1],
+      ],
+      0,
+      10,
+      11,
+    );
+    t.setNow(1.5 + CUE_CONFIRM_MS / 1000);
+    await t.detector.tick();
+    expect(t.cues()).toEqual(["heard:partial"]);
+    t.setNow(11.5 + CUE_CONFIRM_MS / 1000);
+    await t.detector.tick();
+    expect(t.cues()).toEqual(["heard:partial", "no_command"]);
+  });
+
+  test("no buzzes with haptics off, in shadow mode, or while teaching", async () => {
+    for (const config of [{ haptics: false }, { mode: "shadow" as const }]) {
+      const t = setup({ config });
+      await t.hear(
+        [
+          ["Hey", 0.3],
+          ["Hermes,", 0.8],
+          ["what's", 1.1],
+        ],
+        0,
+        1.2,
+      );
+      await t.say("Hey Hermes, what's 17 times 23?", 0, 2.5);
+      await t.say("Hey Hermes.", 5, 5.8, { isSelf: null });
+      t.setNow(20);
+      await t.detector.tick();
+      expect(t.cues()).toEqual([]);
+      expect(t.detections.length).toBeGreaterThan(0);
+    }
+    const t = setup();
+    t.detector.setTeach("u1", {
+      sessionId: "t1",
+      kind: "sample",
+      index: 0,
+      phrase: "Hey Hermes",
+      personId: "p1",
+    });
+    await t.hear(
+      [
+        ["Hey", 0.3],
+        ["Hermes", 0.8],
+      ],
+      0,
+      1.3,
+    );
+    await t.say("Hey Hermes", 0, 0.8);
+    expect(t.cues()).toEqual([]);
+  });
 });

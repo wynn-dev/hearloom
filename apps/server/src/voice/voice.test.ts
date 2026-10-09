@@ -11,7 +11,14 @@ import { livePipeline } from "../live/host";
 import { TEACH_GRACE_MS } from "../live/voice/detector";
 import type { VoiceDetection } from "../live/voice/types";
 import { getSettings, updateSettings } from "../settings";
-import { onDetection, recoverPending, sendTestCommand, setFeedback } from "./commands";
+import {
+  CUE_PULSES,
+  onCue,
+  onDetection,
+  recoverPending,
+  sendTestCommand,
+  setFeedback,
+} from "./commands";
 import { MAX_AGE_MS } from "./deliver";
 import { ensureSelfPerson, voiceProfile } from "./profile";
 import {
@@ -127,7 +134,7 @@ async function row(id: string) {
   return r!;
 }
 
-test("a command is delivered, signed, and acknowledged with a short buzz", async () => {
+test("a command is delivered, signed, and acknowledged with the sent buzz", async () => {
   const d = detection();
   await onDetection(d);
   expect(received).toHaveLength(1);
@@ -149,7 +156,7 @@ test("a command is delivered, signed, and acknowledged with a short buzz", async
   const r = await row(d.id);
   expect(r).toMatchObject({ status: "sent", attempts: 1, httpStatus: 202, reason: null });
   expect(r.sentAt).not.toBeNull();
-  expect(buzzes).toEqual(["short"]);
+  expect(buzzes).toEqual(["short", "short"]);
 });
 
 test("retries a 500 with the same event id", async () => {
@@ -161,12 +168,12 @@ test("retries a 500 with the same event id", async () => {
   expect(await row(d.id)).toMatchObject({ status: "sent", attempts: 2 });
 }, 10_000);
 
-test("a rejected command: double buzz and a silent notification", async () => {
+test("a rejected command: the failed buzz and a silent notification", async () => {
   answers = [{ status: 401, body: "bad signature" }];
   const d = detection();
   await onDetection(d);
   expect(await row(d.id)).toMatchObject({ status: "failed", reason: "http_401", attempts: 1 });
-  expect(buzzes).toEqual(["short", "short"]);
+  expect(buzzes).toEqual(["short", "short", "short"]);
   const [n] = await db
     .select()
     .from(schema.notifications)
@@ -189,6 +196,34 @@ test("ignored and shadow detections are stored, never sent", async () => {
   expect(buzzes).toHaveLength(0);
   expect(await row(ignored.id)).toMatchObject({ status: "ignored", reason: "not_own_voice" });
   expect((await row(shadow.id)).status).toBe("shadow");
+});
+
+test("pipeline cues buzz the pendant, distinctly; not with voice buzzes off", async () => {
+  const at = Date.now();
+  for (const cue of ["heard", "no_command", "failed"] as const) {
+    buzzes.length = 0;
+    await onCue({ userId, cue, nameEndAt: cue === "heard" ? at - 500 : null, via: null, at });
+    expect(buzzes).toEqual(CUE_PULSES[cue]);
+  }
+  expect(CUE_PULSES).toEqual({
+    heard: ["short"],
+    sent: ["short", "short"],
+    no_command: ["medium"],
+    failed: ["short", "short", "short"],
+  });
+  // All four tell apart.
+  expect(new Set(Object.values(CUE_PULSES).map((p) => p.join())).size).toBe(4);
+
+  buzzes.length = 0;
+  await updateSettings(userId, { voice: { haptics: false } });
+  try {
+    await onCue({ userId, cue: "heard", nameEndAt: at, via: "partial", at });
+    await onDetection(detection());
+    expect(received).toHaveLength(1);
+    expect(buzzes).toHaveLength(0);
+  } finally {
+    await updateSettings(userId, { voice: { haptics: true } });
+  }
 });
 
 test("test command", async () => {

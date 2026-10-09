@@ -40,6 +40,7 @@ export class VoiceRuntime {
         (await mediaVoices(deps.db, userId, [chainId])).has(`${chainId}:${key}`),
       embed: async (audio) => this.embed(audio),
       detected: (detection) => deps.send({ t: "voice_command", detection }),
+      cue: (cue) => deps.send({ t: "voice_cue", cue }),
       taught: (userId, result) => deps.send({ t: "teach_heard", userId, result }),
       log: deps.log,
     });
@@ -83,6 +84,7 @@ export class VoiceRuntime {
       mode: v.mode,
       wake: { names: v.names, aliases: v.aliases, blocked: v.blocked },
       minScore: commandThreshold(scores.map((r) => r.score!)),
+      haptics: v.haptics,
     };
   }
 
