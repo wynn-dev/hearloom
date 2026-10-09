@@ -138,9 +138,9 @@ Short pulses (100 ms), told apart by count and length:
 | You feel | Meaning | When |
 | --- | --- | --- |
 | · one tap | heard "Hey Hermes" | while you're still talking, typically under a second after the name |
-| · · two taps | the agent answered (its reply is on its channel) | when its run ends, within 60 s of delivery |
+| · · two taps | the agent answered (its reply is on its channel) | when its run ends, within 2 minutes of delivery |
 | — one longer buzz (300 ms) | no command: nothing followed (8 s), someone else spoke, or it wasn't the wake phrase after all | when that's clear |
-| · · · three taps | not sent: rejected here (rate limit, TV voice, …), the agent couldn't be reached, or **no reply within 60 s** | after the gate, after the retries, or 60 s after delivery |
+| · · · three taps | not sent: rejected here (rate limit, TV voice, …), the agent couldn't be reached, or **no reply within 2 minutes** | after the gate, after the retries, or 2 minutes after delivery |
 
 - **On/off:** Voice page → **Buzz the pendant** (also in the app's Settings → "Buzz pendant for
   voice commands"); on by default. It's separate from "Buzz pendant when urgent", which is for
@@ -149,7 +149,8 @@ Short pulses (100 ms), told apart by count and length:
   other three.
 - **Two taps mean the agent answered, not that the webhook was taken:** a buzz right after
   delivery told nothing new.
-  - Delivered, Hearloom waits up to 60 s (`REPLY_TIMEOUT_MS`) for
+  - Delivered, Hearloom waits up to 2 minutes (`REPLY_TIMEOUT_MS`; Hermes's answers took 20–54 s)
+    for
     `POST /api/voice/commands/<id>/replied`. It needs an agent token, the command's owner's.
   - In time: two taps. Otherwise three taps, and a later reply doesn't buzz. Test commands never
     buzz.

@@ -201,8 +201,8 @@ function ManageCard({ voice, status }: { voice: VoiceSettings; status: VoiceStat
           htmlFor="voice-haptics"
           description={
             voice.mode === "on"
-              ? "One tap when it hears “hey …”; two taps when the agent has answered. If something went wrong: one longer buzz, no command came; three taps, not sent or no answer within a minute."
-              : "Only in mode On, so nothing buzzes now. In On: one tap when it hears “hey …”; two taps when the agent has answered. If something went wrong: one longer buzz, no command came; three taps, not sent or no answer within a minute."
+              ? "One tap when it hears “hey …”; two taps when the agent has answered. If something went wrong: one longer buzz, no command came; three taps, not sent or no answer within two minutes."
+              : "Only in mode On, so nothing buzzes now. In On: one tap when it hears “hey …”; two taps when the agent has answered. If something went wrong: one longer buzz, no command came; three taps, not sent or no answer within two minutes."
           }
         >
           <Switch

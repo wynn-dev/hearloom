@@ -139,8 +139,11 @@ export async function onDetection(d: VoiceDetection): Promise<void> {
   else if (row) await failed(); // stored as ignored (teaching)
 }
 
-/** After a command was delivered, the agent's reply must come within this long (else: failed). */
-export const REPLY_TIMEOUT_MS = 60_000;
+/**
+ * After a command was delivered, the agent's reply must come within this long (else: failed).
+ * Hermes's answers took 20–54 s on 2026-10-09 (web lookups): 60 s would cry wolf.
+ */
+export const REPLY_TIMEOUT_MS = 120_000;
 let replyTimeoutMs = REPLY_TIMEOUT_MS;
 /** Tests only. */
 export function setReplyTimeout(ms: number): void {

@@ -4,7 +4,7 @@ Hearloom sends each "hey <agent>" command to the `hearloom-voice` webhook route,
 id as the `webhook-id` header. Hermes uses that header as the delivery id and encodes it in the
 run's chat id (`webhook:v2:<base64url of [profile, route, delivery_id]>`). When that run ends with
 a response, this hook POSTs `/api/voice/commands/<id>/replied` to Hearloom, which buzzes the pendant
-twice. No reply within 60 s and Hearloom buzzes three times instead.
+twice. No reply within 2 minutes and Hearloom buzzes three times instead.
 
 Install: copy this directory to ~/.hermes/hooks/ and restart the gateway (`hermes gateway restart`).
 Configuration (environment, e.g. ~/.hermes/.env):
