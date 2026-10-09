@@ -318,7 +318,15 @@ const FIRED = new Set(["sent", "shadow", "failed", "expired"]);
  * Ignored detections the user may call "missed". Not `not_own_voice` or `media_voice`: the gate
  * already heard someone else there, and learning it would enrol their voice and loosen the gate.
  */
-const MISSABLE = new Set(["near_miss", "no_command", "rate_limited", "no_voiceprint"]);
+const MISSABLE = new Set([
+  "near_miss",
+  "no_command",
+  "rate_limited",
+  "no_voiceprint",
+  "clip_missing",
+  "clip_too_short",
+  "check_error",
+]);
 
 export interface FeedbackResult {
   /** Something was learned from it (voice and/or how the name is heard). */

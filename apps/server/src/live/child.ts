@@ -3,7 +3,7 @@
  * (sherpa-onnx) so a crash here can't take down audio ingest. Receives stored Opus frames over IPC,
  * writes utterances / sound events / blocks / episodes to Postgres, and reports state back.
  */
-import { createDb, schema } from "@hearloom/db";
+import { createDb } from "@hearloom/db";
 import {
   hasModel,
   MODEL_FILES,
@@ -12,10 +12,10 @@ import {
   SpeakerEmbedder,
 } from "@hearloom/inference";
 import type { AudioFrame } from "@hearloom/shared";
-import { and, eq } from "drizzle-orm";
 import { loadStreamAudio } from "../audio/load";
 import { env, modelsDir } from "../env";
 import { BlockTracker } from "./blocks";
+import { type EnrollResult, enrollUtterance } from "./enroll";
 import { EpisodeTracker } from "./episodes";
 import type { ChildMessage, HostMessage } from "./ipc";
 import { type LiveDeps, type StreamInfo, StreamProcessor } from "./processor";
@@ -89,6 +89,7 @@ const deps: LiveDeps = {
   soniox: sonioxConfig,
   voice: voice.detector,
   terms: (userId) => voice.terms(userId),
+  ownerBar: async (userId) => (await voice.config(userId)).minScore,
   invalidate: (userId, keys) => send({ t: "invalidate", userId, keys }),
   log,
 };
@@ -125,7 +126,8 @@ process.on("message", (raw) => {
     void episodes.reload(msg.userId).catch(fail);
   } else if (msg.t === "enroll") {
     void enroll(msg).then(
-      (sampleSeconds) => send({ t: "enrolled", requestId: msg.requestId, ok: true, sampleSeconds }),
+      ({ sampleSeconds, note }) =>
+        send({ t: "enrolled", requestId: msg.requestId, ok: true, sampleSeconds, note }),
       (err) =>
         send({
           t: "enrolled",
@@ -138,46 +140,20 @@ process.on("message", (raw) => {
 });
 
 /** Learn a voiceprint from an utterance's stored audio and attribute the utterance. */
-async function enroll(msg: Extract<HostMessage, { t: "enroll" }>): Promise<number> {
-  if (!embedder) throw new Error("speaker model not installed");
-  const [u] = await db
-    .select()
-    .from(schema.utterances)
-    .where(
-      and(eq(schema.utterances.id, msg.utteranceId), eq(schema.utterances.userId, msg.userId)),
-    );
-  if (!u) throw new Error("utterance not found");
-  if (!u.streamId) throw new Error("utterance has no audio");
-  const audio = await loadStreamAudio(db, u.streamId, u.startAt.getTime(), u.endAt.getTime());
-  if (!audio || audio.length < 16_000) throw new Error("need at least 1 s of stored audio");
-  const embedding = embedder.embed(audio);
-  const [person] = await db
-    .select({ isSelf: schema.people.isSelf })
-    .from(schema.people)
-    .where(eq(schema.people.id, msg.personId));
-  await db.transaction(async (tx) => {
-    // Re-attributing an utterance replaces the voiceprint learned from it (it was the wrong person).
-    await tx
-      .delete(schema.voiceprints)
-      .where(
-        and(eq(schema.voiceprints.userId, msg.userId), eq(schema.voiceprints.utteranceId, u.id)),
-      );
-    await tx.insert(schema.voiceprints).values({
-      userId: msg.userId,
-      personId: msg.personId,
-      utteranceId: u.id,
-      model: SPEAKER_MODEL_ID,
-      embedding: Array.from(embedding),
-      sampleSeconds: audio.length / 16000,
-      source: "confirmed",
-    });
-  });
-  await db
-    .update(schema.utterances)
-    .set({ personId: msg.personId, isWearer: person?.isSelf ?? false })
-    .where(eq(schema.utterances.id, u.id));
+async function enroll(msg: Extract<HostMessage, { t: "enroll" }>): Promise<EnrollResult> {
+  const model = embedder;
+  if (!model) throw new Error("speaker model not installed");
+  const result = await enrollUtterance(
+    {
+      db,
+      embed: (audio) => model.embed(audio),
+      loadAudio: (streamId, from, to) => loadStreamAudio(db, streamId, from, to),
+      minScore: async (userId) => (await voice.config(userId)).minScore,
+    },
+    msg,
+  );
   deps.speakers?.invalidate(msg.userId);
-  return audio.length / 16000;
+  return result;
 }
 
 // Close runs after silence, idle Soniox sessions, quiet chains and blocks; classify episodes; drop

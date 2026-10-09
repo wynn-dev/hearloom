@@ -234,6 +234,17 @@ export const teachResultSchema = z.object({
   error: z.string().optional(),
 });
 
+/** One of the user's own voiceprints. */
+export const ownVoiceprintSchema = z.object({
+  id: z.uuid(),
+  createdAt: z.date(),
+  /** enrollment: taught on the Voice page or learned from a command; confirmed: "This is me". */
+  source: z.enum(["enrollment", "confirmed"]),
+  seconds: z.number(),
+  /** Average similarity to the user's other voiceprints (null: it's the only one). Low = outlier. */
+  similarity: z.number().nullable(),
+});
+
 export const voiceStatusSchema = z.object({
   profile: z.object({
     voiceprints: z.number(),
@@ -386,7 +397,14 @@ export const contract = {
           asSelf: z.boolean().optional(),
         }),
       )
-      .output(z.object({ personId: z.uuid(), sampleSeconds: z.number() })),
+      .output(
+        z.object({
+          personId: z.uuid(),
+          sampleSeconds: z.number(),
+          /** Why no voiceprint was learned (the utterance is attributed anyway); null if one was. */
+          note: z.string().nullable(),
+        }),
+      ),
   },
   agent: {
     tokens: {
@@ -432,6 +450,10 @@ export const contract = {
         }),
       )
       .output(z.object({ learned: z.boolean(), note: z.string().nullable() })),
+    /** The user's own voiceprints, newest first. */
+    voiceprints: oc.output(z.array(ownVoiceprintSchema)),
+    /** Forget one of the user's own voiceprints (e.g. an outlier learned from a bad clip). */
+    removeVoiceprint: oc.input(z.object({ id: z.uuid() })).output(ok),
     /** Send a signed `voice.command` with `test: true` to the agent webhook. */
     test: oc.output(
       z.object({
@@ -499,6 +521,7 @@ export type DeviceSession = z.infer<typeof deviceSessionSchema>;
 export type LinkCode = z.infer<typeof linkCodeSchema>;
 export type VoiceCommand = z.infer<typeof voiceCommandSchema>;
 export type VoiceStatus = z.infer<typeof voiceStatusSchema>;
+export type OwnVoiceprint = z.infer<typeof ownVoiceprintSchema>;
 export type TeachResultItem = z.infer<typeof teachResultSchema>;
 
 /** Realtime events pushed to console/app sockets (`/realtime`). Clients refetch on these. */

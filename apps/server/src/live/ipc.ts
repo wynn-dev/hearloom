@@ -29,7 +29,7 @@ export type ChildMessage =
   | { t: "invalidate"; userId: string; keys: Array<"timeline" | "status"> }
   | { t: "activity"; userId: string; activity: Activity | null }
   | { t: "block_closed"; userId: string; blockId: string }
-  | { t: "enrolled"; requestId: string; ok: true; sampleSeconds: number }
+  | { t: "enrolled"; requestId: string; ok: true; sampleSeconds: number; note: string | null }
   | { t: "enrolled"; requestId: string; ok: false; error: string }
   | { t: "voice_command"; detection: VoiceDetection }
   /** Buzz the pendant about a voice command (the wake phrase was heard, or nothing came of it). */

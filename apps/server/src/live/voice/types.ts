@@ -35,6 +35,12 @@ export interface VoiceCueEvent {
 
 export type IgnoreReason =
   | "no_voiceprint"
+  /** None of the command's audio was retained (its stream went away). */
+  | "clip_missing"
+  /** Too little audio to check the voice, even padded. */
+  | "clip_too_short"
+  /** The own-voice check failed (speaker model or database error). */
+  | "check_error"
   | "not_own_voice"
   | "media_voice"
   | "rate_limited"
