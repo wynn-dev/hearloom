@@ -14,7 +14,8 @@ import { livePipeline } from "./live/host";
 import { stopNotifications } from "./notify/gateway";
 import { attachRealtimeServer, topicFor } from "./realtime";
 import { trackSocket, untrackSocket } from "./sessions";
-import { onDetection, recoverPending } from "./voice/commands";
+import { isStopping, shutdownDeadline, stopServer } from "./shutdown";
+import { onCue, onDetection, recoverPending } from "./voice/commands";
 import { onTeachHeard, replayTeach } from "./voice/teach";
 
 interface RealtimeSocketData {
@@ -33,6 +34,7 @@ const server = Bun.serve<SocketData>({
   port: env.PORT,
   idleTimeout: 60,
   async fetch(req, server) {
+    if (isStopping()) return new Response("shutting down", { status: 503 });
     const url = new URL(req.url);
     if (url.pathname === "/ingest" || url.pathname === "/realtime") {
       const session = await getSession(req.headers);
@@ -86,6 +88,10 @@ setFrameListener((meta, frames) => livePipeline.push(meta, frames));
 livePipeline.onVoiceCommand((d) => {
   void onDetection(d).catch((err) => console.error("[voice] command failed", err));
 });
+// The pendant buzzes as soon as the wake phrase is heard, and when nothing came of it.
+livePipeline.onVoiceCue((e) => {
+  void onCue(e).catch((err) => console.error("[voice] buzz failed", err));
+});
 // A restarted pipeline forgets teaching prompts: without them, read phrases would be commands.
 livePipeline.onReady(replayTeach);
 // Deliveries cut off by the last shutdown.
@@ -111,7 +117,8 @@ async function shutdown(signal: string) {
   if (stopping) return;
   stopping = true;
   console.log(`[hearloom] ${signal}: flushing audio and shutting down`);
-  await server.stop();
+  shutdownDeadline(30_000);
+  await stopServer(server);
   await flushAllWriters();
   await livePipeline.stop();
   await stopJobs();

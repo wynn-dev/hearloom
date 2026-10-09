@@ -90,7 +90,15 @@ let seq = 0;
 if (values.wav?.length) {
   // Clips separated by 0.8 s of quiet, as one continuous recording.
   const parts: Int16Array[] = [];
-  for (const path of values.wav) parts.push(await readWav(path), new Int16Array(12_800));
+  let clipAt = 0;
+  for (const path of values.wav) {
+    const clip = await readWav(path);
+    console.log(
+      `clip ${path}: ${(clipAt / 16).toFixed(0)}–${((clipAt + clip.length) / 16).toFixed(0)} ms`,
+    );
+    clipAt += clip.length + 12_800;
+    parts.push(clip, new Int16Array(12_800));
+  }
   const pcm = new Int16Array(parts.reduce((n, p) => n + p.length, 0));
   let o = 0;
   for (const p of parts) {
@@ -145,10 +153,10 @@ async function session(fromSeq: number, limit: number): Promise<number> {
         );
         const pending = frames.filter((f) => f.seq > msg.ackedSeq).slice(0, limit);
         if (values.realtime) {
-          // One batch per second of audio, like the phone.
+          // A batch every 300 ms, like the phone.
           void (async () => {
-            for (let i = 0; i < pending.length; i += 50) {
-              const batch = pending.slice(i, i + 50);
+            for (let i = 0; i < pending.length; i += 15) {
+              const batch = pending.slice(i, i + 15);
               const wait = batch[batch.length - 1]!.at - Date.now();
               if (wait > 0) await Bun.sleep(wait);
               ws.send(encodeAudioBatch(0, batch));
@@ -166,7 +174,8 @@ async function session(fromSeq: number, limit: number): Promise<number> {
       } else if (msg.t === "error") {
         reject(new Error(`${msg.code}: ${msg.message}`));
       } else {
-        console.log("server:", msg);
+        // When it arrived, in the recording's time (pendant buzzes: compare with the clip times).
+        console.log(`server (+${Date.now() - start} ms):`, msg);
       }
     };
     ws.onerror = (e) => reject(e);

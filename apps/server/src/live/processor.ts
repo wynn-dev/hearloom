@@ -132,6 +132,8 @@ export class StreamProcessor {
   private runSamples = 0;
   private lastFrameAt: number | null = null;
   lastActivity = Date.now();
+  /** When frames last arrived (wall clock; processing may lag behind). */
+  private framesArrivedAt = Date.now();
   // Sound tagging buffer for the current run.
   private tagBuf = new Float32Array(TAG_WINDOW_SAMPLES);
   private tagFill = 0;
@@ -145,6 +147,8 @@ export class StreamProcessor {
   private lastSpeechAt = 0;
   /** Audio time of the end of the latest speech (voice commands wait while the user talks on). */
   private lastSpeechAudioAt = 0;
+  /** Audio time of the end of the audio processed so far. */
+  private heardUntil = 0;
   private readonly voiceSource: AudioSource;
   /** Wall-clock spans of audio that arrived too late to stream (merged, recent only). */
   private backlogSpans: { from: number; to: number }[] = [];
@@ -162,11 +166,17 @@ export class StreamProcessor {
       streamId: stream.id,
       audio: (from, to) => this.history.slice(from, to),
       lastSpeechAt: () => this.lastSpeechAudioAt,
+      // No more audio coming (mic asleep, connection gone): quiet from here on.
+      heardUntil: () =>
+        this.lastFrameAt === null || Date.now() - this.framesArrivedAt > RUN_GAP_MS
+          ? Number.POSITIVE_INFINITY
+          : this.heardUntil,
     };
   }
 
   /** Process frames in order (calls are serialized). */
   push(frames: AudioFrame[]): Promise<void> {
+    this.framesArrivedAt = Date.now();
     this.queue = this.queue
       .then(() => this.process(frames))
       .catch((err) => this.deps.log(`process: ${err}`));
@@ -289,9 +299,16 @@ export class StreamProcessor {
 
     // Speech detection.
     const { segments, speaking } = this.vad!.accept(samples);
+    this.heardUntil = absAt + samples.length / 16;
     if (speaking) {
       this.lastSpeechAt = Date.now();
       this.lastSpeechAudioAt = absAt + samples.length / 16;
+    } else if (segments.length > 0) {
+      // Speech just stopped: the segment says exactly where. (`speaking` stays on for the VAD's
+      // minimum silence, 0.6 s, so the time above runs past the end of the words: a finished
+      // voice command would look continued and wait for the assembler's timeout.)
+      const last = segments.at(-1)!;
+      this.lastSpeechAudioAt = this.runStartAt + (last.start + last.samples.length) / 16;
     }
     if (fresh && this.deps.soniox) {
       if (speaking && !this.live && Date.now() >= this.sonioxRetryAt) this.openSoniox(absAt);
@@ -425,6 +442,11 @@ export class StreamProcessor {
         this.deps.log(`${message}; retrying in ${SONIOX_RETRY_MS / 1000} s`);
         this.sonioxRetryAt = Date.now() + SONIOX_RETRY_MS;
       },
+      // The wake phrase as soon as the recognizer has it (the pendant buzzes): not queued behind
+      // the utterances being saved.
+      this.deps.voice
+        ? (p) => void this.deps.voice!.partial(this.stream.userId, p, this.voiceSource)
+        : undefined,
     );
     this.live = session;
     const pre = this.history.slice(absAt - PRE_ROLL_MS, absAt);

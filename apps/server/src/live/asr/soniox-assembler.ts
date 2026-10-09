@@ -1,4 +1,4 @@
-import type { Utterance } from "./types";
+import type { PartialUtterance, Utterance } from "./types";
 
 /** One token from the Soniox real-time API. */
 export interface SonioxToken {
@@ -110,15 +110,59 @@ export class SonioxAssembler {
     return out;
   }
 
-  private splitsBefore(t: SonioxToken): boolean {
-    const prev = this.current[this.current.length - 1];
+  /**
+   * The utterance in progress after `push(tokens)`: its final tokens plus the non-final ones in
+   * `tokens` (Soniox sends the current guesses with every response). `processedMs`: how much of
+   * the session's audio the recognizer has processed (defaults to all that was sent). Null if
+   * there are no words.
+   */
+  partial(tokens: SonioxToken[], processedMs = this.clock.totalSentMs): PartialUtterance | null {
+    let toks = [...this.current];
+    for (const t of tokens) {
+      if (t.is_final || /^<\w+>$/.test(t.text)) continue;
+      if (CLOSING.test(t.text)) {
+        // As in push(): it belongs to the words before it.
+        const prev = toks.at(-1);
+        if (prev)
+          toks.push({ ...t, speaker: prev.speaker, start_ms: prev.end_ms, end_ms: prev.end_ms });
+        continue;
+      }
+      if (this.splitsBefore(t, toks)) toks = [];
+      toks.push(t);
+    }
+    const first = toks[0];
+    if (!first) return null;
+    const marks: PartialUtterance["tokens"] = [];
+    let raw = "";
+    for (const t of toks) {
+      raw += t.text;
+      marks.push({
+        offset: raw.length,
+        startAt: this.clock.toAbs(t.start_ms ?? t.end_ms ?? 0),
+        endAt: this.clock.toAbs(t.end_ms ?? t.start_ms ?? 0),
+      });
+    }
+    const lead = raw.length - raw.trimStart().length;
+    const text = raw.trim();
+    if (NO_WORDS.test(text)) return null;
+    return {
+      text,
+      startAt: this.clock.toAbs(first.start_ms ?? 0),
+      tokens: marks.map((m) => ({ ...m, offset: Math.max(0, m.offset - lead) })),
+      audioAt: this.clock.toAbs(Math.min(processedMs, this.clock.totalSentMs)),
+      speakerKey: first.speaker !== undefined ? `${this.speakerPrefix}${first.speaker}` : null,
+    };
+  }
+
+  private splitsBefore(t: SonioxToken, current = this.current): boolean {
+    const prev = current[current.length - 1];
     if (!prev) return false;
     if (t.speaker !== undefined && t.speaker !== prev.speaker) return true;
     if (t.start_ms === undefined || prev.end_ms === undefined) return false;
     const { clock } = this;
     if (clock.toAbs(t.start_ms) - clock.toAbs(prev.end_ms) > this.maxGapMs) return true;
     if (clock.spanAt(t.start_ms) !== clock.spanAt(prev.start_ms ?? prev.end_ms)) return true;
-    const first = this.current[0]!;
+    const first = current[0]!;
     return (
       t.text.startsWith(" ") &&
       clock.toAbs(t.start_ms) - clock.toAbs(first.start_ms ?? t.start_ms) > this.maxUtteranceMs

@@ -3,7 +3,8 @@
 Say **"Hey Hermes, remind me to call mom at six"** to the pendant. Hearloom spots the wake phrase in
 the live transcript, checks that it's **your own voice**, and sends a signed `voice.command` webhook
 to your agent. The agent does it and replies **on its own channel** (e.g. Hermes on Telegram), not
-through Hearloom. The pendant buzzes once when the agent has accepted the command.
+through Hearloom. The pendant taps once as soon as it hears "Hey Hermes", and again to say how the
+command went (see [Pendant feedback](#pendant-feedback)).
 
 Voice commands are the only thing Hearloom pushes to the agent; everything else is read over MCP
 (see [agent.md](agent.md)).
@@ -61,8 +62,9 @@ pendant ─▶ phone ─▶ server ─▶ live pipeline child                   
   - Spellings marked as false triggers are **blocked** from loose matching.
   - **Renaming the agent clears the learned and blocked spellings.**
 - **Command assembly** (`assembler.ts`):
-  - **One utterance:** sent as soon as the user stops talking. The assembler checks whether voice
-    activity shows speech after the utterance's end.
+  - **One utterance:** sent once 1.2 s of audio after it has been heard without speech (voice
+    activity; the end of speech comes from the finished VAD segment). A shorter pause ("call
+    mom … at five") is a continuation.
   - **"Hey Hermes." alone:** the next utterance from the same speaker within 8 s becomes the
     command. If nothing comes, the detection is stored as ignored with reason `no_command`.
   - **Still talking:** continuations from the same speaker are appended. Each must start within
@@ -120,15 +122,51 @@ pendant ─▶ phone ─▶ server ─▶ live pipeline child                   
   - A response of `{"status":"duplicate"}` counts as delivered.
   - `{"status":"ignored"}` means the route's `events` filter doesn't include `voice.command`, and
     counts as a failure.
-- **Feedback:**
-  - Accepted: one short pendant buzz.
-  - Failed: two short buzzes, plus a **passive** system notification ("Couldn't reach Hermes: the
-    webhook secret was rejected"). It deep-links to `/voice`.
+- **Feedback:** the "sent" or "not sent" buzz (see [Pendant feedback](#pendant-feedback)). Not
+  sent also posts a **passive** system notification ("Couldn't reach Hermes: the webhook secret
+  was rejected"). It deep-links to `/voice`.
 - **After a server restart,** commands still `pending` are delivered again if they're under 60 s
   old and the mode is still `on` (same id, so Hermes dedupes). Older ones are marked `expired`
   with reason `restart`; ones whose mode changed, with `mode_off`.
 
   Shadow mode never buzzes.
+
+### Pendant feedback
+
+Short pulses (100 ms), told apart by count and length:
+
+| You feel | Meaning | When |
+| --- | --- | --- |
+| · one tap | heard "Hey Hermes" | while you're still talking, typically under a second after the name |
+| · · two taps | the agent took the command | after delivery |
+| — one longer buzz (300 ms) | no command: nothing followed (8 s), someone else spoke, or it wasn't the wake phrase after all | when that's clear |
+| · · · three taps | not sent: rejected here (rate limit, TV voice, …) or the agent couldn't be reached | after the gate, or after the retries |
+
+- **On/off:** Voice page → **Buzz the pendant** (also in the app's Settings → "Buzz pendant for
+  voice commands"); on by default. It's separate from "Buzz pendant when urgent", which is for
+  notifications. Only in mode **On**.
+- **Every tap gets an outcome:** a wake phrase that was tapped is always followed by one of the
+  other three.
+- **The tap comes from the running transcript:** Soniox sends its current guesses with every
+  response (non-final tokens). As soon as the utterance in progress starts with the wake phrase,
+  the detector (`VoiceDetector.partial`) checks the audio so far is your voice (the same voiceprint
+  bar as a command) and taps. A name that's the last word so far must stay unchanged for 400 ms of
+  audio first ("Adri" could still become "Adrian").
+  - The tap is tied to the greeting's own time, so earlier words in the same breath ("I'm off.
+    Hey Adri, …") don't count. The same words heard by a second stream don't tap again.
+  - If the finished utterance has no wake phrase after all, or none arrives within 10 s of the
+    last guess, that's "no command".
+  - If the guesses never showed it, the finished utterance does (a second or two later).
+- **Delivery:** the live pipeline sends `voice_cue` (heard, no command, rejected) over IPC; the
+  server buzzes `haptic` messages down the phone's live socket (`commands.ts` `cue`). The phone
+  plays them as they come (no app update needed). Cues for one user play one after another,
+  with at least 600 ms of stillness between them.
+- **Known limits:**
+  - "Sent" comes after the agent answers, so with back-to-back commands it can land after the
+    next command's tap.
+  - With two streams hearing the same speech (rare), if the tapped stream mishears its own
+    finished utterance while the other gets it right, you feel heard, no command, sent. The server logs
+  `[voice] wake phrase heard (partial): buzz N ms after the name ended`.
 
 ### Teaching your voice
 
@@ -347,7 +385,10 @@ write-only: the API returns `agent.webhookSecretSet` and a short hint instead (s
   timeouts, continuations, speaker changes and caps.
 - `apps/server/src/live/voice/detector.test.ts`: the gates, shadow and off modes, duplicates, rate
   limits, near misses, teaching and self-test. Also: refusing other voices while teaching, the
-  voice check over each part's span only, the caps, and pruning.
+  voice check over each part's span only, the caps, and pruning. Pendant cues per outcome: heard
+  from the running transcript or the finished utterance (once), a name that may still grow, no
+  command (timeout, another speaker, a guess that didn't hold, an utterance that never finished),
+  rejected after the tap, and none with buzzes off, in shadow mode or while teaching.
 - `apps/server/src/live/voice/clip.test.ts`: the pendant codec round trip.
 - `apps/server/src/voice/deliver.test.ts`: the retry policy (2xx, 5xx then 2xx, 401, duplicate,
   ignored, expiry).
@@ -355,6 +396,7 @@ write-only: the API returns `agent.webhookSecretSet` and a short hint instead (s
   - signed delivery to a fake Hermes;
   - a retry reusing the same id;
   - the failure buzz and notification;
+  - the four buzz patterns, and none with voice buzzes off;
   - shadow and ignored rows;
   - the test command;
   - feedback learning and undo;
@@ -371,7 +413,6 @@ write-only: the API returns `agent.webhookSecretSet` and a short hint instead (s
 
 ## Later
 
-- Wake detection on non-final tokens, plus Soniox `finalize` (about 1 s faster), and a "listening"
-  buzz.
+- Soniox `finalize` right after a bare wake phrase (about 1 s faster to the command).
 - A second, on-device keyword spotter (sherpa-onnx KWS) for names Soniox keeps mishearing.
 - A `report_voice_command` MCP tool, so the console can show "done".

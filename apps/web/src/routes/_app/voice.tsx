@@ -24,7 +24,7 @@ import { Button } from "../../components/ui/button";
 import { Card, CardBody, CardHeader, PageHeader } from "../../components/ui/card";
 import { Field, Input } from "../../components/ui/input";
 import { Dot, EmptyState, ErrorNotice, LoadingRows } from "../../components/ui/misc";
-import { SettingRow } from "../../components/ui/switch";
+import { SettingRow, Switch } from "../../components/ui/switch";
 import { useToast } from "../../components/ui/toast";
 import { cn } from "../../lib/cn";
 import { useTimeZone } from "../../lib/me";
@@ -196,6 +196,18 @@ function ManageCard({ voice, status }: { voice: VoiceSettings; status: VoiceStat
           </span>
         </div>
         <NamesRow voice={voice} />
+        <SettingRow
+          title="Buzz the pendant"
+          htmlFor="voice-haptics"
+          description="One tap when it hears “hey …”. Then: two taps, sent; one longer buzz, no command came; three taps, not sent."
+        >
+          <Switch
+            id="voice-haptics"
+            checked={voice.haptics}
+            disabled={save.isPending}
+            onChange={(haptics) => save.mutate({ voice: { haptics } })}
+          />
+        </SettingRow>
         <AliasesRow voice={voice} />
         <TryPhrase voice={voice} />
       </CardBody>

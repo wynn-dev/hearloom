@@ -8,6 +8,29 @@ export interface VoiceConfig {
   wake: WakeConfig;
   /** Voiceprint similarity a command needs to count as the user's own voice. */
   minScore: number;
+  /** Buzz the pendant when the wake phrase is heard, and with how the command went. */
+  haptics: boolean;
+}
+
+/**
+ * What the pendant tells the user about a voice command:
+ * - heard: the wake phrase was heard (in their voice);
+ * - sent: the agent took the command;
+ * - no_command: nothing came after the wake phrase (or it turned out not to be one);
+ * - failed: the command wasn't sent (rejected here, or the agent couldn't be reached).
+ */
+export type VoiceCue = "heard" | "sent" | "no_command" | "failed";
+
+/** A cue from the live pipeline (`sent`, and failed deliveries, come from the server). */
+export interface VoiceCueEvent {
+  userId: string;
+  cue: Exclude<VoiceCue, "sent">;
+  /** heard: audio time the name ended (for latency logs). */
+  nameEndAt: number | null;
+  /** heard: from the recognizer's running transcript, or from a finished utterance. */
+  via: "partial" | "final" | null;
+  /** When the pipeline decided (wall clock). */
+  at: number;
 }
 
 export type IgnoreReason =

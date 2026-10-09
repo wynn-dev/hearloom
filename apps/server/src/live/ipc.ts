@@ -1,6 +1,6 @@
 import type { Activity } from "./episodes";
 import type { StreamInfo } from "./processor";
-import type { TeachHeard, TeachPrompt, VoiceDetection } from "./voice/types";
+import type { TeachHeard, TeachPrompt, VoiceCueEvent, VoiceDetection } from "./voice/types";
 
 export type HostMessage =
   | { t: "frames"; stream: StreamInfo; frames: { seq: number; at: number; data: Uint8Array }[] }
@@ -32,6 +32,8 @@ export type ChildMessage =
   | { t: "enrolled"; requestId: string; ok: true; sampleSeconds: number }
   | { t: "enrolled"; requestId: string; ok: false; error: string }
   | { t: "voice_command"; detection: VoiceDetection }
+  /** Buzz the pendant about a voice command (the wake phrase was heard, or nothing came of it). */
+  | { t: "voice_cue"; cue: VoiceCueEvent }
   | { t: "teach_heard"; userId: string; result: TeachHeard }
   | { t: "learned"; requestId: string; ok: true; embedding: number[]; seconds: number }
   | { t: "learned"; requestId: string; ok: false; error: string };

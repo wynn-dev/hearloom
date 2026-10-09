@@ -39,7 +39,7 @@ describe("CommandAssembler", () => {
   test("non-wake speech is ignored", () => {
     const a = new CommandAssembler();
     const step = a.push(utt("I asked Hermes yesterday.", 0, 2), cfg, quiet(2), at(3.5));
-    expect(step).toEqual({ done: [], abandoned: [] });
+    expect(step).toEqual({ done: [], abandoned: [], woke: null });
     expect(a.busy).toBe(false);
   });
 
@@ -121,5 +121,18 @@ describe("CommandAssembler", () => {
     a.push(utt("Hey Hermes, first", 0, 1), cfg, quiet(2), at(2));
     const step = a.push(utt("Hey Hermes, second", 1.5, 2.5), cfg, quiet(2.5), at(4));
     expect(step.done.map((c) => c.command)).toEqual(["first", "second"]);
+  });
+});
+
+describe("CommandAssembler: quiet after a command", () => {
+  test("a short pause is a continuation; quiet completes it", () => {
+    const a = new CommandAssembler();
+    // Recognized 0.9 s after it ended: not yet 1.2 s of quiet.
+    const first = a.push(utt("Hey Hermes, call mom", 0, 2), cfg, quiet(2), at(2.9), at(2.9));
+    expect(first.done).toEqual([]);
+    const second = a.push(utt("at five.", 3, 3.8), cfg, quiet(3.8), at(4.7), at(4.7));
+    expect(second.done).toEqual([]);
+    const done = a.tick(quiet(3.8), at(5.1), at(5.1));
+    expect(done.done[0]!.command).toBe("call mom at five.");
   });
 });

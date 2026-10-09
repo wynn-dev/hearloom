@@ -28,6 +28,8 @@ export interface WakeMatch {
   score: number;
   /** Character offset of the greeting in the text. */
   start: number;
+  /** Character offset just after the name. */
+  end: number;
 }
 
 const GREETINGS = new Set([
@@ -222,6 +224,7 @@ export function matchWake(text: string, cfg: WakeConfig): WakeMatch | null {
         command: cleanCommand(text.slice(best.end)),
         score: best.score,
         start: tokens[i]!.start,
+        end: best.end,
       };
     }
   }
@@ -257,6 +260,7 @@ export function nearWake(text: string, cfg: WakeConfig): WakeMatch | null {
         command: cleanCommand(text.slice(best.end)),
         score: Math.round(best.score * 100) / 100,
         start: tokens[i]!.start,
+        end: best.end,
       };
     }
   }

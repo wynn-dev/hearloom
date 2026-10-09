@@ -5,11 +5,12 @@ import type { StreamMeta } from "../ingest/stream-writer";
 import { invalidate } from "../realtime";
 import type { ChildMessage, HostMessage } from "./ipc";
 import { resetActivity, setActivity } from "./state";
-import type { TeachHeard, TeachPrompt, VoiceDetection } from "./voice/types";
+import type { TeachHeard, TeachPrompt, VoiceCueEvent, VoiceDetection } from "./voice/types";
 
 type BlockClosedHandler = (userId: string, blockId: string) => void;
 type VoiceCommandHandler = (detection: VoiceDetection) => void;
 type TeachHeardHandler = (userId: string, result: TeachHeard) => void;
+type VoiceCueHandler = (cue: VoiceCueEvent) => void;
 
 /**
  * Supervises the live pipeline child process: forwards stored frames, applies state updates,
@@ -24,6 +25,7 @@ export class LivePipelineHost {
   private readonly onBlock = new Set<BlockClosedHandler>();
   private readonly onVoice = new Set<VoiceCommandHandler>();
   private readonly onTeach = new Set<TeachHeardHandler>();
+  private readonly onCue = new Set<VoiceCueHandler>();
   private readonly onReadyFns = new Set<() => void>();
   private pending = new Map<
     string,
@@ -46,6 +48,11 @@ export class LivePipelineHost {
   /** A wake phrase was heard (deliverable, shadow, or ignored with a reason). */
   onVoiceCommand(fn: VoiceCommandHandler): void {
     this.onVoice.add(fn);
+  }
+
+  /** Buzz the pendant about a voice command: the wake phrase was heard, or nothing came of it. */
+  onVoiceCue(fn: VoiceCueHandler): void {
+    this.onCue.add(fn);
   }
 
   /**
@@ -233,6 +240,9 @@ export class LivePipelineHost {
       }
       case "voice_command":
         for (const fn of this.onVoice) fn(msg.detection);
+        return;
+      case "voice_cue":
+        for (const fn of this.onCue) fn(msg.cue);
         return;
       case "teach_heard":
         for (const fn of this.onTeach) fn(msg.userId, msg.result);

@@ -1,11 +1,20 @@
 import { alignTeach, matchWake, nearWake, textSimilarity } from "@hearloom/shared";
+import type { PartialUtterance } from "../asr/types";
 import {
   type AssembledCommand,
   CommandAssembler,
   DEFAULT_LIMITS,
   type HeardUtterance,
+  type Step,
 } from "./assembler";
-import type { IgnoreReason, TeachHeard, TeachPrompt, VoiceConfig, VoiceDetection } from "./types";
+import type {
+  IgnoreReason,
+  TeachHeard,
+  TeachPrompt,
+  VoiceConfig,
+  VoiceCueEvent,
+  VoiceDetection,
+} from "./types";
 
 /** Default own-voice threshold before the user's samples say otherwise. */
 export const DEFAULT_MIN_SCORE = 0.65;
@@ -31,6 +40,8 @@ export interface AudioSource {
   audio(from: number, to: number): Float32Array | null;
   /** Audio time of the latest speech heard on this stream. */
   lastSpeechAt(): number;
+  /** Audio time of the end of the audio heard so far. */
+  heardUntil(): number;
 }
 
 export interface VoiceScore {
@@ -49,6 +60,8 @@ export interface DetectorDeps {
   /** A voiceprint embedding of the audio (stored by the host, with the sample it came from). */
   embed(audio: Float32Array): Promise<number[]>;
   detected(d: VoiceDetection): void;
+  /** Buzz the pendant (the wake phrase was heard, or how the command went). */
+  cue(e: VoiceCueEvent): void;
   taught(userId: string, r: TeachHeard): void;
   log(message: string): void;
   now?(): number;
@@ -125,6 +138,52 @@ function partsAudio(source: AudioSource | null, parts: HeardUtterance[]): Float3
   return out;
 }
 
+/**
+ * The running transcript's last word is only taken as the whole name once this much audio after
+ * it has been recognized without the word growing ("Adri" → "Adrian").
+ */
+export const NAME_SETTLE_MS = 400;
+/**
+ * A wake phrase buzzed from the running transcript must be in a finished utterance this long after
+ * the recognizer last showed its utterance. (Wall clock: a live pipeline more than 10 s behind
+ * would say "no command" for a command it then sends. Accepted: it's far behind by then anyway.)
+ */
+export const CUE_CONFIRM_MS = 10_000;
+/**
+ * A cue still waiting for its command after this long went wrong somewhere (the longest command
+ * takes 8 s to start, 30 s to say and 4 s to wait for): tell it failed.
+ */
+const CUE_MAX_MS = 60_000;
+/**
+ * Wake phrases already told are remembered this long, so the same words heard by another stream
+ * (or slot) don't buzz again.
+ */
+const TOLD_MS = 45_000; // longer than a stream can lag (30 s of audio still counts as fresh)
+/** The own-voice check of a running transcript uses at most this much audio after the name. */
+const PARTIAL_AUDIO_AFTER_MS = 1_500;
+
+/** A wake phrase the user was told (by a buzz) was heard: its outcome is told too. */
+interface Cue {
+  /** The stream it was heard on: only that stream's own utterances can say it wasn't one. */
+  streamId: string;
+  /** Audio time the greeting started, and the name ended. */
+  startAt: number;
+  nameEndAt: number;
+  /** When it was buzzed (wall clock). */
+  at: number;
+  /** When the recognizer last showed its utterance, still unfinished (wall clock). */
+  seenAt: number;
+  /** A finished utterance has the wake phrase (else it was the running transcript's guess). */
+  confirmed: boolean;
+}
+
+type Span = { startAt: number; nameEndAt: number };
+
+/** Does an utterance contain the cued wake phrase? (Touching isn't overlapping.) */
+function covers(u: { startAt: number; endAt: number }, c: Span): boolean {
+  return u.startAt < c.nameEndAt && u.endAt > c.startAt;
+}
+
 interface UserState {
   assembler: CommandAssembler;
   source: AudioSource | null;
@@ -133,6 +192,16 @@ interface UserState {
   teachGraceUntil: number;
   /** Accepted (sent or shadow) commands, newest last, for dedupe and rate limits. */
   recent: { spokenAt: number; acceptedAt: number; command: string }[];
+  /** Buzzed wake phrases whose outcome hasn't been told yet. */
+  cues: Cue[];
+  /** Wake phrases whose outcome was told, recently (`at`: when). */
+  told: (Span & { at: number })[];
+  /** Per stream: start of the running utterance last decided on (it isn't checked again). */
+  partialDecided: Map<string, number>;
+  /** Per stream: the newest running transcript, waiting to be checked. */
+  partials: Map<string, { p: PartialUtterance; source: AudioSource }>;
+  /** Serializes this user's utterances and running transcripts. */
+  chain: Promise<void>;
 }
 
 /** Forget idle users after this long (their processors are gone too). */
@@ -162,6 +231,11 @@ export class VoiceDetector {
         teach: null,
         teachGraceUntil: 0,
         recent: [],
+        cues: [],
+        told: [],
+        partialDecided: new Map(),
+        partials: new Map(),
+        chain: Promise.resolve(),
       };
       this.users.set(userId, s);
     }
@@ -179,12 +253,15 @@ export class VoiceDetector {
     const now = this.now();
     for (const [userId, s] of this.users) {
       if (s.source?.streamId === streamId) s.source = null;
+      s.partials.delete(streamId);
+      s.partialDecided.delete(streamId);
       s.recent = s.recent.filter((r) => now - r.acceptedAt < USER_IDLE_MS);
       if (
         !s.source &&
         !s.teach &&
         !s.assembler.busy &&
         s.recent.length === 0 &&
+        s.cues.length === 0 &&
         now >= s.teachGraceUntil
       )
         this.users.delete(userId);
@@ -200,8 +277,133 @@ export class VoiceDetector {
    * A fresh final utterance. `audio` is its audio when the processor has it; `isSelf` comes from
    * its own embedding (null when it was too short).
    */
-  async heard(userId: string, u: HeardUtterance, source: AudioSource): Promise<void> {
+  heard(userId: string, u: HeardUtterance, source: AudioSource): Promise<void> {
     const s = this.user(userId);
+    const run = s.chain.then(() => this.heardNow(userId, s, u, source));
+    s.chain = run.catch((err) => this.deps.log(`voice: ${err}`));
+    return run;
+  }
+
+  /**
+   * The utterance being spoken, as the recognizer has it so far: buzz as soon as it starts with
+   * the wake phrase in the user's own voice, rather than when the utterance is finished (a second
+   * or two later). Only the newest one waiting is checked.
+   */
+  partial(userId: string, p: PartialUtterance, source: AudioSource): Promise<void> {
+    const s = this.user(userId);
+    const now = this.now();
+    // Its utterance is still being recognized.
+    for (const c of s.cues)
+      if (!c.confirmed && covers({ startAt: p.startAt, endAt: p.audioAt }, c)) c.seenAt = now;
+    const key = source.streamId;
+    const queued = s.partials.has(key);
+    s.partials.set(key, { p, source });
+    if (queued) return s.chain;
+    s.chain = s.chain
+      .then(() => {
+        const next = s.partials.get(key);
+        s.partials.delete(key);
+        return next ? this.checkPartial(userId, s, next.p, next.source) : undefined;
+      })
+      .catch((err) => this.deps.log(`voice: ${err}`));
+    return s.chain;
+  }
+
+  private async checkPartial(
+    userId: string,
+    s: UserState,
+    p: PartialUtterance,
+    source: AudioSource,
+  ): Promise<void> {
+    const key = source.streamId;
+    if (s.teach || p.startAt < s.teachGraceUntil || p.startAt <= (s.partialDecided.get(key) ?? 0))
+      return;
+    // One wake phrase at a time; one in a finished utterance is handled there.
+    if (s.cues.length > 0 || s.assembler.busy) return;
+    const cfg = await this.deps.config(userId);
+    if (cfg.mode !== "on" || !cfg.haptics) return;
+    const wake = matchWake(p.text, cfg.wake);
+    if (!wake) return;
+    // The wake phrase's own times: the running utterance may still start with earlier words that
+    // the recognizer hasn't split off yet ("I'm off. Hey Adri, …").
+    const greeting = p.tokens.find((t) => t.offset > wake.start);
+    if (!greeting) return;
+    const span = {
+      startAt: greeting.startAt,
+      nameEndAt: p.tokens.find((t) => t.offset >= wake.end)?.endAt ?? p.audioAt,
+    };
+    // The name is the last word so far: it may still be the start of a longer one.
+    if (!/\S/.test(p.text.slice(wake.end)) && p.audioAt - span.nameEndAt < NAME_SETTLE_MS) return;
+    const audio = source.audio(
+      span.startAt - PAD_MS,
+      Math.min(
+        Math.max(span.nameEndAt + PAD_MS, p.audioAt),
+        span.nameEndAt + PARTIAL_AUDIO_AFTER_MS,
+      ),
+    );
+    if (!audio || audio.length < MIN_VERIFY_SAMPLES) return; // more audio with the next one
+    s.partialDecided.set(key, p.startAt);
+    // Another stream heard (and buzzed) the same words.
+    if (this.told(s, span)) return;
+    if (!(await this.ownVoice(userId, cfg, audio))) return;
+    this.cueHeard(userId, s, { ...span, streamId: key, confirmed: false }, "partial");
+  }
+
+  /** Was the user already buzzed about the wake phrase in this span (still open, or recently)? */
+  private told(s: UserState, span: Span): boolean {
+    const u = { startAt: span.startAt, endAt: span.nameEndAt };
+    const now = this.now();
+    return (
+      s.cues.some((c) => covers(u, c)) || s.told.some((c) => now - c.at < TOLD_MS && covers(u, c))
+    );
+  }
+
+  private async ownVoice(userId: string, cfg: VoiceConfig, audio: Float32Array): Promise<boolean> {
+    if (audio.length < MIN_VERIFY_SAMPLES) return false;
+    const score = await this.deps.score(userId, audio);
+    return (
+      !!score && score.self !== null && score.self >= cfg.minScore && score.other <= score.self
+    );
+  }
+
+  private cueHeard(
+    userId: string,
+    s: UserState,
+    c: Omit<Cue, "at" | "seenAt">,
+    via: "partial" | "final",
+  ): void {
+    // Broken timings: a span nothing could ever be matched against.
+    if (c.nameEndAt <= c.startAt) return;
+    const at = this.now();
+    s.cues.push({ ...c, at, seenAt: at });
+    this.deps.log(
+      `voice: wake phrase heard (${via}) ${at - c.nameEndAt} ms after the ${via === "partial" ? "name" : "utterance"} ended`,
+    );
+    this.deps.cue({ userId, cue: "heard", nameEndAt: c.nameEndAt, via, at });
+  }
+
+  /** Tell the outcome of the cued wake phrase in this utterance, if there is one. */
+  private cueOutcome(
+    userId: string,
+    s: UserState,
+    u: { startAt: number; endAt: number },
+    cue: "no_command" | "failed" | null,
+  ): void {
+    const i = s.cues.findIndex((c) => covers(u, c));
+    if (i < 0) return;
+    const [c] = s.cues.splice(i, 1);
+    const now = this.now();
+    s.told = s.told.filter((t) => now - t.at < TOLD_MS);
+    s.told.push({ startAt: c!.startAt, nameEndAt: c!.nameEndAt, at: now });
+    if (cue) this.deps.cue({ userId, cue, nameEndAt: null, via: null, at: now });
+  }
+
+  private async heardNow(
+    userId: string,
+    s: UserState,
+    u: HeardUtterance,
+    source: AudioSource,
+  ): Promise<void> {
     s.source = source;
     if (s.teach) {
       const audio = source.audio(u.startAt - PAD_MS, u.endAt + PAD_MS);
@@ -212,28 +414,48 @@ export class VoiceDetector {
     if (u.startAt < s.teachGraceUntil) return;
     const cfg = await this.deps.config(userId);
     if (cfg.mode === "off") return;
-    const step = s.assembler.push(u, cfg.wake, source.lastSpeechAt(), this.now());
-    await this.handle(userId, s, cfg, step);
+    const step = s.assembler.push(
+      u,
+      cfg.wake,
+      source.lastSpeechAt(),
+      this.now(),
+      source.heardUntil(),
+    );
+    await this.handle(userId, s, cfg, step, u);
     if (step.done.length === 0 && !s.assembler.busy && u.isSelf) this.nearMiss(userId, u, cfg);
   }
 
   /** Once a second: finish commands whose continuation didn't come. */
   async tick(): Promise<void> {
+    const now = this.now();
     for (const [userId, s] of this.users) {
-      if (!s.assembler.busy || !s.source) continue;
-      const step = s.assembler.tick(s.source.lastSpeechAt(), this.now());
+      // A wake phrase in the running transcript that no finished utterance had.
+      for (const c of [...s.cues]) {
+        const span = { startAt: c.startAt, endAt: c.nameEndAt };
+        if (!c.confirmed && now - c.seenAt > CUE_CONFIRM_MS)
+          this.cueOutcome(userId, s, span, "no_command");
+        else if (now - c.at > CUE_MAX_MS) this.cueOutcome(userId, s, span, "failed");
+      }
+      if (!s.assembler.busy) continue;
+      // Without a stream (it ended), nothing more is coming: finish now.
+      const step = s.source
+        ? s.assembler.tick(s.source.lastSpeechAt(), now, s.source.heardUntil())
+        : s.assembler.tick(0, now);
       if (step.done.length === 0 && step.abandoned.length === 0) continue;
       await this.handle(userId, s, await this.deps.config(userId), step);
     }
   }
 
+  /** `u`: the utterance that made this step (none when time passed). */
   private async handle(
     userId: string,
     s: UserState,
     cfg: VoiceConfig,
-    step: ReturnType<CommandAssembler["push"]>,
+    step: Step,
+    u?: HeardUtterance,
   ): Promise<void> {
     for (const a of step.abandoned) {
+      this.cueOutcome(userId, s, a.utterance, "no_command");
       this.report(
         userId,
         cfg,
@@ -250,15 +472,67 @@ export class VoiceDetector {
         null,
       );
     }
-    for (const c of step.done) await this.gate(userId, s, cfg, c);
+    const woke = step.woke?.utterance;
+    // Earlier commands this utterance completed are told before its own wake phrase.
+    for (const c of step.done) if (c.parts[0] !== woke) await this.finish(userId, s, cfg, c);
+    if (u && cfg.mode === "on" && cfg.haptics) await this.cueWake(userId, s, cfg, step, u);
+    for (const c of step.done) if (c.parts[0] === woke) await this.finish(userId, s, cfg, c);
   }
 
-  private async gate(
+  private async finish(
     userId: string,
     s: UserState,
     cfg: VoiceConfig,
     c: AssembledCommand,
   ): Promise<void> {
+    const sent = await this.gate(userId, s, cfg, c);
+    // Sent: the server tells how the delivery went.
+    this.cueOutcome(userId, s, c.parts[0]!, sent === false ? "failed" : null);
+  }
+
+  /**
+   * A finished utterance: confirm the wake phrase buzzed from the running transcript, or tell
+   * that it wasn't one after all; buzz for a wake phrase the running transcript didn't show.
+   */
+  private async cueWake(
+    userId: string,
+    s: UserState,
+    cfg: VoiceConfig,
+    step: Step,
+    u: HeardUtterance,
+  ): Promise<void> {
+    const woke = step.woke?.utterance;
+    for (const c of s.cues.filter((c) => !c.confirmed && covers(u, c))) {
+      if (woke === u) c.confirmed = true;
+      // Another stream may hear the same words differently: only the cue's own stream says it
+      // wasn't the wake phrase (otherwise the confirm timeout does).
+      else if (u.streamId === c.streamId)
+        this.cueOutcome(userId, s, { startAt: c.startAt, endAt: c.nameEndAt }, "no_command");
+    }
+    if (!woke || this.told(s, { startAt: woke.startAt, nameEndAt: woke.endAt })) return;
+    // With the command in it: the audio its own-voice gate checks. A bare wake phrase: padded
+    // (the gate checks it together with the command, later).
+    const audio = step.woke!.wake.command
+      ? partsAudio(s.source, [woke])
+      : (s.source?.audio(woke.startAt - PAD_MS, woke.endAt + PAD_MS) ?? null);
+    if (!audio || !(await this.ownVoice(userId, cfg, audio))) return;
+    this.cueHeard(
+      userId,
+      s,
+      { startAt: woke.startAt, nameEndAt: woke.endAt, streamId: woke.streamId, confirmed: true },
+      "final",
+    );
+  }
+
+  /** Report a command: true if accepted, false if ignored, null if it was a duplicate. */
+  private async gate(
+    userId: string,
+    s: UserState,
+    cfg: VoiceConfig,
+    c: AssembledCommand,
+  ): Promise<boolean | null> {
+    // Voice commands were turned off meanwhile: not sent.
+    if (cfg.mode === "off") return false;
     const now = this.now();
     // Own voice, over all parts together (a short "Hey Hermes" has no embedding of its own).
     const audio = partsAudio(s.source, c.parts);
@@ -266,11 +540,11 @@ export class VoiceDetector {
     if (audio && audio.length >= MIN_VERIFY_SAMPLES) score = await this.deps.score(userId, audio);
     if (!score || score.self === null) {
       this.report(userId, cfg, c, "ignored", "no_voiceprint", null);
-      return;
+      return false;
     }
     if (score.self < cfg.minScore || score.other > score.self) {
       this.report(userId, cfg, c, "ignored", "not_own_voice", score.self);
-      return;
+      return false;
     }
     const first = c.parts[0]!;
     if (
@@ -278,7 +552,7 @@ export class VoiceDetector {
       (await this.deps.isMediaVoice(userId, first.chainId, first.speakerKey))
     ) {
       this.report(userId, cfg, c, "ignored", "media_voice", score.self);
-      return;
+      return false;
     }
     // Two streams (or slots) heard the same thing: keep one, silently.
     if (
@@ -288,7 +562,7 @@ export class VoiceDetector {
           textSimilarity(r.command, c.command) >= DUPLICATE_SIMILARITY,
       )
     )
-      return;
+      return null;
     s.recent = s.recent.filter((r) => now - r.acceptedAt < 3600_000);
     const last = s.recent.at(-1);
     const lastMinute = s.recent.filter((r) => now - r.acceptedAt < 60_000).length;
@@ -298,10 +572,11 @@ export class VoiceDetector {
       s.recent.length >= MAX_PER_HOUR
     ) {
       this.report(userId, cfg, c, "ignored", "rate_limited", score.self);
-      return;
+      return false;
     }
     s.recent.push({ spokenAt: c.spokenAt, acceptedAt: now, command: c.command });
     this.report(userId, cfg, c, cfg.mode === "on" ? "pending" : "shadow", null, score.self);
+    return true;
   }
 
   /** The user said a greeting and something name-like that didn't match: maybe a missed command. */

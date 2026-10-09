@@ -1,5 +1,5 @@
 import { SessionClock, SonioxAssembler, type SonioxToken } from "./soniox-assembler";
-import type { Utterance } from "./types";
+import type { PartialUtterance, Utterance } from "./types";
 
 const URL = "wss://stt-rt.soniox.com/transcribe-websocket";
 
@@ -35,6 +35,8 @@ export class SonioxSession {
     opts: SonioxOptions,
     private readonly onUtterance: (u: Utterance) => void,
     private readonly onError: (message: string) => void,
+    /** The utterance in progress, after every response that changes it (voice commands). */
+    private readonly onPartial?: (p: PartialUtterance) => void,
   ) {
     // Speaker labels restart at 1 in every session: make them unique.
     const speakerPrefix = `soniox:${crypto.randomUUID().slice(0, 8)}:`;
@@ -138,6 +140,8 @@ export class SonioxSession {
   private onMessage(text: string): void {
     let msg: {
       tokens?: SonioxToken[];
+      /** How much of the audio the recognizer has processed. */
+      total_audio_proc_ms?: number;
       finished?: boolean;
       error_code?: number;
       error_message?: string;
@@ -151,7 +155,14 @@ export class SonioxSession {
       this.fail(`soniox ${msg.error_code}: ${msg.error_message ?? ""}`);
       return;
     }
-    if (msg.tokens?.length) for (const u of this.assembler.push(msg.tokens)) this.onUtterance(u);
+    if (msg.tokens) {
+      for (const u of this.assembler.push(msg.tokens)) this.onUtterance(u);
+      // Also without new tokens: more audio after the last word can settle it as the name.
+      if (this.onPartial) {
+        const p = this.assembler.partial(msg.tokens, msg.total_audio_proc_ms);
+        if (p) this.onPartial(p);
+      }
+    }
     if (msg.finished) {
       this.finished = true;
       const u = this.assembler.flush();

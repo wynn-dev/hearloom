@@ -42,6 +42,11 @@ export interface AssemblerLimits {
   waitMs: number;
   /** Speech this long after the last part's end means a continuation is still being transcribed. */
   speechAfterMs: number;
+  /**
+   * A command is complete once this much audio after its end was heard without speech: a short
+   * pause ("call mom … at five") is a continuation, not the end.
+   */
+  quietMs: number;
   maxMs: number;
   maxParts: number;
   maxChars: number;
@@ -52,6 +57,7 @@ export const DEFAULT_LIMITS: AssemblerLimits = {
   gapMs: 2_500,
   waitMs: 4_000,
   speechAfterMs: 400,
+  quietMs: 1_200,
   maxMs: 30_000,
   maxParts: 3,
   maxChars: 500,
@@ -65,6 +71,8 @@ type State =
 export interface Step {
   done: AssembledCommand[];
   abandoned: Abandoned[];
+  /** A wake phrase that starts a command (it may be done already, or still waiting for one). */
+  woke: { wake: WakeMatch; utterance: HeardUtterance } | null;
 }
 
 /**
@@ -77,7 +85,8 @@ export interface Step {
  *   closely are appended (bounded by `maxMs`, `maxParts`, `maxChars`).
  *
  * `lastSpeechAt` is the audio time of the latest speech the voice activity detector heard: speech
- * after a part's end means its continuation hasn't come out of the recognizer yet.
+ * after a part's end means its continuation hasn't come out of the recognizer yet. `heardUntil` is
+ * the audio time heard so far (Infinity: don't wait for quiet).
  */
 export class CommandAssembler {
   private state: State = { t: "idle" };
@@ -88,8 +97,14 @@ export class CommandAssembler {
     return this.state.t !== "idle";
   }
 
-  push(u: HeardUtterance, cfg: WakeConfig, lastSpeechAt: number, now: number): Step {
-    const step: Step = { done: [], abandoned: [] };
+  push(
+    u: HeardUtterance,
+    cfg: WakeConfig,
+    lastSpeechAt: number,
+    now: number,
+    heardUntil = Number.POSITIVE_INFINITY,
+  ): Step {
+    const step: Step = { done: [], abandoned: [], woke: null };
     const s = this.state;
     if (s.t === "armed") {
       if (now <= s.until && this.sameSpeaker(s.utterance, u) && !matchWake(u.text, cfg)) {
@@ -100,7 +115,7 @@ export class CommandAssembler {
           commandParts: [u.text.trim()],
           at: now,
         };
-        this.maybeComplete(lastSpeechAt, step);
+        this.maybeComplete(lastSpeechAt, heardUntil, step);
         return step;
       }
       step.abandoned.push({ wake: s.wake, utterance: s.utterance, reason: "no_command" });
@@ -110,25 +125,25 @@ export class CommandAssembler {
         s.parts.push(u);
         s.commandParts.push(u.text.trim());
         s.at = now;
-        this.maybeComplete(lastSpeechAt, step);
+        this.maybeComplete(lastSpeechAt, heardUntil, step);
         return step;
       }
       this.complete(step);
     }
-    this.start(u, cfg, lastSpeechAt, now, step);
+    this.start(u, cfg, lastSpeechAt, heardUntil, now, step);
     return step;
   }
 
   /** Time passes: give up on a missing command or continuation. */
-  tick(lastSpeechAt: number, now: number): Step {
-    const step: Step = { done: [], abandoned: [] };
+  tick(lastSpeechAt: number, now: number, heardUntil = Number.POSITIVE_INFINITY): Step {
+    const step: Step = { done: [], abandoned: [], woke: null };
     const s = this.state;
     if (s.t === "armed" && now > s.until) {
       step.abandoned.push({ wake: s.wake, utterance: s.utterance, reason: "no_command" });
       this.state = { t: "idle" };
     } else if (s.t === "pending") {
       if (now - s.at >= this.limits.waitMs) this.complete(step);
-      else this.maybeComplete(lastSpeechAt, step);
+      else this.maybeComplete(lastSpeechAt, heardUntil, step);
     }
     return step;
   }
@@ -137,17 +152,19 @@ export class CommandAssembler {
     u: HeardUtterance,
     cfg: WakeConfig,
     lastSpeechAt: number,
+    heardUntil: number,
     now: number,
     step: Step,
   ): void {
     const wake = matchWake(u.text, cfg);
     if (!wake) return;
+    step.woke = { wake, utterance: u };
     if (!wake.command) {
       this.state = { t: "armed", wake, utterance: u, until: now + this.limits.armMs };
       return;
     }
     this.state = { t: "pending", wake, parts: [u], commandParts: [wake.command], at: now };
-    this.maybeComplete(lastSpeechAt, step);
+    this.maybeComplete(lastSpeechAt, heardUntil, step);
   }
 
   private continues(s: Extract<State, { t: "pending" }>, u: HeardUtterance): boolean {
@@ -167,15 +184,21 @@ export class CommandAssembler {
     return a.chainId === b.chainId && a.speakerKey !== null && a.speakerKey === b.speakerKey;
   }
 
-  /** Complete unless there's speech after the last part (its continuation is on the way). */
-  private maybeComplete(lastSpeechAt: number, step: Step): void {
+  /**
+   * Complete once the audio after the last part is quiet for long enough (else a continuation may
+   * be on the way).
+   */
+  private maybeComplete(lastSpeechAt: number, heardUntil: number, step: Step): void {
     const s = this.state;
     if (s.t !== "pending") return;
     const last = s.parts.at(-1)!;
     const full =
       s.parts.length >= this.limits.maxParts ||
       last.endAt - s.parts[0]!.startAt >= this.limits.maxMs;
-    if (full || lastSpeechAt <= last.endAt + this.limits.speechAfterMs) this.complete(step);
+    const quiet =
+      lastSpeechAt <= last.endAt + this.limits.speechAfterMs &&
+      heardUntil >= last.endAt + this.limits.quietMs;
+    if (full || quiet) this.complete(step);
   }
 
   private complete(step: Step): void {
