@@ -160,6 +160,7 @@ export default function Timeline() {
         </Pressable>
       </View>
       <SectionList
+        contentInsetAdjustmentBehavior="automatic"
         sections={sections}
         keyExtractor={(it) =>
           `${it.kind}-${"u" in it ? it.u.id : "s" in it ? it.s.id : "b" in it ? it.b.id : "c" in it ? it.c.id : it.e.id}`
