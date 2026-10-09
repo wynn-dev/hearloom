@@ -30,3 +30,7 @@ enum Log {
 }
 
 @inline(__always) func nowMs() -> Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
+
+/// Monotonic ms for measuring durations: never steps with the wall clock, and keeps counting while the
+/// device sleeps (CLOCK_MONOTONIC on Darwin), unlike DispatchTime's uptime.
+@inline(__always) func monotonicMs() -> Int64 { Int64(clock_gettime_nsec_np(CLOCK_MONOTONIC) / 1_000_000) }

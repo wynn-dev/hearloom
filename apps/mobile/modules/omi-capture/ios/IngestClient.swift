@@ -21,7 +21,12 @@ final class IngestClient: NSObject, URLSessionWebSocketDelegate {
   private var backoff: TimeInterval = 1
   private var retry: DispatchWorkItem?
   private var pingTimer: DispatchSourceTimer?
+  private var replyDeadline = ReplyDeadline()
+  private static let pingInterval: TimeInterval = 20
   private let pathMonitor = NWPathMonitor()
+  private var pathKey: String?
+  /// When the current socket opened (monotonic ms).
+  private var openedAt: Int64 = 0
   private var endpoint: (url: URL, token: String)?
   private(set) var state: State = .idle
   private(set) var lastError: String?
@@ -39,10 +44,34 @@ final class IngestClient: NSObject, URLSessionWebSocketDelegate {
     config.timeoutIntervalForRequest = 30
     session = URLSession(configuration: config, delegate: self, delegateQueue: ops)
     pathMonitor.pathUpdateHandler = { [weak self] path in
-      guard let self, path.status == .satisfied, self.state == .waiting else { return }
-      self.queue.async { self.connectNow() }
+      guard let self else { return }
+      self.queue.async { self.pathChanged(path) }
     }
     pathMonitor.start(queue: queue)
+  }
+
+  /// The network came back: connect now instead of after the backoff. The route changed while connected
+  /// (the preferred interface: Wi-Fi <-> cellular, VPN up/down): the socket is likely dead without anyone
+  /// saying so, so drop it rather than wait for the ping deadline. (Only the preferred interface counts:
+  /// a secondary one coming and going doesn't move the socket, and a VPN that stays up carries it
+  /// across Wi-Fi/cellular changes.) See `NetworkChange` for when that reconnect skips the backoff.
+  private func pathChanged(_ path: NWPath) {
+    let key = "\(path.status)|" + (path.availableInterfaces.first.map { "\($0.type):\($0.name)" } ?? "none")
+    let changed = pathKey != nil && pathKey != key
+    pathKey = key
+    switch state {
+    case .waiting:
+      if path.status == .satisfied { connectNow() }
+    case .open, .connecting:
+      guard changed else { return }
+      let openFor = state == .open ? monotonicMs() - openedAt : nil
+      let atOnce = path.status == .satisfied && NetworkChange.reconnectAtOnce(openForMs: openFor)
+      Log.info("ingest: network changed; reconnecting\(atOnce ? "" : " after backoff")")
+      failed("network changed") // schedules a retry with backoff
+      if atOnce { connectNow() }
+    case .idle:
+      break
+    }
   }
 
   func start(url: URL, token: String) {
@@ -147,6 +176,7 @@ final class IngestClient: NSObject, URLSessionWebSocketDelegate {
       guard let self else { return }
       self.queue.async {
         guard gen == self.generation else { return }
+        if case .success = result { self.replyDeadline.heard() }
         switch result {
         case .success(.string(let text)):
           if let data = text.data(using: .utf8),
@@ -195,17 +225,55 @@ final class IngestClient: NSObject, URLSessionWebSocketDelegate {
   }
 
   private func startPings(_ gen: Int) {
+    replyDeadline = ReplyDeadline()
     let timer = DispatchSource.makeTimerSource(queue: queue)
-    timer.schedule(deadline: .now() + 20, repeating: 20)
-    timer.setEventHandler { [weak self] in
-      guard let self, gen == self.generation else { return }
-      self.task?.sendPing { error in
-        if let error { self.queue.async { if gen == self.generation { self.failed("ping: \(error.localizedDescription)") } } }
-      }
-    }
+    timer.schedule(deadline: .now() + IngestClient.pingInterval, repeating: IngestClient.pingInterval)
+    timer.setEventHandler { [weak self] in self?.ping(gen) }
     timer.resume()
     pingTimer = timer
   }
+
+  /// A WebSocket ping plus a JSON `ping` (the server answers both); any reply, or any other message,
+  /// within the deadline proves the socket alive. Without one it's half-dead: reconnect.
+  private func ping(_ gen: Int) {
+    guard gen == generation, state == .open, let task else { return }
+    replyDeadline.pinged(at: IngestClient.clock())
+    task.sendPing { [weak self] error in
+      guard let self else { return }
+      self.queue.async {
+        guard gen == self.generation else { return }
+        if let error {
+          self.failed("ping: \(error.localizedDescription)")
+        } else {
+          self.replyDeadline.heard()
+        }
+      }
+    }
+    send(json: ["t": "ping", "at": nowMs()])
+    queue.asyncAfter(deadline: .now() + replyDeadline.timeout) { [weak self] in self?.checkReply(gen) }
+  }
+
+  /// Runs `timeout` after a ping. A `dead` verdict is confirmed one queue hop later, so replies that
+  /// were already delivered to this queue (e.g. while the app was suspended) are seen first.
+  private func checkReply(_ gen: Int, confirming: Bool = false) {
+    guard gen == generation, state == .open else { return }
+    switch replyDeadline.verdict(at: IngestClient.clock()) {
+    case .alive:
+      break
+    case .dead where !confirming:
+      queue.async { [weak self] in self?.checkReply(gen, confirming: true) }
+    case .dead:
+      Log.warn("ingest: no reply within \(Int(replyDeadline.timeout)) s of a ping; reconnecting")
+      failed("no reply to ping")
+    case .stale:
+      replyDeadline.heard()
+      ping(gen)
+    }
+  }
+
+  /// Monotonic seconds that keep counting while the device sleeps, so a check delayed by sleep or
+  /// suspension shows up as late (stale) instead of looking like an on-time deadline.
+  private static func clock() -> Double { Double(monotonicMs()) / 1000 }
 
   // MARK: URLSessionWebSocketDelegate (delivered on `queue`)
 
@@ -213,6 +281,7 @@ final class IngestClient: NSObject, URLSessionWebSocketDelegate {
     guard webSocketTask === task else { return }
     state = .open
     lastError = nil
+    openedAt = monotonicMs()
     startPings(generation)
     delegate?.ingestOpened(self)
   }

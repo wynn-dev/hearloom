@@ -17,8 +17,16 @@ final class CaptureEngine: NSObject {
   private lazy var ble: OmiBLE = {
     let b = OmiBLE(queue: queue)
     b.delegate = self
+    b.hapticPendantChanged = { [weak self] pendant in self?.haptics.setPendant(pendant) }
     return b
   }()
+  /// Server-sent buzz patterns (`haptic_seq`), timed on their own queue.
+  private lazy var haptics = HapticPlayer { [weak self] outcome in
+    self?.queue.async { self?.hapticFinished(outcome) }
+  }
+  private var buttonFilter = ButtonFilter()
+  /// Protocol features this app supports, announced in `presence` and `hello`.
+  private static let features = ["haptic_seq"]
   private lazy var uplink: IngestClient = {
     let c = IngestClient(queue: queue)
     c.delegate = self
@@ -56,6 +64,8 @@ final class CaptureEngine: NSObject {
     var acked: Int64 = -1
     var sent: Int64 = -1
     var byeSent = false
+    /// Paces resends from the ack (`seq_gap`, `store_failed`) while the ack doesn't move.
+    var resend = ResendThrottle()
   }
   private var slots: [Int: Slot] = [:]
   private var nextSlot = 0
@@ -287,14 +297,15 @@ final class CaptureEngine: NSObject {
   }
 
   private func handleButton(_ code: Int) {
-    let action: String
-    switch code {
-    case 1: action = settings.button.tap
-    case 2: action = settings.button.doubleTap
-    case 5: action = settings.button.hold
-    default: return
-    }
+    guard [1, 2, 5].contains(code) else { return }
     sendIfOpen(["t": "event", "kind": "button", "value": code, "at": nowMs()])
+    let action: String
+    switch buttonFilter.gesture(code: code, at: monotonicMs()) {
+    case .tap: action = settings.button.tap
+    case .doubleTap: action = settings.button.doubleTap
+    case .hold: action = settings.button.hold
+    case nil: return // the release that ends a tap
+    }
     switch action {
     case "bookmark":
       enqueueEvent(["t": "event", "kind": "bookmark", "at": nowMs()])
@@ -332,7 +343,7 @@ final class CaptureEngine: NSObject {
     nextSlot = (nextSlot + 1) % 256
     slots[slot] = Slot(streamId: streamId)
     var hello: [String: Any] = [
-      "t": "hello", "v": 1, "slot": slot, "phoneId": phoneId,
+      "t": "hello", "v": 1, "slot": slot, "phoneId": phoneId, "features": CaptureEngine.features,
       "stream": [
         "id": meta.id, "codec": meta.codec, "sampleRate": meta.sampleRate, "frameMs": meta.frameMs,
         "startedAt": meta.startedAt,
@@ -356,25 +367,34 @@ final class CaptureEngine: NSObject {
     pumpTimer = nil
   }
 
-  /// Send journaled frames the server hasn't acknowledged, within an in-flight window.
+  /// Send journaled frames the server hasn't acknowledged, within an in-flight window: the live stream
+  /// first, backlog only once it's caught up (see `UploadPlanner`).
   private func pump() {
     guard uplink.state == .open else { return }
-    for (slotId, var slot) in slots where slot.welcomed && !slot.byeSent {
+    let lanes = slots.compactMap { slotId, slot -> UploadPlanner.Lane? in
+      guard slot.welcomed, !slot.byeSent else { return nil }
+      return UploadPlanner.Lane(
+        slot: slotId, live: slot.streamId == activeStreamId, sent: slot.sent, acked: slot.acked,
+        next: journal.nextSeq(slot.streamId), startedAt: journal.meta(slot.streamId)?.startedAt ?? 0)
+    }
+    let plan = UploadPlanner.plan(
+      lanes, pendingSends: uplink.pendingSends, batchFrames: CaptureEngine.batchFrames,
+      maxInflight: CaptureEngine.maxInflightFrames)
+    for batch in plan {
+      guard var slot = slots[batch.slot], slot.sent + 1 == batch.from else { continue }
+      let frames = journal.frames(slot.streamId, from: batch.from, max: batch.count)
+      guard let last = frames.last else { continue }
+      uplink.send(data: BatchCodec.encode(slot: batch.slot, frames: frames))
+      slot.sent = last.seq
+      slots[batch.slot] = slot
+    }
+    for (slotId, slot) in slots where slot.welcomed && !slot.byeSent {
       let id = slot.streamId
-      let next = journal.nextSeq(id)
-      while slot.sent + 1 < next, slot.sent - slot.acked < CaptureEngine.maxInflightFrames, uplink.pendingSends < 64 {
-        let frames = journal.frames(id, from: slot.sent + 1, max: CaptureEngine.batchFrames)
-        guard let last = frames.last else { break }
-        uplink.send(data: BatchCodec.encode(slot: slotId, frames: frames))
-        slot.sent = last.seq
-      }
-      if let meta = journal.meta(id), let endedAt = meta.endedAt, slot.acked >= next - 1 {
-        uplink.send(json: ["t": "bye", "slot": slotId, "endedAt": endedAt])
-        slot.byeSent = true
-        journal.remove(id)
-        Log.info("engine: stream \(id) fully uploaded")
-      }
-      slots[slotId] = slot.byeSent ? nil : slot
+      guard let endedAt = journal.meta(id)?.endedAt, slot.acked >= journal.nextSeq(id) - 1 else { continue }
+      uplink.send(json: ["t": "bye", "slot": slotId, "endedAt": endedAt])
+      slots[slotId] = nil
+      journal.remove(id)
+      Log.info("engine: stream \(id) fully uploaded")
     }
   }
 
@@ -734,11 +754,10 @@ extension CaptureEngine: IngestClientDelegate {
     lastServerError = nil
     lastServerErrorCode = nil
     guard let phoneId = settings.phoneId else { return }
-    // Register for notifications/config first, then upload backlog streams and the live one.
-    uplink.send(json: ["t": "presence", "v": 1, "phoneId": phoneId])
-    var ids = journal.streamIds.filter { $0 != activeStreamId }
-    if let active = activeStreamId { ids.append(active) }
-    for id in ids { bind(id) }
+    // Register for notifications/config first, then bind the live stream before the backlog ones.
+    uplink.send(json: ["t": "presence", "v": 1, "phoneId": phoneId, "features": CaptureEngine.features])
+    if let active = activeStreamId { bind(active) }
+    for id in journal.streamIds where id != activeStreamId { bind(id) }
     startPump()
     emitStatus()
   }
@@ -796,8 +815,16 @@ extension CaptureEngine: IngestClientDelegate {
       }
       uplink.send(json: ["t": "notify_ack", "id": id])
     case "haptic":
-      let p = msg["pattern"] as? String
-      ble.haptic(p == "short" ? 1 : p == "long" ? 3 : 2)
+      ble.haptic(HapticSequence.pattern(msg["pattern"] as? String))
+    case "haptic_seq":
+      guard let seq = HapticSequence(message: msg, receivedAt: HapticPlayer.now()) else {
+        return Log.warn("ingest: malformed haptic_seq")
+      }
+      // No pendant to wait for: say so now rather than at the TTL.
+      guard settings.captureEnabled, settings.pairedPeripheralId != nil else {
+        return hapticFinished(.noPendant(seq.id))
+      }
+      haptics.play(seq)
     case "config":
       if let config = msg["config"] as? [String: Any] { applyConfig(config) }
       emitStatus()
@@ -812,6 +839,20 @@ extension CaptureEngine: IngestClientDelegate {
     }
   }
 
+  private func hapticFinished(_ outcome: HapticOutcome) {
+    if !outcome.played { Log.info("haptics: \(outcome.id) not played (\(outcome.reason ?? "?"))") }
+    // Through the outbox, so an ack due while the socket reconnects isn't lost.
+    enqueueEvent(outcome.json)
+  }
+
+  /// Send a slot's frames again from the server's ack (it refused or couldn't store what followed).
+  private func resendFromAck(_ slotId: Int) {
+    guard var s = slots[slotId] else { return }
+    s.sent = s.acked
+    slots[slotId] = s
+    pump()
+  }
+
   private func serverError(code: String, message: String, fatal: Bool, slot slotId: Int?) {
     if fatal {
       // unknown_phone (the app re-registers it), protocol_version (needs an app update): a quick
@@ -822,20 +863,26 @@ extension CaptureEngine: IngestClientDelegate {
       return
     }
     guard let slotId, let slot = slots[slotId] else { return }
-    switch code {
-    case "seq_gap":
-      // An earlier batch never arrived: resend from the server's ack.
+    switch SlotError.action(for: code) {
+    case .resendFromAck:
       var s = slot
-      s.sent = s.acked
+      guard let wait = s.resend.request(acked: s.acked, now: monotonicMs()) else { return } // scheduled
       slots[slotId] = s
-      pump()
-    case "codec", "stream":
+      if wait == 0 { return resendFromAck(slotId) }
+      let conn = connection
+      let streamId = slot.streamId
+      queue.asyncAfter(deadline: .now() + .milliseconds(Int(wait))) { [weak self] in
+        guard let self, conn == self.connection, var s = self.slots[slotId], s.streamId == streamId else { return }
+        let go = s.resend.due(acked: s.acked)
+        self.slots[slotId] = s
+        if go { self.resendFromAck(slotId) }
+      }
+    case .refuseStream:
       lastServerError = "\(code): \(message)"
       lastServerErrorCode = code
       rejectedStreams.insert(slot.streamId)
       slots[slotId] = nil
-    default:
-      // The server lost track of this slot (e.g. a failed hello): start over.
+    case .reconnect:
       uplink.reset("server error \(code)")
     }
   }
