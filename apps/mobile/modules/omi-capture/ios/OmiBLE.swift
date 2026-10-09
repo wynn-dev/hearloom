@@ -167,6 +167,7 @@ final class OmiBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     if id == nil {
       if let p = peripheral { central.cancelPeripheralConnection(p) }
       peripheral = nil
+      updateHapticWriter()
       state = central.state == .poweredOn ? .idle : state
       return
     }
@@ -204,6 +205,28 @@ final class OmiBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
   func haptic(_ pattern: UInt8) {
     guard let p = peripheral, let c = characteristics[OmiUUID.haptic] else { return }
     p.writeValue(Data([pattern]), for: c, type: .withResponse)
+  }
+
+  /// Told (on `queue`) whenever the pendant can or can't buzz anymore. The writer is called from the
+  /// haptic player's own queue, so it captures only CoreBluetooth objects, none of this class's state.
+  var hapticWriterChanged: ((HapticPlayer.Writer?) -> Void)?
+  private var hapticWritable = false
+
+  private func updateHapticWriter() {
+    guard announcedReady || discovering, let p = peripheral, p.state == .connected,
+          let c = characteristics[OmiUUID.haptic] else {
+      if hapticWritable {
+        hapticWritable = false
+        hapticWriterChanged?(nil)
+      }
+      return
+    }
+    hapticWritable = true
+    hapticWriterChanged? { [weak p] pattern in
+      guard let p, p.state == .connected else { return false }
+      p.writeValue(Data([pattern]), for: c, type: .withResponse)
+      return true
+    }
   }
 
   // MARK: connection
@@ -244,6 +267,7 @@ final class OmiBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     pendingReads = []
     readyDeadlineSet = false
     discovering = true
+    updateHapticWriter()
     round += 1
     assembler.reset()
     assembler.fragmentationPossible = p.maximumWriteValueLength(for: .withoutResponse) < 163
@@ -270,6 +294,7 @@ final class OmiBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     announcedReady = false
     audioSubscribed = false
     discovering = false
+    updateHapticWriter()
     delegate?.bleDisconnected(self, peripheralId: p.identifier.uuidString, error: error)
   }
 
@@ -371,6 +396,7 @@ final class OmiBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     if service.uuid == OmiUUID.audioService, let audio = characteristics[OmiUUID.audioData] {
       peripheral.setNotifyValue(true, for: audio)
     }
+    if service.uuid == OmiUUID.hapticService { updateHapticWriter() }
   }
 
   func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor c: CBCharacteristic, error: Error?) {

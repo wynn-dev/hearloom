@@ -60,6 +60,9 @@ final class FrameJournal {
   }
 
   private var streams: [String: Open] = [:]
+  /// The last closed segment read from disk, decoded. A backlog upload reads each segment in many
+  /// batches; without this every batch re-read and re-decoded the whole file on the capture queue.
+  private var decoded: (id: String, firstSeq: Int64, frames: [Frame])?
 
   init(root: URL) {
     self.root = root
@@ -96,8 +99,8 @@ final class FrameJournal {
     for (firstSeq, url) in segments(id) {
       let next = firstSeq + FrameJournal.framesPerSegment
       if next <= from { continue }
-      guard let data = try? Data(contentsOf: url) else { continue }
-      for f in FrameJournal.decode(data) where f.seq >= from {
+      let open = firstSeq == s.segmentFirstSeq && s.handle != nil
+      for f in segmentFrames(id, firstSeq: firstSeq, url: url, open: open) where f.seq >= from {
         out.append(f)
         if out.count >= max { return out }
       }
@@ -165,7 +168,10 @@ final class FrameJournal {
     for (i, (firstSeq, url)) in segs.enumerated() {
       let lastSeq = i + 1 < segs.count ? segs[i + 1].0 - 1 : s.nextSeq - 1
       let isOpenSegment = firstSeq == s.segmentFirstSeq && s.handle != nil
-      if lastSeq <= through && !isOpenSegment { try? fm.removeItem(at: url) }
+      if lastSeq <= through && !isOpenSegment {
+        try? fm.removeItem(at: url)
+        if decoded?.id == id && decoded?.firstSeq == firstSeq { decoded = nil }
+      }
     }
     s.acked = max(s.acked, through)
     s.tail.removeAll { $0.seq <= through }
@@ -188,6 +194,7 @@ final class FrameJournal {
   func remove(_ id: String) {
     if let s = streams[id] { try? s.handle?.close() }
     streams[id] = nil
+    if decoded?.id == id { decoded = nil }
     let dir = root.appendingPathComponent(id, isDirectory: true)
     let raw = dir.appendingPathComponent("raw.bin")
     if fm.fileExists(atPath: raw.path) {
@@ -229,6 +236,15 @@ final class FrameJournal {
   private func segmentURL(_ id: String, firstSeq: Int64) -> URL {
     root.appendingPathComponent(id, isDirectory: true)
       .appendingPathComponent(String(format: "%020lld.seg", firstSeq))
+  }
+
+  /// A segment's frames; closed segments never change, so the last one read stays decoded.
+  private func segmentFrames(_ id: String, firstSeq: Int64, url: URL, open: Bool) -> [Frame] {
+    if !open, let d = decoded, d.id == id, d.firstSeq == firstSeq { return d.frames }
+    guard let data = try? Data(contentsOf: url) else { return [] }
+    let frames = FrameJournal.decode(data)
+    if !open { decoded = (id, firstSeq, frames) }
+    return frames
   }
 
   private func segments(_ id: String) -> [(Int64, URL)] {
