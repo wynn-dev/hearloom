@@ -26,7 +26,17 @@ export async function getSettings(userId: string): Promise<Settings> {
 }
 
 export async function updateSettings(userId: string, patch: SettingsPatch): Promise<Settings> {
-  const next = mergeSettings(await getSettings(userId), patch);
+  const prev = await getSettings(userId);
+  let next = mergeSettings(prev, patch);
+  // Another agent (or the same one set up again) may not report its answers: until it does, the
+  // second buzz doesn't wait for them.
+  if (
+    next.agent.voiceReplies &&
+    patch.agent?.voiceReplies === undefined &&
+    (next.agent.webhookUrl !== prev.agent.webhookUrl ||
+      next.agent.webhookSecret !== prev.agent.webhookSecret)
+  )
+    next = { ...next, agent: { ...next.agent, voiceReplies: false } };
   await db
     .insert(schema.userSettings)
     .values({ userId, settings: next })

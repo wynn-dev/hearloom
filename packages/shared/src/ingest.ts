@@ -108,14 +108,24 @@ export type WearableInfo = z.infer<typeof wearableInfoSchema>;
 
 const unixMs = z.number().int().nonnegative();
 
+/** Phone feature: plays a whole `haptic_seq` cue itself and acks it with `haptic_ack`. */
+export const FEATURE_HAPTIC_SEQ = "haptic_seq";
+
+/**
+ * What the app build can do (`presence` and `hello`), e.g. `["haptic_seq"]`; old builds send none.
+ * A malformed list counts as none rather than refusing the phone.
+ */
+const features = z.array(z.string().max(32)).max(16).optional().catch(undefined);
+
 export const clientMessageSchema = z.discriminatedUnion("t", [
   /** Register the phone on this socket (notifications, config) without opening a stream. */
-  z.object({ t: z.literal("presence"), v: z.number().int(), phoneId: z.uuid() }),
+  z.object({ t: z.literal("presence"), v: z.number().int(), phoneId: z.uuid(), features }),
   z.object({
     t: z.literal("hello"),
     v: z.number().int(),
     slot: z.number().int().min(0).max(255),
     phoneId: z.uuid(),
+    features,
     stream: z.object({
       id: z.uuid(),
       codec: z.number().int(),
@@ -141,9 +151,20 @@ export const clientMessageSchema = z.discriminatedUnion("t", [
     at: unixMs,
   }),
   z.object({ t: z.literal("notify_ack"), id: z.uuid() }),
+  /** The phone played a `haptic_seq` on the pendant, or why not. */
+  z.object({
+    t: z.literal("haptic_ack"),
+    id: z.uuid(),
+    played: z.boolean(),
+    reason: z.enum(["no_pendant", "expired"]).optional().catch(undefined),
+  }),
   z.object({ t: z.literal("ping"), at: unixMs }),
 ]);
 export type ClientMessage = z.infer<typeof clientMessageSchema>;
+
+const CLIENT_TYPES: ReadonlySet<string> = new Set(
+  clientMessageSchema.options.map((o) => o.shape.t.value),
+);
 
 export type HapticPattern = "short" | "medium" | "long";
 
@@ -176,10 +197,29 @@ export type ServerMessage =
       haptic?: HapticPattern;
     }
   | { t: "haptic"; pattern: HapticPattern }
+  /**
+   * A whole buzz cue, played by the phone (only to builds with the `haptic_seq` feature): 1..5
+   * pulses, each `intervalMs` (100..2000) after the previous one started. Not played later than
+   * `ttlMs` (≤ 60 000) after receipt. The phone answers `haptic_ack`.
+   */
+  | {
+      t: "haptic_seq";
+      id: string;
+      pulses: HapticPattern[];
+      intervalMs: number;
+      ttlMs: number;
+    }
   /** `slot` is set when the error concerns one stream; the rest of the socket keeps working. */
   | { t: "error"; code: string; message: string; fatal?: boolean; slot?: number }
   | { t: "pong"; at: number; serverTime: number };
 
-export function parseClientMessage(text: string): ClientMessage {
-  return clientMessageSchema.parse(JSON.parse(text));
+/**
+ * A control message from the phone. null: a message type this server doesn't know (from a newer
+ * app build), to be ignored. A known type with bad fields throws.
+ */
+export function parseClientMessage(text: string): ClientMessage | null {
+  const raw: unknown = JSON.parse(text);
+  const t = (raw as { t?: unknown } | null)?.t;
+  if (typeof t === "string" && !CLIENT_TYPES.has(t)) return null;
+  return clientMessageSchema.parse(raw);
 }

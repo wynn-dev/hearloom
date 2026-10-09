@@ -1,12 +1,13 @@
 import { join } from "node:path";
 import { RPCHandler } from "@orpc/server/fetch";
 import { Hono } from "hono";
+import { z } from "zod";
 import { verifyToken } from "../agent/tokens";
 import { auth, hasSimpleBody, trustedOwnOrigin } from "../auth";
 import { env } from "../env";
 import { handleMcp } from "../mcp/server";
 import { router } from "../rpc/router";
-import { commandReplied } from "../voice/commands";
+import { commandReplied, commandStarted } from "../voice/commands";
 import { serveChunk } from "./media";
 
 const rpc = new RPCHandler(router);
@@ -45,12 +46,32 @@ app.all("/rpc/*", async (c) => {
 // MCP endpoint for agents (Hermes etc.), authenticated with an agent token (console → Agent).
 app.on(["GET", "POST", "DELETE"], "/mcp", (c) => handleMcp(c.req.raw));
 
-// The agent finished answering a voice command (Hermes hook, hermes/hooks/): the pendant's "sent"
-// buzz. Authenticated with an agent token, like /mcp.
+// The agent's run on a voice command ended (Hermes hook, hermes/hooks/): `{"outcome": "answered"}`
+// (the default: hooks from before outcomes send `{}`) or `"failed"`, the pendant's two taps or
+// three. Authenticated with an agent token, like /mcp.
+const replyBody = z.object({
+  outcome: z.enum(["answered", "failed"]).default("answered"),
+  // Only logged: cut, never refused (the hook doesn't retry a 400).
+  reason: z
+    .string()
+    .nullish()
+    .transform((r) => r?.slice(0, 200) ?? null),
+});
 app.post("/api/voice/commands/:id/replied", async (c) => {
   const token = await verifyToken(c.req.header("authorization") ?? null);
   if (!token) return c.json({ error: "unauthorized" }, 401);
-  const status = await commandReplied(token.userId, c.req.param("id"));
+  const body = replyBody.safeParse(await c.req.json().catch(() => ({})));
+  if (!body.success) return c.json({ error: "bad request" }, 400);
+  const { outcome, reason } = body.data;
+  const status = await commandReplied(token.userId, c.req.param("id"), outcome, reason);
+  return c.json({ status }, status === "not_found" ? 404 : 200);
+});
+
+// The agent's run on a voice command started (Hermes hook, `agent:start`): its answer may take longer.
+app.post("/api/voice/commands/:id/started", async (c) => {
+  const token = await verifyToken(c.req.header("authorization") ?? null);
+  if (!token) return c.json({ error: "unauthorized" }, 401);
+  const status = await commandStarted(token.userId, c.req.param("id"));
   return c.json({ status }, status === "not_found" ? 404 : 200);
 });
 

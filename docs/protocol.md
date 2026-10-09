@@ -59,13 +59,19 @@ JSON control messages, client → server:
 
 | `t` | Fields | Meaning |
 |---|---|---|
-| `presence` | `v, phoneId` | register the phone on this socket (notifications/config) — sent first on every connect |
-| `hello` | `v, slot, phoneId, stream{id, codec, sampleRate, frameMs, startedAt}, wearable?` | bind a stream to a slot |
+| `presence` | `v, phoneId, features?` | register the phone on this socket (notifications/config) — sent first on every connect |
+| `hello` | `v, slot, phoneId, stream{id, codec, sampleRate, frameMs, startedAt}, wearable?, features?` | bind a stream to a slot |
 | `bye` | `slot, endedAt` | user stopped capture on purpose (no "disconnected" alerts) |
 | `wearable` | `wearable, connected, at` | pendant connected/disconnected, device info |
 | `event` | `kind, value?, peripheralId?, at` | `battery`, `charging`, `button`, `bookmark`, `muted`, `unmuted` (older apps also send `ack_nudge`, ignored) |
 | `notify_ack` | `id` | the phone displayed a notification received over the socket |
+| `haptic_ack` | `id, played, reason?` | the phone played a `haptic_seq` on the pendant, or didn't (`reason`: `no_pendant`, `expired`) |
 | `ping` | `at` | keepalive / clock check |
+
+`features` (≤ 16 strings of ≤ 32 characters) says what the app build can do; a socket's newest
+`presence`/`hello` with the field counts. `haptic_seq`: the phone plays `haptic_seq` messages.
+Builds that don't send it get only `haptic`. A malformed list counts as none. The server ignores
+message types it doesn't know, so newer builds can talk to older servers.
 
 Server → client:
 
@@ -77,6 +83,7 @@ Server → client:
 | `config` | `config` | settings changed (button mapping, pendant haptics) |
 | `notify` | `id, title, body, category, deepLink?, interruptionLevel, haptic?` | show now; reply with `notify_ack` |
 | `haptic` | `pattern` | buzz the pendant |
+| `haptic_seq` | `id (uuid), pulses[1..5], intervalMs (100..2000), ttlMs (≤ 60000)` | buzz a whole cue: each pulse `intervalMs` after the previous one started; don't play it later than `ttlMs` after receipt; answer `haptic_ack`. Only to sockets with the `haptic_seq` feature |
 | `error` | `code, message, fatal?, slot?` | `fatal` (`unknown_phone`, `protocol_version`) closes the socket and the phone retries only after a long pause; with `slot` it concerns one stream (`seq_gap`, `store_failed`: resend from the ack; `codec`, `stream`: stream refused) and the socket stays open |
 | `pong` | `at, serverTime` | |
 

@@ -1,10 +1,16 @@
-"""python3 -m unittest discover -s hermes/hooks/hearloom-voice-reply (stdlib only)."""
+"""python3 -m unittest discover -s hermes/hooks/hearloom-voice-reply (stdlib only).
+
+With HERMES_AGENT_DIR set to a Hermes checkout (and its Python), the failure texts are also checked
+against Hermes's own catalog in every language.
+"""
 
 import asyncio
 import base64
 import json
 import os
+import sys
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -18,10 +24,13 @@ def chat_id(profile, route, delivery_id):
     return "webhook:v2:" + base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
 
+def voice_ctx(**over):
+    return {"platform": "webhook", "chat_id": chat_id("default", "hearloom-voice", CMD), **over}
+
+
 class CommandId(unittest.TestCase):
     def test_voice_route(self):
-        ctx = {"platform": "webhook", "chat_id": chat_id("default", "hearloom-voice", CMD)}
-        self.assertEqual(handler.command_id(ctx), CMD)
+        self.assertEqual(handler.command_id(voice_ctx()), CMD)
 
     def test_other_routes_platforms_and_ids(self):
         for ctx in [
@@ -34,19 +43,110 @@ class CommandId(unittest.TestCase):
             self.assertIsNone(handler.command_id(ctx), ctx)
 
 
-class Handle(unittest.TestCase):
+class Outcome(unittest.TestCase):
+    def test_answers(self):
+        self.assertEqual(
+            handler.run_outcome({"response": "It'll be sunny tomorrow."}, None), ("answered", None)
+        )
+        # A run that did its job, as the gateway has it.
+        ok = {"final_response": "Done.", "api_calls": 3, "completed": True}
+        self.assertEqual(handler.run_outcome({"response": "Done."}, ok), ("answered", None))
+
+    def test_failed_and_interrupted_runs(self):
+        failed = {"failed": True, "failure_reason": "server_error"}
+        self.assertEqual(
+            handler.run_outcome({"response": "OpenRouter returned a server error"}, failed),
+            ("failed", "server_error"),
+        )
+        stopped = {"interrupted": True, "api_calls": 2}
+        self.assertEqual(handler.run_outcome({"response": "partial"}, stopped), ("failed", "interrupted"))
+
+    def test_no_answer(self):
+        self.assertEqual(handler.run_outcome({"response": "  "}, None), ("failed", "no response"))
+
+    def test_error_texts_without_the_result(self):
+        for text in [
+            "⚠️ Something went wrong and I couldn't finish this reply. Use /retry to try again.",
+            "⚠️ I had to stop before finishing: processing incomplete. Use /retry to try again.",
+            "⚠️ The model didn't produce a reply this time, even after retries. Send `continue`.",
+            "Operation interrupted: waiting for model response (12.0s elapsed).",
+            "API call failed after 3 retries: HTTP 502",
+        ]:
+            self.assertEqual(handler.run_outcome({"response": text}, None)[0], "failed", text)
+        # Quoting part of a word is not an error reply.
+        self.assertEqual(
+            handler.run_outcome({"response": "Something went well today."}, None)[0], "answered"
+        )
+
+    def test_with_the_result_only_hermes_replacement_texts_at_the_start_count(self):
+        ok = {"final_response": "x", "api_calls": 2, "completed": True}
+        for text in [
+            "HTTP 503 means the service is unavailable; try again in a minute.",
+            "API call failed? No: the API is up, your key works.",
+            "Operation interrupted is what the log says when you press stop.",
+            "Hermes said: ⚠️ Something went wrong and I couldn't finish this reply.",
+        ]:
+            self.assertEqual(handler.run_outcome({"response": text}, ok), ("answered", None), text)
+        # Hermes's own replacement for a missing answer (the run itself didn't fail).
+        no_text = "⚠️ Processing completed but no response was generated. This may be a transient error."
+        self.assertEqual(handler.run_outcome({"response": no_text}, ok)[0], "failed")
+        # Without the result, the provider-error shape counts.
+        self.assertEqual(
+            handler.run_outcome({"response": "HTTP 503 means the service is unavailable"}, None)[0],
+            "failed",
+        )
+        # Not anchored at the start: an answer quoting the error.
+        self.assertEqual(
+            handler.run_outcome(
+                {"response": "It replied: ⚠️ Something went wrong and I couldn't finish this reply."},
+                None,
+            )[0],
+            "answered",
+        )
+
+    def test_the_result_is_read_from_the_calling_gateway_frame(self):
+        def _hmwa_post_turn_hooks(agent_result):
+            return handler.run_result()
+
+        self.assertEqual(_hmwa_post_turn_hooks({"failed": True}), {"failed": True})
+        self.assertIsNone(handler.run_result())
+
+
+@unittest.skipUnless(os.environ.get("HERMES_AGENT_DIR"), "needs a Hermes checkout")
+class HermesCatalog(unittest.TestCase):
+    def test_failure_texts_in_every_language(self):
+        sys.path.insert(0, os.environ["HERMES_AGENT_DIR"])
+        handler.failure_patterns.cache_clear()
+        from agent.i18n import supported_languages, t
+
+        langs = supported_languages()
+        self.assertGreater(len(langs), 1)
+        for lang in langs:
+            for key in ("generic_failed", "no_response", "interrupted_before_start"):
+                text = t(f"gateway.errors.{key}", lang=lang)
+                self.assertEqual(handler.run_outcome({"response": text}, None)[0], "failed", (lang, key))
+
+
+class Report(unittest.TestCase):
     def setUp(self):
         self.calls = []
-        calls = self.calls
+        self.statuses = []
+        calls, statuses = self.calls, self.statuses
 
         class H(BaseHTTPRequestHandler):
             def do_POST(self):
-                calls.append((self.path, self.headers.get("Authorization")))
-                body = b'{"status":"buzzed"}'
-                self.send_response(200)
-                self.send_header("Content-Length", str(len(body)))
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])) or b"{}")
+                calls.append((self.path, self.headers.get("Authorization"), body))
+                code = statuses.pop(0) if statuses else 200
+                if code == "garbage":  # not HTTP: the client raises BadStatusLine
+                    self.wfile.write(b"garbage\r\n\r\n")
+                    self.close_connection = True
+                    return
+                payload = b'{"status":"buzzed"}' if code == 200 else b"{}"
+                self.send_response(code)
+                self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
-                self.wfile.write(body)
+                self.wfile.write(payload)
 
             def log_message(self, *a):
                 pass
@@ -55,28 +155,99 @@ class Handle(unittest.TestCase):
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         os.environ["HEARLOOM_URL"] = f"http://127.0.0.1:{self.server.server_port}"
         os.environ["HEARLOOM_MCP_TOKEN"] = "hl_test"
+        self.delays = handler.RETRY_DELAYS
+        handler.RETRY_DELAYS = (0.01, 0.01, 0.01)
 
     def tearDown(self):
+        handler.RETRY_DELAYS = self.delays
         self.server.shutdown()
         self.server.server_close()
 
-    def run_hook(self, response):
-        ctx = {"platform": "webhook", "chat_id": chat_id("default", "hearloom-voice", CMD), "response": response}
-
+    def run_hook(self, event, ctx):
         async def run():
-            await handler.handle("agent:end", ctx)
+            await handler.handle(event, ctx)
             # It returns at once; the post runs in the background.
             await asyncio.gather(*handler._tasks)
 
         asyncio.run(run())
 
-    def test_reply_posts_with_the_token(self):
-        self.run_hook("It'll be sunny tomorrow.")
-        self.assertEqual(self.calls, [(f"/api/voice/commands/{CMD}/replied", "Bearer hl_test")])
+    def test_an_answer_is_reported_with_the_token(self):
+        self.run_hook("agent:end", voice_ctx(response="It'll be sunny tomorrow."))
+        self.assertEqual(
+            self.calls,
+            [(f"/api/voice/commands/{CMD}/replied", "Bearer hl_test", {"outcome": "answered"})],
+        )
 
-    def test_no_response_posts_nothing(self):
-        self.run_hook("")
+    def test_a_failed_run_is_reported_as_failed(self):
+        def _hmwa_post_turn_hooks(hook_ctx, agent_result, response):
+            self.run_hook("agent:end", {**hook_ctx, "response": response})
+
+        _hmwa_post_turn_hooks(voice_ctx(), {"failed": True, "failure_reason": "timeout"}, "raw error")
+        self.assertEqual(self.calls[0][2], {"outcome": "failed", "reason": "timeout"})
+        self.calls.clear()
+        self.run_hook("agent:end", voice_ctx(response=""))
+        self.assertEqual(self.calls[0][2], {"outcome": "failed", "reason": "no response"})
+
+    def test_the_start_of_the_run_is_reported(self):
+        self.run_hook("agent:start", voice_ctx(message="what's the weather"))
+        self.assertEqual(self.calls, [(f"/api/voice/commands/{CMD}/started", "Bearer hl_test", {})])
+
+    def test_other_runs_report_nothing(self):
+        self.run_hook("agent:end", {"platform": "telegram", "chat_id": "1", "response": "hi"})
+        self.run_hook("agent:start", {"platform": "telegram", "chat_id": "1"})
         self.assertEqual(self.calls, [])
+
+    def test_retries_while_hearloom_restarts(self):
+        self.statuses.extend([503, 502])
+        self.run_hook("agent:end", voice_ctx(response="Sure."))
+        self.assertEqual(len(self.calls), 3)
+
+    def test_a_broken_response_is_retried(self):
+        self.statuses.extend(["garbage"])
+        self.run_hook("agent:start", voice_ctx())
+        self.assertEqual(len(self.calls), 2)
+
+    def test_handle_never_waits_for_the_catalogs(self):
+        slow = handler.failure_patterns
+
+        def loading():
+            time.sleep(0.5)
+            return slow()
+
+        handler.failure_patterns = loading
+        try:
+
+            async def run():
+                started = time.monotonic()
+                await handler.handle("agent:end", voice_ctx(response="Sure."))
+                took = time.monotonic() - started
+                await asyncio.gather(*handler._tasks)
+                return took
+
+            self.assertLess(asyncio.run(run()), 0.1)
+        finally:
+            handler.failure_patterns = slow
+        self.assertEqual(self.calls[0][2], {"outcome": "answered"})
+
+    def test_gives_up_with_a_warning(self):
+        self.statuses.extend([503] * 10)
+        with self.assertLogs("hooks.hearloom-voice-reply", "WARNING") as logs:
+            self.run_hook("agent:end", voice_ctx(response="Sure."))
+        self.assertEqual(len(self.calls), 4)
+        self.assertIn("HTTP 503", logs.output[0])
+
+    def test_a_rejected_token_is_not_retried_and_warns(self):
+        self.statuses.append(401)
+        with self.assertLogs("hooks.hearloom-voice-reply", "WARNING") as logs:
+            self.run_hook("agent:end", voice_ctx(response="Sure."))
+        self.assertEqual(len(self.calls), 1)
+        self.assertIn("HTTP 401", logs.output[0])
+
+    def test_unreachable_is_retried(self):
+        os.environ["HEARLOOM_URL"] = "http://127.0.0.1:9"
+        with self.assertLogs("hooks.hearloom-voice-reply", "WARNING") as logs:
+            self.run_hook("agent:start", voice_ctx())
+        self.assertIn("error:", logs.output[0])
 
     def test_redirects_are_not_followed(self):
         class Redirect(BaseHTTPRequestHandler):
@@ -93,7 +264,7 @@ class Handle(unittest.TestCase):
         threading.Thread(target=server.serve_forever, daemon=True).start()
         try:
             os.environ["HEARLOOM_URL"] = f"http://127.0.0.1:{server.server_port}"
-            self.assertEqual(handler.post_replied(CMD), "HTTP 302")
+            self.assertEqual(handler.post(CMD, "replied", {}), (False, "HTTP 302", False))
         finally:
             server.shutdown()
             server.server_close()

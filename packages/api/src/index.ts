@@ -273,6 +273,11 @@ export const voiceStatusSchema = z.object({
   pendantLive: z.boolean(),
   pipelineRunning: z.boolean(),
   webhookConfigured: z.boolean(),
+  /** The agent's reports of its answers (its reply hook): whether sent commands wait for them. */
+  replies: z.object({
+    waiting: z.boolean(),
+    last: z.object({ at: z.date(), outcome: z.enum(["answered", "failed"]) }).nullable(),
+  }),
 });
 
 export const contract = {

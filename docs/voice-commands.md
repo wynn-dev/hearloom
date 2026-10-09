@@ -145,9 +145,9 @@ Short pulses (100 ms), told apart by count and length:
 | You feel | Meaning | When |
 | --- | --- | --- |
 | · one tap | heard "Hey Hermes" | while you're still talking, typically under a second after the name |
-| · · two taps | the agent answered (its reply goes out on its channel right after) | when its run ends, within 2 minutes of sending |
+| · · two taps | the agent answered (its reply goes out on its channel right after) | when its run ends: within 2 minutes of sending, or 10 minutes of its start |
 | — one longer buzz (300 ms) | no command: nothing followed (8 s), someone else spoke, or it wasn't the wake phrase after all | when that's clear |
-| · · · three taps | not sent: rejected here (rate limit, TV voice, your voice not sure enough, the check broke, …), the agent couldn't be reached, or **no reply within 2 minutes** | after the gate, after the retries, or 2 minutes after sending |
+| · · · three taps | not sent: rejected here (rate limit, TV voice, your voice not sure enough, the check broke, …), the agent couldn't be reached, **its run failed** (error, interrupted, no answer), or **no answer in time** | after the gate, after the retries, when the run ends, or when the wait runs out |
 
 - **A near miss of your own voice** (scoring 0.45 or more, under the threshold, closer to you than
   to anyone else) doesn't tap when it's heard, but gets the three taps once the gate has decided,
@@ -162,19 +162,29 @@ Short pulses (100 ms), told apart by count and length:
   other three.
 - **Two taps mean the agent answered, not that the webhook was taken:** a buzz right after
   delivery told nothing new.
-  - From sending, Hearloom waits up to 2 minutes (`REPLY_TIMEOUT_MS`; Hermes's answers took
-    20–54 s) for `POST /api/voice/commands/<id>/replied`. It needs an agent token, the command's
-    owner's, and returns at once (the buzz plays meanwhile).
-  - In time: two taps. Otherwise three taps, and a later reply doesn't buzz. Test commands never
-    buzz.
-  - **Only once the agent has reported an answer:** the first call sets `agent.voiceReplies` for
+  - From sending, Hearloom waits for `POST /api/voice/commands/<id>/replied` with
+    `{"outcome": "answered" | "failed", "reason"?}` (`{}` from older hooks means answered). It
+    needs an agent token, the command's owner's, and returns at once (the buzz plays meanwhile).
+  - **How long:** 2 minutes from sending (`REPLY_TIMEOUT_MS`) if the agent's run never starts. When
+    the hook reports the start (`POST …/<id>/started`, Hermes's `agent:start`), 10 minutes from
+    then (`REPLY_RUN_TIMEOUT_MS`; Hermes's runs: p90 58 s, longest 157 s).
+  - Answered in time: two taps. Failed (Hermes's error reply, an interrupted run, no answer at
+    all): three taps at once. No report in time: three taps, and a later report doesn't buzz.
+    Test commands never buzz.
+  - **Only once the agent has reported an answer:** the first report sets `agent.voiceReplies` for
     the user (server-set, not shown). Until then, a sent command gets no second buzz, so an agent
     without the hook never gets three taps. **Send test command** after installing the hook turns
-    it on.
+    it on. It turns off again when the webhook URL or secret changes, and after 3 commands in a
+    row whose answer was never reported, not even late (a removed or broken hook; the server
+    logs a warning). The Voice page shows the agent's last report.
   - An answer to an attempt whose response was lost counts as sent: no "couldn't reach" for it.
   - The call comes from a Hermes gateway hook ([below](#reply-hook)), in code: the agent doesn't
     have to remember a tool.
-  - A server restart while waiting forgets the wait: that command ends with no outcome buzz.
+  - **Restarts:** the wait is stored on the command (`reply_status` "awaiting" until
+    `reply_deadline_at`), so a restart doesn't lose it. At startup the server waits again, at
+    least 10 s (the hook retries its reports for about 30 s, and a stopping server answers 503).
+    A wait that ran out more than 30 s before startup ends silently (`stale`): three taps minutes
+    later would only confuse.
 - **The tap comes from the running transcript:** Soniox sends its current guesses with every
   response (non-final tokens). As soon as the utterance in progress starts with the wake phrase,
   the detector (`VoiceDetector.partial`) checks the audio so far is your voice (the same voiceprint
@@ -186,9 +196,14 @@ Short pulses (100 ms), told apart by count and length:
     last guess, that's "no command".
   - If the guesses never showed it, the finished utterance does (a second or two later).
 - **Delivery:** the live pipeline sends `voice_cue` (heard, no command, rejected) over IPC; the
-  server buzzes `haptic` messages down the phone's live socket (`commands.ts` `cue`). The phone
-  plays them as they come (no app update needed). Cues for one user play one after another,
-  with at least 600 ms of stillness between them.
+  server sends each cue down the newest live socket of each of the user's phones (`commands.ts`
+  `cue`, `ingest/phones.ts` `buzzUserPhones`). App builds that advertise the `haptic_seq` feature
+  get the whole cue in one `haptic_seq` message (pulses 350 ms apart, start to start) and play it
+  themselves, at least 600 ms after the previous cue ended, then answer `haptic_ack`. A "heard"
+  tap may play up to 3 s late (`ttlMs`), an outcome up to 20 s; later ones are dropped. Older builds get one `haptic` per pulse, timed by the
+  server. Cues for one user play one after another, with at least 600 ms of stillness between
+  them. The server logs a warning when a cue reached no phone, or a phone didn't play it (or
+  never acked it).
 - **Known limits:**
   - "Sent" comes after the agent answers, so with back-to-back commands it can land after the
     next command's tap.
@@ -345,16 +360,32 @@ Facts below were checked against the Hermes docs (messaging/webhooks) and its so
 
    <a id="reply-hook"></a>**The reply hook**
    ([`hermes/hooks/hearloom-voice-reply/`](../hermes/hooks/hearloom-voice-reply/handler.py)):
-   - **What it is:** a gateway hook on `agent:end`. It is code that runs after every agent run.
+   - **What it is:** a gateway hook on `agent:start` and `agent:end`. It is code that runs before
+     and after every agent run.
    - **Finding the command:** Hermes uses Hearloom's `webhook-id` header (the command id) as the
      delivery id, and encodes it in the run's chat id (`webhook:v2:<base64url of [profile, route,
-     id]>`). For a run on the `hearloom-voice` route that ended with a response, the hook POSTs
-     `/api/voice/commands/<id>/replied`.
+     id]>`). For a run on the `hearloom-voice` route, the hook POSTs
+     `/api/voice/commands/<id>/started` when it starts and `/api/voice/commands/<id>/replied`
+     when it ends.
+   - **Failed runs:** Hermes gives `agent:end` hooks no failure flag, and a failed run's
+     `response` is its error text. The hook reads the run's result (`failed`, `interrupted`) from
+     the gateway code that called it. Otherwise a run failed if its response is empty, Hermes's
+     silence marker, or starts with one of Hermes's replies in place of an answer
+     (`gateway.errors.*`, in every language Hermes has, read from its catalog in a thread at
+     load, never on the gateway's event loop). Only when the run's result can't be found do
+     interrupted-run texts and provider-error envelopes count too (with it, an answer starting
+     "HTTP 503 means…" is an answer). Failed runs are reported as `{"outcome": "failed"}`.
+   - **Runs that crash:** a run that dies in Hermes's exception path never fires `agent:end`.
+     It gets its three taps when the wait runs out: 10 minutes after it started.
+   - **Retries:** connection errors, broken HTTP responses, 5xx and 429 are retried for about 30 s (1, 2, 4, 8, 8, 8 s
+     apart), so a Hearloom restart doesn't lose a report. Reports that fail anyway (a 401: wrong
+     token) are logged at WARNING.
    - **Auth:** `HEARLOOM_MCP_TOKEN`, the token Hermes already uses for MCP. No new secret.
    - **Optional settings:** `HEARLOOM_URL` (default `http://127.0.0.1:3000`) and
      `HEARLOOM_VOICE_ROUTE` (default `hearloom-voice`).
-   - **Gateway hooks** load at gateway start, and placing the directory is the opt-in (see Hermes's
-     "Event Hooks" docs).
+   - **Gateway hooks** load once, at gateway start (no reload): after installing or updating the
+     hook, restart the gateway. Placing the directory is the opt-in (see Hermes's "Event Hooks"
+     docs).
    - **Tests:** `python3 -m unittest discover -s hermes/hooks/hearloom-voice-reply` (stdlib only).
 
 4. Make sure the Hearloom server can reach port 8644: the same host (loopback) or your tailnet.

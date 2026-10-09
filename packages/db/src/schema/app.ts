@@ -508,6 +508,18 @@ export const voiceCommands = pgTable(
     sentAt: ts(),
     /** The user's verdict in the console; confirmed and missed ones are learned from. */
     feedback: text().$type<"confirmed" | "false_trigger" | "missed">(),
+    /**
+     * Waiting for the agent's answer (the pendant's second buzz), if it was awaited: awaiting
+     * until `replyDeadlineAt`, then answered or failed (as the agent reported), timeout (no report
+     * in time: three taps), or stale (the wait ran out while the server was down: no buzz).
+     */
+    replyStatus: text().$type<"awaiting" | "answered" | "failed" | "timeout" | "stale">(),
+    replyDeadlineAt: ts(),
+    /** The agent reported that its run on the command started (the deadline is extended). */
+    replyStartedAt: ts(),
+    /** The agent reported the end of its run (in time or late), and how it went. */
+    repliedAt: ts(),
+    replyOutcome: text().$type<"answered" | "failed">(),
     createdAt: createdAt(),
   },
   (t) => [index().on(t.userId, t.spokenAt)],
