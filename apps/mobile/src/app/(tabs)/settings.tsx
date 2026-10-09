@@ -135,7 +135,11 @@ export default function Settings() {
               }
             />
             <Row
-              label="Buzz pendant for voice commands"
+              label={
+                s.voice.mode === "on"
+                  ? "Buzz pendant for voice commands"
+                  : "Buzz pendant for voice commands (only when voice commands are On)"
+              }
               right={
                 <Switch
                   value={s.voice.haptics}

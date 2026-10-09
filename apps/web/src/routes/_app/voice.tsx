@@ -81,7 +81,7 @@ const MODES: { value: VoiceSettings["mode"]; label: string; hint: string }[] = [
   {
     value: "shadow",
     label: "Shadow",
-    hint: "Detected and logged below, but not sent: see how well it works first.",
+    hint: "Detected and logged below, but not sent (and the pendant doesn't buzz): see how well it works first.",
   },
   { value: "on", label: "On", hint: "Commands go to your agent." },
 ];
@@ -199,7 +199,11 @@ function ManageCard({ voice, status }: { voice: VoiceSettings; status: VoiceStat
         <SettingRow
           title="Buzz the pendant"
           htmlFor="voice-haptics"
-          description="One tap when it hears “hey …”. Then: two taps, sent; one longer buzz, no command came; three taps, not sent."
+          description={
+            voice.mode === "on"
+              ? "One tap when it hears “hey …”. Then: two taps, sent; one longer buzz, no command came; three taps, not sent."
+              : "Only when Mode is On: nothing buzzes now. Then: one tap when it hears “hey …”; two taps, sent; one longer buzz, no command came; three taps, not sent."
+          }
         >
           <Switch
             id="voice-haptics"
