@@ -19,6 +19,7 @@ import {
   createRpc,
   loadSession,
   type Rpc,
+  redeemLinkCode,
   type Session,
   saveSession,
   signIn,
@@ -44,6 +45,8 @@ type SessionState =
 interface SessionApi {
   state: SessionState;
   signIn(serverURL: string, email: string, password: string): Promise<void>;
+  /** Sign in with a "Link device" code; if already signed in, that session ends once the code works. */
+  linkDevice(serverURL: string, code: string): Promise<void>;
   signOut(): Promise<void>;
   refreshPush(): Promise<void>;
 }
@@ -86,7 +89,12 @@ async function loadSessionSafe(): Promise<Session | null> {
 export function SessionProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<SessionState>({ status: "loading" });
 
+  // The token in use. A request still in flight with a token that was replaced (signed in again with a
+  // link code) may come back 401; that must not sign out the new one.
+  const currentToken = useRef<string | null>(null);
+
   const signOutLocal = useCallback(async () => {
+    currentToken.current = null;
     await clearSession();
     OmiCapture.signOut();
     queryClient.clear();
@@ -95,10 +103,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const activate = useCallback(
     async (session: Session) => {
+      currentToken.current = session.token;
       const { client, orpc } = createRpc(session.serverURL, session.token, () => {
-        void signOutLocal();
+        if (currentToken.current === session.token) void signOutLocal();
       });
       const phoneId = await registerPhone(client);
+      // Replaced meanwhile (linked again while this was in flight): don't store the old token.
+      if (currentToken.current !== session.token) return;
       const full = { ...session, phoneId };
       await saveSession(full);
       // Hand the server + token to the native engine so capture keeps working without JS.
@@ -118,10 +129,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       try {
         await activate(session);
       } catch (err) {
+        // Signed out meanwhile (the server refused the token) or replaced: nothing to restore.
+        if (currentToken.current !== session.token) return;
         // Server unreachable: stay signed in locally; the native engine keeps buffering.
         console.warn("session restore failed", err);
         const { client, orpc } = createRpc(session.serverURL, session.token, () => {
-          void signOutLocal();
+          if (currentToken.current === session.token) void signOutLocal();
         });
         if (session.phoneId) {
           OmiCapture.configure(session.serverURL, session.token, session.phoneId);
@@ -156,31 +169,52 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     return () => sub.remove();
   }, [signedInSession, activate]);
 
-  const api = useMemo<SessionApi>(
-    () => ({
+  const api = useMemo<SessionApi>(() => {
+    const signOut = async () => {
+      if (state.status === "signedIn") {
+        // End this phone's open streams and stop pushes before the token is revoked.
+        await state.rpc.phones
+          .signOut({ id: state.session.phoneId })
+          .catch((err) => console.warn("phones.signOut failed", err));
+        await signOutRemote(state.session.serverURL, state.session.token);
+      }
+      await signOutLocal();
+    };
+    return {
       state,
       async signIn(serverURL, email, password) {
         const token = await signIn(serverURL, email, password);
         await activate({ serverURL, token, email, phoneId: await storedPhoneId() });
       },
-      async signOut() {
-        if (state.status === "signedIn") {
-          // End this phone's open streams and stop pushes before the token is revoked.
-          await state.rpc.phones
-            .signOut({ id: state.session.phoneId })
-            .catch((err) => console.warn("phones.signOut failed", err));
-          await signOutRemote(state.session.serverURL, state.session.token);
+      async linkDevice(serverURL, code) {
+        const { token, email } = await redeemLinkCode(serverURL, code);
+        // Redeem first: a wrong or expired code leaves the current sign-in alone. So does a failure
+        // below: nothing of it is undone until the new sign-in is active.
+        const previous = state.status === "signedIn" ? state : null;
+        // No sign-out in between, which would also turn capture off: activate hands the native engine
+        // the new token. On the same server, registering the phone retires its previous sign-in.
+        await activate({ serverURL, token, email, phoneId: await storedPhoneId() });
+        if (!previous) return;
+        if (previous.session.serverURL !== serverURL || previous.session.email !== email) {
+          queryClient.clear();
         }
-        await signOutLocal();
+        if (previous.session.serverURL !== serverURL) {
+          // The old server: end this phone's streams and its sign-in there, in the background (it may
+          // be unreachable, which mustn't hold up the new one).
+          void previous.rpc.phones
+            .signOut({ id: previous.session.phoneId })
+            .catch(() => {})
+            .then(() => signOutRemote(previous.session.serverURL, previous.session.token));
+        }
       },
+      signOut,
       async refreshPush() {
         if (state.status !== "signedIn") return;
         const push = await registerForPush(state.rpc, state.session.phoneId);
         setState((s) => (s.status === "signedIn" ? { ...s, push } : s));
       },
-    }),
-    [state, activate, signOutLocal],
-  );
+    };
+  }, [state, activate, signOutLocal]);
 
   return <Ctx.Provider value={api}>{children}</Ctx.Provider>;
 }
