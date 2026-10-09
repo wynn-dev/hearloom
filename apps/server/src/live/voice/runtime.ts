@@ -13,6 +13,8 @@ import type { VoiceConfig } from "./types";
 
 /** Reload a user's voice settings at least this often (changes also reload them at once). */
 const CONFIG_TTL_MS = 60_000;
+/** A recognizer session waits at most this long for the user's terms before starting without. */
+const TERMS_WAIT_MS = 3_000;
 
 export interface VoiceRuntimeDeps {
   db: Db;
@@ -51,17 +53,30 @@ export class VoiceRuntime {
     if (hit && Date.now() - hit.at < CONFIG_TTL_MS) return hit.config;
     const config = this.load(userId);
     this.configs.set(userId, { at: Date.now(), config });
-    config.then(
-      (c) => this.termCache.set(userId, wakeTerms(c.wake)),
-      () => this.configs.delete(userId),
-    );
+    config.catch(() => this.configs.delete(userId));
     return config;
   }
 
-  /** Recognition hints for the user (the agent's name), from the cache; loads it if missing. */
-  terms(userId: string): string[] {
-    void this.config(userId).catch((err) => this.deps.log(`voice config: ${err}`));
-    return this.termCache.get(userId) ?? [];
+  /**
+   * Recognition hints for the user (the agent's name). Waits for the config when it isn't loaded
+   * yet (right after a restart): a recognizer session opened without the name keeps mishearing it
+   * ("Adri" → "Andrew") for as long as it lasts. Falls back to the last known terms if loading is
+   * slow or fails.
+   */
+  async terms(userId: string): Promise<string[]> {
+    const loaded = this.config(userId).then(
+      (c) => {
+        const terms = wakeTerms(c.wake);
+        this.termCache.set(userId, terms);
+        return terms;
+      },
+      (err) => {
+        this.deps.log(`voice config: ${err}`);
+        return null;
+      },
+    );
+    const late = Bun.sleep(TERMS_WAIT_MS).then(() => null);
+    return (await Promise.race([loaded, late])) ?? this.termCache.get(userId) ?? [];
   }
 
   private async load(userId: string): Promise<VoiceConfig> {
@@ -161,7 +176,7 @@ export class VoiceRuntime {
     const { soniox } = this.deps;
     if (!soniox) throw new Error("transcription is off (LIVE_ASR=off)");
     const pcm = throughPendantCodec(msg.pcm);
-    const text = await transcribeClip(pcm, { ...soniox, terms: this.terms(msg.userId) });
+    const text = await transcribeClip(pcm, { ...soniox, terms: await this.terms(msg.userId) });
     await this.detector.teach(msg.userId, msg.prompt, text, toFloat32(pcm), "browser");
   }
 

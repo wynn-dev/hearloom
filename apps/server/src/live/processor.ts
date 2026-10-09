@@ -43,8 +43,8 @@ export interface LiveDeps {
   soniox: { apiKey: string; model: string; asyncModel: string; languageHints: string[] } | null;
   /** "Hey <agent>" voice commands and voice teaching (null = off). */
   voice: VoiceDetector | null;
-  /** Words to bias recognition toward for this user (the agent's name), from a cache. */
-  terms(userId: string): string[];
+  /** Words to bias recognition toward for this user (the agent's name). */
+  terms(userId: string): Promise<string[]>;
   /** Ask the server to refresh clients' views for this user. */
   invalidate(userId: string, keys: Array<"timeline" | "status">): void;
   log(message: string): void;
@@ -401,7 +401,7 @@ export class StreamProcessor {
           apiKey: cfg.apiKey,
           model: cfg.asyncModel,
           languageHints: cfg.languageHints,
-          terms: this.deps.terms(this.stream.userId),
+          terms: await this.deps.terms(this.stream.userId),
         });
       } catch (err) {
         const wait =
