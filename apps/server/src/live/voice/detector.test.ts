@@ -6,6 +6,7 @@ import {
   CUE_CONFIRM_MS,
   commandThreshold,
   DEFAULT_MIN_SCORE,
+  FAIL_HOLD_MS,
   logLearnVerdict,
   MAX_TRANSCRIPT_CHARS,
   selfPrintVerdict,
@@ -39,6 +40,7 @@ function setup(
   const audioStreams: string[] = [];
   /** Lengths (s) of the clips scored. */
   const scored: number[] = [];
+  const logs: string[] = [];
   const media = new Set<string>();
   const config: VoiceConfig = {
     mode: "on",
@@ -64,7 +66,7 @@ function setup(
     detected: (d) => detections.push(d),
     cue: (e) => cueEvents.push(e),
     taught: (_u, r) => taught.push(r),
-    log: () => {},
+    log: (m) => logs.push(m),
     now: () => now,
   });
   let lastSpeech = 0;
@@ -160,6 +162,12 @@ function setup(
     scores,
     say,
     source,
+    logs,
+    /** Let held failed cues go (another stream had its chance to accept the words). */
+    afterHold: async () => {
+      now += FAIL_HOLD_MS;
+      await detector.tick();
+    },
     failScoring: (err: Error | null) => {
       scoreError = err;
     },
@@ -386,6 +394,10 @@ describe("review fixes", () => {
     expect(selfPrintVerdict({ self: 1, other: 0.2 }, 0.57)).toContain("Already learned");
     expect(selfPrintVerdict({ self: 0.985, other: 0.2 }, 0.57)).toContain("Already learned");
     expect(selfPrintVerdict({ self: 0.7, other: 0.2 }, 0.57)).toBeNull();
+    // Early on (fewer than 3 samples: the cautious default bar 0.65), a clip of the user is
+    // still learned at teaching's bar.
+    expect(selfPrintVerdict({ self: 0.6, other: 0.2 }, DEFAULT_MIN_SCORE)).toBeNull();
+    expect(selfPrintVerdict({ self: TEACH_MIN_SELF - 0.01, other: 0.2 }, 0.65)).not.toBeNull();
   });
 
   test("teaching the same clip again adds a sample, not a second voiceprint", async () => {
@@ -462,6 +474,8 @@ test("commandThreshold", () => {
   expect(commandThreshold([...long(0.7, 0.72, 0.75, 0.8), ...short(0.55, 0.6, 0.62)])).toBeCloseTo(
     0.5,
   );
+  // A clip taught twice (scored ~1 against its own voiceprint) doesn't raise the bar.
+  expect(commandThreshold(short(0.55, 0.6, 0.62, 0.99, 0.99, 0.99, 0.99))).toBeCloseTo(0.5);
   // Too few of them: all samples.
   expect(commandThreshold([...long(0.7, 0.72, 0.75, 0.8), ...short(0.55, 0.6)])).toBeCloseTo(0.55);
 });
@@ -543,6 +557,7 @@ describe("pendant cues", () => {
         1.2,
       );
       await t.say("Hey Hermes, what's 17 times 23?", 0, 2.5);
+      await t.afterHold();
       expect(t.cues()).toEqual([]);
       expect(t.detections[0]).toMatchObject({ reason: "not_own_voice", speakerScore: voice.self });
     }
@@ -561,15 +576,38 @@ describe("pendant cues", () => {
       1.2,
     );
     await t.say("Hey Hermes, what's 17 times 23?", 0, 2.5);
-    expect(t.cues()).toEqual(["failed"]);
     expect(t.detections[0]).toMatchObject({
       status: "ignored",
       reason: "not_own_voice",
       speakerScore: 0.52,
     });
+    // Held a moment, in case another stream accepts its copy.
+    expect(t.cues()).toEqual([]);
     // Another stream's copy of the same words isn't told again.
     await t.say("Hey Hermes, what's 17 times 23?", 0.05, 2.5, { streamId: "s2" });
+    await t.afterHold();
     expect(t.cues()).toEqual(["failed"]);
+    await t.afterHold();
+    expect(t.cues()).toEqual(["failed"]);
+  });
+
+  test("two streams: a near miss on one isn't told failed when the other's copy is sent", async () => {
+    // The longer copy (a better mic) clears the bar; the shorter one is a near miss.
+    const byLength = (s: number) => ({ self: s >= 2.3 ? 0.7 : 0.55, other: 0.25 });
+    const t = setup({ scoreBySeconds: byLength });
+    await t.say("Hey Hermes, lights on", 0, 1.4);
+    await t.say("Hey Hermes, lights on", 0.05, 2.0, { streamId: "s2" });
+    await t.afterHold();
+    expect(t.detections.map((d) => d.status)).toEqual(["ignored", "pending"]);
+    expect(t.cues()).toEqual(["heard:final"]);
+
+    // The other order: the sent copy first, then the near miss is a duplicate (silent, not stored).
+    const r = setup({ scoreBySeconds: byLength });
+    await r.say("Hey Hermes, lights on", 0, 2.0);
+    await r.say("Hey Hermes, lights on", 0.05, 1.4, { streamId: "s2" });
+    await r.afterHold();
+    expect(r.detections.map((d) => d.status)).toEqual(["pending"]);
+    expect(r.cues()).toEqual(["heard:final"]);
   });
 
   test("a near miss in shadow mode or with buzzes off: recorded, never buzzed", async () => {
@@ -581,43 +619,28 @@ describe("pendant cues", () => {
     }
   });
 
-  test("a near miss is scored again after the user's recent speech on the same stream", async () => {
-    // Short clips score low; with 3 s more of the same voice it's clear.
-    const t = setup({
-      scoreBySeconds: (s) => ({ self: s >= 4 ? 0.7 : 0.55, other: 0.25 }),
-    });
+  test("the user's earlier speech never carries a command over the bar (only logged)", async () => {
+    // A guest (or the TV) says "Hey Hermes, …" at 0.47 right after the user spoke on the same
+    // stream; with the user's 3 s in front, the clip would score 0.7.
+    const t = setup({ scoreBySeconds: (s) => ({ self: s >= 4 ? 0.7 : 0.47, other: 0.2 }) });
     await t.say("I'm going to take the dog out now.", 0, 4, { isSelf: true });
     t.audioCalls.length = 0;
-    await t.say("Hey Hermes, lights on", 10, 11.4, { isSelf: null });
-    expect(t.detections.at(-1)).toMatchObject({ status: "pending", speakerScore: 0.7 });
-    // The last 3 s of that speech, then the padded command.
+    await t.say("Hey Hermes, unlock the front door", 10, 11.4, { isSelf: null });
+    expect(t.detections.at(-1)).toMatchObject({
+      status: "ignored",
+      reason: "not_own_voice",
+      speakerScore: 0.47,
+    });
+    expect(t.detections.map((d) => d.status)).not.toContain("pending");
+    // The longer score is logged for calibration: the last 3 s of that speech + the command.
     expect(t.audioCalls).toContainEqual([1000, 4000]);
     expect(t.scored.at(-1)).toBeCloseTo(3 + 1.9);
-    expect(t.cues()).toEqual(["heard:final"]);
-  });
-
-  test("earlier speech from another stream, or someone else's, isn't used", async () => {
-    const byLength = (s: number) => ({ self: s >= 4 ? 0.7 : 0.55, other: 0.25 });
-    const other = setup({ scoreBySeconds: byLength });
-    await other.say("I'm going to take the dog out now.", 0, 4, { isSelf: true, streamId: "s2" });
-    await other.say("Hey Hermes, lights on", 10, 11.4, { isSelf: null });
-    expect(other.detections.at(-1)).toMatchObject({ reason: "not_own_voice", speakerScore: 0.55 });
-    expect(other.cues()).toEqual(["failed"]);
-
-    const untagged = setup({ scoreBySeconds: byLength });
-    await untagged.say("I'm going to take the dog out now.", 0, 4, { isSelf: null });
-    await untagged.say("Hey Hermes, lights on", 10, 11.4, { isSelf: null });
-    expect(untagged.detections.at(-1)!.reason).toBe("not_own_voice");
-
-    // A voice that doesn't sound like the user's isn't carried over the bar by theirs.
-    const stranger = setup({ scoreBySeconds: (s) => ({ self: s >= 4 ? 0.7 : 0.3, other: 0.2 }) });
-    await stranger.say("I'm going to take the dog out now.", 0, 4, { isSelf: true });
-    await stranger.say("Hey Hermes, lights on", 10, 11.4, { isSelf: null });
-    expect(stranger.detections.at(-1)).toMatchObject({
-      reason: "not_own_voice",
-      speakerScore: 0.3,
-    });
-    expect(stranger.cues()).toEqual([]);
+    expect(
+      t.logs.some((l) => l.includes("0.47") && l.includes("0.70") && l.includes("not used")),
+    ).toBe(true);
+    // No "heard" tap for it either.
+    await t.afterHold();
+    expect(t.cues()).not.toContain("heard:final");
   });
 
   test("the own-voice check breaks: recorded as check_error, told it failed", async () => {
@@ -625,6 +648,7 @@ describe("pendant cues", () => {
     t.failScoring(new Error("db down"));
     await t.say("Hey Hermes, lights on", 0, 2);
     expect(t.detections[0]).toMatchObject({ status: "ignored", reason: "check_error" });
+    await t.afterHold();
     expect(t.cues()).toEqual(["failed"]);
     // The detector keeps working.
     t.failScoring(null);

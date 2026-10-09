@@ -37,7 +37,8 @@ export const COMMAND_LIKE_SECONDS = 2.5;
  * under the low end of what their real voice scores on command-length clips, within sane bounds.
  */
 export function commandThreshold(samples: { score: number; seconds: number }[]): number {
-  const valid = samples.filter((s) => Number.isFinite(s.score));
+  // A clip taught twice scores ~1 against its own voiceprint: it says nothing about the voice.
+  const valid = samples.filter((s) => Number.isFinite(s.score) && s.score < DUPLICATE_PRINT);
   const short = valid.filter((s) => s.seconds > 0 && s.seconds <= COMMAND_LIKE_SECONDS);
   const scores = (short.length >= 3 ? short : valid).map((s) => s.score).sort((a, b) => a - b);
   if (scores.length < 3) return DEFAULT_MIN_SCORE;
@@ -86,8 +87,9 @@ export const MIN_PRINT_SAMPLES = 24_000; // 1.5 s
 /** Speech is scored with this much audio around it (as teaching samples are: alike clips). */
 export const PAD_MS = 250;
 /**
- * A near miss is scored again after up to this much of the user's recent speech from the same
- * stream (speech already recognized as theirs): a longer clip of the same voice scores truer.
+ * For calibration, a near miss is also scored after up to this much of the user's recent speech
+ * from the same stream (speech already recognized as theirs), and logged. Never used to decide:
+ * the user's speech would lift anyone's command over the bar.
  */
 const PRIOR_OWN_MS = 3_000;
 /** …speech that ended at most this long before the command (still in the stream's audio). */
@@ -99,6 +101,11 @@ const MAX_PER_HOUR = 30;
 /** The same speech captured by two streams: start within this, text this similar. */
 const DUPLICATE_MS = 1_500;
 const DUPLICATE_SIMILARITY = 0.8;
+/**
+ * A failed cue for a command that wasn't tapped is held this long (to the next tick after it):
+ * another stream's copy of the same words, a moment behind, may still be accepted.
+ */
+export const FAIL_HOLD_MS = DUPLICATE_MS;
 /** Transcripts sent to the agent are capped (the command itself at 500 by the assembler). */
 export const MAX_TRANSCRIPT_CHARS = 1_000;
 /**
@@ -141,10 +148,12 @@ export function logLearnVerdict(score: VoiceScore, minScore: number): string | n
 }
 
 /**
- * May a clip the user says is their own voice ("This is me", 👍, Missed) become one of their
- * voiceprints? The first one may (unless it's clearly someone else on file); later ones must sound
- * like the voice learned so far (an outlier loosens the gate for everyone) and not copy a
- * voiceprint already learned (the same clip learned twice).
+ * May a clip of a second or more the user says is their own voice ("This is me", 👍, Missed)
+ * become one of their voiceprints? The first one may (unless it's clearly someone else on file);
+ * later ones must sound like the voice learned so far (an outlier loosens the gate for everyone)
+ * and not copy a voiceprint already learned (the same clip learned twice). "Sound like" is the
+ * command bar, but never stricter than teaching's: with few samples the bar is a cautious default,
+ * and a long clip scores at least as well as a command.
  */
 export function selfPrintVerdict(score: VoiceScore, minScore: number): string | null {
   if (score.self === null)
@@ -152,7 +161,7 @@ export function selfPrintVerdict(score: VoiceScore, minScore: number): string | 
       ? "That sounded like someone else you've named, not you."
       : null;
   if (score.self >= DUPLICATE_PRINT) return "Already learned from this clip.";
-  return logLearnVerdict(score, minScore);
+  return logLearnVerdict(score, Math.min(minScore, TEACH_MIN_SELF));
 }
 
 /**
@@ -252,6 +261,8 @@ interface UserState {
   cues: Cue[];
   /** Wake phrases whose outcome was told, recently (`at`: when). */
   told: (Span & { at: number })[];
+  /** Failed cues waiting to be told (`at`: since when), see tellFailed. */
+  heldFails: (Span & { at: number })[];
   /** Per stream: start of the running utterance last decided on (it isn't checked again). */
   partialDecided: Map<string, number>;
   /** Per stream: the newest running transcript, waiting to be checked. */
@@ -291,6 +302,7 @@ export class VoiceDetector {
         recent: [],
         cues: [],
         told: [],
+        heldFails: [],
         partialDecided: new Map(),
         partials: new Map(),
         chain: Promise.resolve(),
@@ -323,6 +335,7 @@ export class VoiceDetector {
         !s.assembler.busy &&
         s.recent.length === 0 &&
         s.cues.length === 0 &&
+        s.heldFails.length === 0 &&
         now >= s.teachGraceUntil
       )
         this.users.delete(userId);
@@ -407,11 +420,7 @@ export class VoiceDetector {
     s.partialDecided.set(key, p.startAt);
     // Another stream heard (and buzzed) the same words.
     if (this.told(s, span)) return;
-    const verdict = await this.judge(userId, s, cfg, audio, {
-      streamId: key,
-      startAt: span.startAt,
-      endAt: span.nameEndAt,
-    });
+    const verdict = await this.judge(userId, cfg, audio);
     // Only a sure one taps this early: a near miss is told by the gate, once it's decided.
     if (verdict.kind !== "own") return;
     this.cueHeard(userId, s, { ...span, streamId: key, confirmed: false }, "partial");
@@ -466,17 +475,13 @@ export class VoiceDetector {
   }
 
   /**
-   * Is this clip (of speech starting at `at`) the user's own voice? A near miss is scored once more
-   * after their recent speech from the same stream, when there is some: short commands score low
-   * on their own. Only a clip that already sounds like them is: someone else's voice can't be
-   * carried over the bar by the user's.
+   * Is this clip the user's own voice? Only the clip itself decides: nothing else (not even the
+   * user's own speech just before it) can carry someone else's command over the bar.
    */
   private async judge(
     userId: string,
-    s: UserState,
     cfg: VoiceConfig,
     audio: Float32Array | null,
-    at: Spoken,
   ): Promise<Verdict> {
     if (!audio) return { kind: "unchecked", reason: "clip_missing" };
     if (audio.length < MIN_VERIFY_SAMPLES) return { kind: "unchecked", reason: "clip_too_short" };
@@ -486,17 +491,28 @@ export class VoiceDetector {
     if (score.other > score.self || score.self < Math.min(THRESHOLD_FLOOR, bar))
       return { kind: "other", score: score.self };
     if (score.self >= bar) return { kind: "own", score: score.self };
-    const prior = this.priorOwn(s, at);
-    if (prior) {
-      const longer = await this.deps.score(userId, concat([prior, audio]));
-      if (longer?.self != null && longer.self >= bar && longer.other <= longer.self) {
-        this.deps.log(
-          `voice: near miss ${score.self.toFixed(2)} passed with ${Math.round(prior.length / 16)} ms of earlier speech (${longer.self.toFixed(2)})`,
-        );
-        return { kind: "own", score: longer.self };
-      }
-    }
     return { kind: "near", score: score.self };
+  }
+
+  /**
+   * For calibration only (it never decides anything: whoever said the command, the user's own
+   * speech would lift it): log how a near miss scores after the user's recent speech from the
+   * same stream.
+   */
+  private async logWithPrior(
+    userId: string,
+    s: UserState,
+    audio: Float32Array,
+    at: Spoken,
+    score: number,
+  ): Promise<void> {
+    const prior = this.priorOwn(s, at);
+    if (!prior) return;
+    const longer = await this.deps.score(userId, concat([prior, audio]));
+    if (longer?.self == null) return;
+    this.deps.log(
+      `voice: near miss ${score.toFixed(2)}; with ${Math.round(prior.length / 16)} ms of the user's earlier speech ${longer.self.toFixed(2)} (other ${longer.other.toFixed(2)}): not used`,
+    );
   }
 
   private cueHeard(
@@ -538,15 +554,35 @@ export class VoiceDetector {
 
   /**
    * A command that wasn't tapped as heard failed in a way the user must hear about (most likely
-   * their own voice, just not sure enough; or the check broke): three taps, once.
+   * their own voice, just not sure enough; or the check broke): three taps, once. Held for a
+   * moment (see tick): another stream may still accept its own copy of the same words, and then
+   * the user mustn't be told to say it again.
    */
-  private tellFailed(userId: string, s: UserState, cfg: VoiceConfig, u: Spoken): void {
+  private tellFailed(s: UserState, cfg: VoiceConfig, u: Spoken): void {
     if (cfg.mode !== "on" || !cfg.haptics) return;
     const span = { startAt: u.startAt, nameEndAt: u.endAt };
-    // Another stream's copy of the same words was told already.
-    if (span.nameEndAt <= span.startAt || this.told(s, span)) return;
-    this.markTold(s, span);
-    this.deps.cue({ userId, cue: "failed", nameEndAt: null, via: null, at: this.now() });
+    const asSpan = { startAt: span.startAt, endAt: span.nameEndAt };
+    // Another stream's copy of the same words was told (or is waiting to be) already.
+    if (
+      span.nameEndAt <= span.startAt ||
+      this.told(s, span) ||
+      s.heldFails.some((h) => covers(asSpan, h))
+    )
+      return;
+    s.heldFails.push({ ...span, at: this.now() });
+  }
+
+  /** Failed cues held long enough: told, unless the words were told meanwhile (accepted). */
+  private flushFails(userId: string, s: UserState): void {
+    const now = this.now();
+    const due = s.heldFails.filter((h) => now - h.at >= FAIL_HOLD_MS);
+    if (due.length === 0) return;
+    s.heldFails = s.heldFails.filter((h) => now - h.at < FAIL_HOLD_MS);
+    for (const h of due) {
+      if (this.told(s, h)) continue;
+      this.markTold(s, h);
+      this.deps.cue({ userId, cue: "failed", nameEndAt: null, via: null, at: now });
+    }
   }
 
   private async heardNow(
@@ -585,6 +621,7 @@ export class VoiceDetector {
   async tick(): Promise<void> {
     const now = this.now();
     for (const [userId, s] of this.users) {
+      this.flushFails(userId, s);
       // A wake phrase in the running transcript that no finished utterance had.
       for (const c of [...s.cues]) {
         const span = { startAt: c.startAt, endAt: c.nameEndAt };
@@ -653,7 +690,7 @@ export class VoiceDetector {
     // Sent: the server tells how the delivery went.
     const first = c.parts[0]!;
     const cued = this.cueOutcome(userId, s, first, r.sent === false ? "failed" : null);
-    if (!cued && r.tell) this.tellFailed(userId, s, cfg, first);
+    if (!cued && r.tell) this.tellFailed(s, cfg, first);
   }
 
   /**
@@ -680,7 +717,7 @@ export class VoiceDetector {
     // together with the command, later). Only a sure one taps: a near miss is told by the gate.
     let verdict: Verdict;
     try {
-      verdict = await this.judge(userId, s, cfg, this.clip(s, [woke]), woke);
+      verdict = await this.judge(userId, cfg, this.clip(s, [woke]));
     } catch (err) {
       this.deps.log(`voice: own-voice check failed: ${err}`);
       return;
@@ -709,14 +746,29 @@ export class VoiceDetector {
     if (cfg.mode === "off") return no;
     const now = this.now();
     const first = c.parts[0]!;
+    // Two streams (or slots) heard the same thing, and one copy was accepted: keep that one,
+    // silently, whatever this copy's voice check would say (its audio may be worse).
+    if (
+      s.recent.some(
+        (r) =>
+          Math.abs(r.spokenAt - c.spokenAt) <= DUPLICATE_MS &&
+          textSimilarity(r.command, c.command) >= DUPLICATE_SIMILARITY,
+      )
+    )
+      return { sent: null, tell: false };
     // Own voice, over all parts together (a short "Hey Hermes" has no embedding of its own).
-    const verdict = await this.judge(userId, s, cfg, this.clip(s, c.parts), first);
+    const audio = this.clip(s, c.parts);
+    const verdict = await this.judge(userId, cfg, audio);
     if (verdict.kind === "unchecked") {
       this.report(userId, cfg, c, "ignored", verdict.reason, null);
       return no;
     }
     if (verdict.kind !== "own") {
       this.report(userId, cfg, c, "ignored", "not_own_voice", verdict.score);
+      if (verdict.kind === "near" && audio)
+        await this.logWithPrior(userId, s, audio, first, verdict.score).catch((err) =>
+          this.deps.log(`voice: ${err}`),
+        );
       // Someone else stays silent; the user's own voice, not sure enough, is told.
       return { sent: false, tell: verdict.kind === "near" };
     }
@@ -728,15 +780,6 @@ export class VoiceDetector {
       this.report(userId, cfg, c, "ignored", "media_voice", score.self);
       return no;
     }
-    // Two streams (or slots) heard the same thing: keep one, silently.
-    if (
-      s.recent.some(
-        (r) =>
-          Math.abs(r.spokenAt - c.spokenAt) <= DUPLICATE_MS &&
-          textSimilarity(r.command, c.command) >= DUPLICATE_SIMILARITY,
-      )
-    )
-      return { sent: null, tell: false };
     s.recent = s.recent.filter((r) => now - r.acceptedAt < 3600_000);
     const last = s.recent.at(-1);
     const lastMinute = s.recent.filter((r) => now - r.acceptedAt < 60_000).length;
@@ -749,6 +792,8 @@ export class VoiceDetector {
       return no;
     }
     s.recent.push({ spokenAt: c.spokenAt, acceptedAt: now, command: c.command });
+    // Its words are told (by the server, once delivered): another stream's copy isn't, either way.
+    this.markTold(s, { startAt: first.startAt, nameEndAt: first.endAt });
     this.report(userId, cfg, c, cfg.mode === "on" ? "pending" : "shadow", null, score.self);
     return { sent: true, tell: false };
   }
@@ -768,7 +813,7 @@ export class VoiceDetector {
     if (!wake) return;
     let verdict: Verdict | null = null;
     try {
-      verdict = await this.judge(userId, s, cfg, this.clip(s, [u]), u);
+      verdict = await this.judge(userId, cfg, this.clip(s, [u]));
     } catch (err) {
       this.deps.log(`voice: own-voice check failed: ${err}`);
     }

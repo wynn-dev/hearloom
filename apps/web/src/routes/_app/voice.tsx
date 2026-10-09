@@ -624,8 +624,16 @@ function OwnVoiceprints() {
                     </td>
                     <td className={cn(td, "text-right")}>
                       <ConfirmButton
-                        title="Delete this voiceprint?"
-                        description="Hearloom stops comparing voices with this clip. The rest of your voice stays learned."
+                        title={
+                          prints.data.length === 1
+                            ? "Delete your last voiceprint?"
+                            : "Delete this voiceprint?"
+                        }
+                        description={
+                          prints.data.length === 1
+                            ? "It's the only one: voice commands stop working (nothing can be checked as your voice) until you teach your voice again on this page."
+                            : "Hearloom stops comparing voices with this clip. The rest of your voice stays learned."
+                        }
                         confirmLabel="Delete"
                         onConfirm={() => remove.mutateAsync({ id: p.id })}
                         variant="ghost"

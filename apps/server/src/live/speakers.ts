@@ -80,15 +80,16 @@ export class SpeakerDirectory {
     ownerBar?: number | null,
   ): Promise<SpeakerMatch | null> {
     const selfThreshold = Math.min(this.threshold, ownerBar ?? this.threshold);
+    // The closest voice first, then its own bar: a voice closer to someone else is never the
+    // user's, however low the user's bar.
     let best: SpeakerMatch | null = null;
     for (const p of await this.prints(userId)) {
       const score = cosine(embedding, p.embedding);
-      const bar = p.isSelf ? selfThreshold : this.threshold;
-      if (score >= bar && (!best || score > best.score)) {
+      if (!best || score > best.score)
         best = { personId: p.personId, name: p.name, isSelf: p.isSelf, score };
-      }
     }
-    return best;
+    if (!best) return null;
+    return best.score >= (best.isSelf ? selfThreshold : this.threshold) ? best : null;
   }
 }
 

@@ -78,12 +78,18 @@ async function utterance(): Promise<string> {
   return u!.id;
 }
 
-function deps(embedding: number[]) {
+/** Audio ranges asked for (relative to the utterance's start). */
+const loads: [number, number][] = [];
+
+function deps(embedding: number[], minScore = 0.57) {
   return {
     db,
     embed: () => Float32Array.from(embedding),
-    loadAudio: async () => new Float32Array(32_000),
-    minScore: async () => 0.57,
+    loadAudio: async (_s: string, from: number, to: number) => {
+      loads.push([from, to]);
+      return new Float32Array(32_000);
+    },
+    minScore: async () => minScore,
   };
 }
 
@@ -109,9 +115,28 @@ test('"This is me" on an outlier: attributed, but no voiceprint', async () => {
   const id = await utterance();
   const r = await enrollUtterance(deps(UNLIKE_ME), { userId, personId: me, utteranceId: id });
   expect(r.note).toContain("no voiceprint learned");
+  // Where to fix it: a bad voiceprint, or too little teaching.
+  expect(r.note).toContain("Voice page");
   expect(await printsOf(me)).toHaveLength(1);
   const [u] = await db.select().from(schema.utterances).where(eq(schema.utterances.id, id));
   expect(u).toMatchObject({ personId: me, isWearer: true });
+});
+
+test('"This is me" early on (default bar 0.65): a clip of the user at 0.6 is learned', async () => {
+  await print(me, VOICE);
+  const id = await utterance();
+  const early = [0.6, 0.8, 0]; // cos 0.6 with VOICE
+  const r = await enrollUtterance(deps(early, 0.65), { userId, personId: me, utteranceId: id });
+  expect(r.note).toBeNull();
+  expect(await printsOf(me)).toHaveLength(2);
+});
+
+test('"This is me" uses padded audio, like 👍 / Missed (so a copy is recognized)', async () => {
+  const id = await utterance();
+  const [u] = await db.select().from(schema.utterances).where(eq(schema.utterances.id, id));
+  loads.length = 0;
+  await enrollUtterance(deps(VOICE), { userId, personId: me, utteranceId: id });
+  expect(loads).toEqual([[u!.startAt.getTime() - 250, u!.endAt.getTime() + 250]]);
 });
 
 test('"This is me" on a clip already learned: no second copy', async () => {
@@ -160,4 +185,8 @@ test("transcript lines: the user's own voice is tagged from their command bar", 
   expect(await speakers.identify(userId, Float32Array.from(LIKE_ME), 0.9)).toMatchObject({
     personId: me,
   });
+  // Closer to someone else (0.58, under their bar) than to the user (0.52, over the user's
+  // lowered bar): not the user.
+  const alice = Float32Array.from([0.52, 0.58, Math.sqrt(1 - 0.52 ** 2 - 0.58 ** 2)]);
+  expect(await speakers.identify(userId, alice, 0.5)).toBeNull();
 });

@@ -2,7 +2,7 @@ import type { Db } from "@hearloom/db";
 import { schema } from "@hearloom/db";
 import { cosine, SPEAKER_MODEL_ID } from "@hearloom/inference";
 import { and, eq } from "drizzle-orm";
-import { selfPrintVerdict } from "./voice/detector";
+import { PAD_MS, selfPrintVerdict } from "./voice/detector";
 
 export interface EnrollDeps {
   db: Db;
@@ -37,7 +37,13 @@ export async function enrollUtterance(
     );
   if (!u) throw new Error("utterance not found");
   if (!u.streamId) throw new Error("utterance has no audio");
-  const audio = await deps.loadAudio(u.streamId, u.startAt.getTime(), u.endAt.getTime());
+  // Padded, as commands are scored and learned (👍 / Missed): the same speech gives the same
+  // voiceprint either way, so a copy is recognized as one.
+  const audio = await deps.loadAudio(
+    u.streamId,
+    u.startAt.getTime() - PAD_MS,
+    u.endAt.getTime() + PAD_MS,
+  );
   if (!audio || audio.length < 16_000) throw new Error("need at least 1 s of stored audio");
   const embedding = deps.embed(audio);
   const [person] = await db
@@ -99,9 +105,9 @@ async function selfCheck(
     else other = Math.max(other, score);
   }
   const refused = selfPrintVerdict({ self, other }, await deps.minScore(userId));
-  return refused ? `Attributed to you, but no voiceprint learned: ${lower(refused)}` : null;
-}
-
-function lower(s: string): string {
-  return s.charAt(0).toLowerCase() + s.slice(1);
+  if (!refused) return null;
+  const why = refused.charAt(0).toLowerCase() + refused.slice(1);
+  return refused.startsWith("Already")
+    ? `Attributed to you; no new voiceprint: ${why}`
+    : `Attributed to you, but no voiceprint learned: ${why} If your voice was learned from a bad clip, delete it under "Your voiceprints" on the Voice page, or teach your voice there.`;
 }
