@@ -14,6 +14,7 @@ import { livePipeline } from "./live/host";
 import { stopNotifications } from "./notify/gateway";
 import { attachRealtimeServer, topicFor } from "./realtime";
 import { trackSocket, untrackSocket } from "./sessions";
+import { shutdownDeadline, stopServer } from "./shutdown";
 import { onCue, onDetection, recoverPending } from "./voice/commands";
 import { onTeachHeard, replayTeach } from "./voice/teach";
 
@@ -115,7 +116,8 @@ async function shutdown(signal: string) {
   if (stopping) return;
   stopping = true;
   console.log(`[hearloom] ${signal}: flushing audio and shutting down`);
-  await server.stop();
+  shutdownDeadline(30_000);
+  await stopServer(server);
   await flushAllWriters();
   await livePipeline.stop();
   await stopJobs();
