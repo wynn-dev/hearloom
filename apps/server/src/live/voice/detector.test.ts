@@ -28,6 +28,11 @@ function setup(
     other?: number;
     /** Score by clip length (s), instead of the fixed self/other. */
     scoreBySeconds?: (seconds: number) => VoiceScore | null;
+    /**
+     * Who is speaking when (s): the user (1) or not (0). The audio's samples carry it, and a clip
+     * scores the share of the user's speech in it (padding and others' speech pull it down).
+     */
+    voice?: (s: number) => number;
   } = {},
 ) {
   let now = T;
@@ -56,6 +61,7 @@ function setup(
     score: async (_u, audio) => {
       if (scoreError) throw scoreError;
       scored.push(audio.length / 16_000);
+      if (over.voice) return { self: audio.reduce((n, x) => n + x, 0) / audio.length, other: 0.2 };
       return over.scoreBySeconds ? over.scoreBySeconds(audio.length / 16_000) : { ...scores };
     },
     isMediaVoice: async (_u, chainId, key) => media.has(`${chainId}:${key}`),
@@ -83,7 +89,10 @@ function setup(
           audioCalls.push([from - T, to - T]);
           audioStreams.push(streamId);
           if (noAudio.has(streamId)) return null;
-          return new Float32Array(Math.max(0, Math.round((to - from) * 16)));
+          const out = new Float32Array(Math.max(0, Math.round((to - from) * 16)));
+          if (over.voice)
+            for (let i = 0; i < out.length; i++) out[i] = over.voice((from - T + i / 16) / 1000);
+          return out;
         },
         lastSpeechAt: () => lastSpeech,
         heardUntil: () => heardUntil,
@@ -93,13 +102,32 @@ function setup(
     return src;
   };
   const source = sourceFor("s1");
+  /**
+   * A finished utterance, recognized `lag` s after it ended (1.5 s, as in production). Then, unless
+   * `tick` is false, time passes to 2.5 s after it with no more speech, and the detector ticks: a
+   * command is finished by the tick once 2.2 s of quiet were heard (as in production).
+   */
   const say = async (
     text: string,
     startS: number,
     endS: number,
     o: Partial<HeardUtterance> = {},
+    { lag = 1.5, tick = true }: { lag?: number; tick?: boolean } = {},
   ) => {
-    now = T + (endS + 1.5) * 1000;
+    await saidNow(text, startS, endS, o, lag);
+    if (!tick) return;
+    now = T + (endS + Math.max(lag, 2.5)) * 1000;
+    heardUntil = now;
+    await detector.tick();
+  };
+  const saidNow = async (
+    text: string,
+    startS: number,
+    endS: number,
+    o: Partial<HeardUtterance>,
+    lag: number,
+  ) => {
+    now = T + (endS + lag) * 1000;
     lastSpeech = T + endS * 1000;
     heardUntil = now;
     await detector.heard(
@@ -173,6 +201,10 @@ function setup(
     },
     setNow: (s: number) => {
       now = T + s * 1000;
+    },
+    /** Audio keeps coming (quiet) up to `s`. */
+    hearUntil: (s: number) => {
+      heardUntil = T + s * 1000;
     },
   };
 }
@@ -481,11 +513,28 @@ test("commandThreshold", () => {
 });
 
 describe("pendant cues", () => {
-  test("a one-breath command: heard when it's finished (the server buzzes sent)", async () => {
+  test("a one-breath command: heard when it's finished, sent by the tick once quiet", async () => {
     const t = setup();
-    await t.say("Hey Hermes, what's 17 times 23?", 0, 2.5);
+    // Recognized 1.5 s after it ended: not yet 2.2 s of quiet.
+    await t.say("Hey Hermes, what's 17 times 23?", 0, 2.5, {}, { tick: false });
     expect(t.cues()).toEqual(["heard:final"]);
     expect(t.cueEvents[0]).toMatchObject({ userId: "u1", nameEndAt: T + 2500, at: T + 4000 });
+    expect(t.detections).toEqual([]);
+    t.setNow(4.6);
+    t.hearUntil(4.6);
+    await t.detector.tick();
+    expect(t.detections).toEqual([]);
+    t.setNow(4.7);
+    t.hearUntil(4.7);
+    await t.detector.tick();
+    expect(t.detections[0]!.status).toBe("pending");
+    expect(t.cues()).toEqual(["heard:final"]);
+  });
+
+  test("a one-breath command recognized late: sent as it arrives", async () => {
+    const t = setup();
+    await t.say("Hey Hermes, what's 17 times 23?", 0, 2.5, {}, { lag: 2.5, tick: false });
+    expect(t.cues()).toEqual(["heard:final"]);
     expect(t.detections[0]!.status).toBe("pending");
   });
 
@@ -665,11 +714,116 @@ describe("pendant cues", () => {
     expect(t.detections[0]).toMatchObject({ reason: "no_command" });
   });
 
-  test("wake word, then someone else talks: no command", async () => {
+  test("wake word, then someone else talks: still waiting, then no command", async () => {
     const t = setup();
     await t.say("Hey Hermes.", 0, 0.8, { isSelf: null });
     await t.say("Dinner's ready!", 2, 3, { speakerKey: "S2", isSelf: false });
+    expect(t.cues()).toEqual(["heard:final"]);
+    t.setNow(12);
+    t.hearUntil(11.5);
+    await t.detector.tick();
     expect(t.cues()).toEqual(["heard:final", "no_command"]);
+  });
+
+  // The user speaks 0–0.8 s ("Hey Hermes.") and 3–5 s; a guest 1.2–1.6 s ("What?").
+  const userAt = (s: number) => (s >= 0 && s < 0.8) || (s >= 3 && s < 5);
+
+  test("a guest's short reply after a bare wake isn't the command; the user's is", async () => {
+    const t = setup({ voice: (s) => (userAt(s) ? 1 : 0) });
+    await t.say("Hey Hermes.", 0, 0.8, { isSelf: null });
+    // Another label, too short for a voice of its own: its own clip is checked, alone.
+    await t.say("What?", 1.2, 1.6, { speakerKey: "S2", isSelf: null });
+    expect(t.detections).toEqual([]);
+    expect(t.scored.at(-1)).toBeCloseTo(0.9); // "What?" alone, padded
+    await t.say("What's the weather tomorrow?", 3, 5, { isSelf: null });
+    expect(t.detections).toHaveLength(1);
+    expect(t.detections[0]).toMatchObject({
+      status: "pending",
+      command: "What's the weather tomorrow?",
+      transcript: "Hey Hermes. What's the weather tomorrow?",
+    });
+    expect(t.cues()).not.toContain("no_command");
+  });
+
+  test("a bare wake, then the user under another label: sent once their own clip passes", async () => {
+    const t = setup({ voice: (s) => (userAt(s) ? 1 : 0) });
+    await t.say("Hey Hermes.", 0, 0.8, { isSelf: null });
+    await t.say("What's the weather tomorrow?", 3, 5, { speakerKey: "S3", isSelf: null });
+    expect(t.detections[0]).toMatchObject({
+      status: "pending",
+      command: "What's the weather tomorrow?",
+    });
+  });
+
+  test("a bare wake, then a guest's longer request under another label: not sent", async () => {
+    const t = setup({ voice: (s) => (s < 0.8 ? 1 : 0) });
+    await t.say("Hey Hermes.", 0, 0.8, { isSelf: null });
+    await t.say("Delete all the files in my folder.", 1.2, 3.5, { speakerKey: "S2", isSelf: null });
+    expect(t.detections).toEqual([]);
+    t.setNow(12);
+    t.hearUntil(11.5);
+    await t.detector.tick();
+    expect(t.detections[0]).toMatchObject({ status: "ignored", reason: "no_command" });
+  });
+
+  test("a media voice in any part: ignored", async () => {
+    const t = setup({ voice: (s) => (userAt(s) ? 1 : 0) });
+    t.media.add("c1:S3");
+    await t.say("Hey Hermes.", 0, 0.8, { isSelf: null });
+    await t.say("What's the weather tomorrow?", 3, 5, { speakerKey: "S3", isSelf: null });
+    expect(t.detections[0]).toMatchObject({ status: "ignored", reason: "media_voice" });
+  });
+
+  test("waiting follows the command's own stream, not the latest one heard", async () => {
+    const t = setup();
+    await t.say("Hey Hermes.", 0, 0.8, { isSelf: null, streamId: "s2" });
+    // Someone else on another stream, which then ends.
+    await t.say("Dinner's ready!", 1.5, 2.5, { speakerKey: "S9", isSelf: false });
+    t.detector.dropSource("s1");
+    t.setNow(5.5);
+    await t.detector.tick();
+    expect(t.detections).toEqual([]);
+    await t.say("What's the weather tomorrow?", 3, 5, { streamId: "s2" });
+    expect(t.detections[0]).toMatchObject({ status: "pending" });
+  });
+
+  test("greeting and name split by the recognizer: one wake phrase, heard once", async () => {
+    const t = setup();
+    await t.hear(
+      [
+        ["Hey", 0.3],
+        ["Hermes,", 0.8],
+        ["what's", 1.1],
+      ],
+      0,
+      1.2,
+    );
+    expect(t.cues()).toEqual(["heard:partial"]);
+    // "Hey" | "Hermes, …": the speaker change split it.
+    await t.say("Hey", 0, 0.3, { isSelf: null });
+    expect(t.cues()).toEqual(["heard:partial"]);
+    await t.say("Hermes, what's the weather tomorrow?", 0.35, 2.5, { speakerKey: "S2" });
+    expect(t.cues()).toEqual(["heard:partial"]);
+    expect(t.detections[0]).toMatchObject({
+      status: "pending",
+      command: "what's the weather tomorrow?",
+      transcript: "Hey Hermes, what's the weather tomorrow?",
+      spokenAt: T,
+    });
+  });
+
+  test("the command's language is its own words' language", async () => {
+    const t = setup();
+    // Tagged Dutch as a whole ("Hey Hermes," heard as Dutch, a short English command).
+    const text = "Hey Hermes, call mom.";
+    await t.say(text, 0, 2.5, {
+      lang: "nl",
+      langSpans: [
+        { start: 0, end: 11, lang: "nl" },
+        { start: 11, end: text.length, lang: "en" },
+      ],
+    });
+    expect(t.detections[0]).toMatchObject({ status: "pending", lang: "en" });
   });
 
   test("wake word, then the command: heard once", async () => {

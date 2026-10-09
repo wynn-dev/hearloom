@@ -5,6 +5,7 @@ import {
   CommandAssembler,
   DEFAULT_LIMITS,
   type HeardUtterance,
+  longestWaitMs,
   type Step,
 } from "./assembler";
 import type {
@@ -219,11 +220,15 @@ export const NAME_SETTLE_MS = 400;
  * would say "no command" for a command it then sends. Accepted: it's far behind by then anyway.)
  */
 export const CUE_CONFIRM_MS = 10_000;
+/** How long the stream waits for audio that stopped mid-speech (`STALL_CAP_MS` in processor.ts). */
+const STALL_WAIT_MS = 10_000;
 /**
- * A cue still waiting for its command after this long went wrong somewhere (the longest command
- * takes 8 s to start, 30 s to say and 4 s to wait for): tell it failed.
+ * A cue still waiting for its command after this long went wrong somewhere: tell it failed. The
+ * assembler gives up on a command after `longestWaitMs` from the wake phrase's final (46 s), and
+ * isn't ticked while the stream waits out a stall; a tap from the running transcript comes up to a
+ * few seconds before that final, and the gate takes a moment.
  */
-const CUE_MAX_MS = 60_000;
+export const CUE_MAX_MS = longestWaitMs(DEFAULT_LIMITS) + STALL_WAIT_MS + 10_000;
 /**
  * Wake phrases already told are remembered this long, so the same words heard by another stream
  * (or slot) don't buzz again.
@@ -303,7 +308,7 @@ export class VoiceDetector {
     let s = this.users.get(userId);
     if (!s) {
       s = {
-        assembler: new CommandAssembler(),
+        assembler: new CommandAssembler(DEFAULT_LIMITS, (m) => this.deps.log(m)),
         source: null,
         sources: new Map(),
         own: [],
@@ -619,15 +624,37 @@ export class VoiceDetector {
     // An open command the recognizer broke off in can't be continued.
     const cut = s.assembler.cut(source.cutBefore?.() ?? 0);
     if (cut.done.length > 0) await this.handle(userId, s, cfg, cut);
+    const heard = await this.vouch(userId, s, cfg, u);
     const step = s.assembler.push(
-      u,
+      heard,
       cfg.wake,
       source.lastSpeechAt(),
       this.now(),
       source.heardUntil(),
     );
-    await this.handle(userId, s, cfg, step, u);
-    if (step.done.length === 0 && !s.assembler.busy) await this.nearMiss(userId, s, u, cfg);
+    await this.handle(userId, s, cfg, step, heard);
+    if (step.done.length === 0 && !s.assembler.busy) await this.nearMiss(userId, s, heard, cfg);
+  }
+
+  /**
+   * After a bare wake phrase, a line with another speaker label and no voice of its own yet is
+   * only the command if its own clip is the user's voice (alone: the wake phrase's audio must not
+   * lift someone else's "What?" over the bar). Then it's marked as the user's.
+   */
+  private async vouch(
+    userId: string,
+    s: UserState,
+    cfg: VoiceConfig,
+    u: HeardUtterance,
+  ): Promise<HeardUtterance> {
+    if (!s.assembler.needsVoiceCheck(u, cfg.wake)) return u;
+    try {
+      const verdict = await this.judge(userId, cfg, this.clip(s, [u]));
+      return verdict.kind === "own" ? { ...u, isSelf: true } : u;
+    } catch (err) {
+      this.deps.log(`voice: own-voice check failed: ${err}`);
+      return u;
+    }
   }
 
   /** Once a second: finish commands whose continuation didn't come. */
@@ -643,16 +670,19 @@ export class VoiceDetector {
         else if (now - c.at > CUE_MAX_MS) this.cueOutcome(userId, s, span, "failed");
       }
       if (!s.assembler.busy) continue;
-      const stall = s.source?.stall?.() ?? null;
-      // The rest of what's being said may still come.
+      // The open command's own stream (its latest part's).
+      const source = s.sources.get(s.assembler.streamId ?? "") ?? null;
+      const stall = source?.stall?.() ?? null;
+      // The audio stopped mid-speech: the rest of what's being said may still come. The stream
+      // owns this wait (up to its stall cap, then "cut"); the assembler isn't ticked meanwhile.
       if (stall === "waiting") continue;
       let step = s.assembler.cut(
-        stall === "cut" ? Number.POSITIVE_INFINITY : (s.source?.cutBefore?.() ?? 0),
+        stall === "cut" ? Number.POSITIVE_INFINITY : (source?.cutBefore?.() ?? 0),
       );
       // Without a stream (it ended), nothing more is coming: finish now.
       if (s.assembler.busy)
-        step = s.source
-          ? s.assembler.tick(s.source.lastSpeechAt(), now, s.source.heardUntil())
+        step = source
+          ? s.assembler.tick(source.lastSpeechAt(), now, source.heardUntil())
           : s.assembler.tick(0, now);
       if (step.done.length === 0 && step.abandoned.length === 0) continue;
       await this.handle(userId, s, await this.deps.config(userId), step);
@@ -726,10 +756,12 @@ export class VoiceDetector {
   ): Promise<void> {
     const woke = step.woke?.utterance;
     for (const c of s.cues.filter((c) => !c.confirmed && covers(u, c))) {
-      if (woke === u) c.confirmed = true;
+      // (`woke` may be this utterance joined to the greeting before it: "Hey" | "Hermes, …".)
+      if (woke) c.confirmed = true;
       // Another stream may hear the same words differently: only the cue's own stream says it
-      // wasn't the wake phrase (otherwise the confirm timeout does).
-      else if (u.streamId === c.streamId)
+      // wasn't the wake phrase (otherwise the confirm timeout does). Nor does a greeting whose
+      // name may be in the next utterance.
+      else if (u.streamId === c.streamId && !step.heldGreeting)
         this.cueOutcome(userId, s, { startAt: c.startAt, endAt: c.nameEndAt }, "no_command");
     }
     if (!woke || this.told(s, { startAt: woke.startAt, nameEndAt: woke.endAt })) return;
@@ -793,12 +825,16 @@ export class VoiceDetector {
       return { sent: false, tell: verdict.kind === "near" };
     }
     const score = { self: verdict.score };
-    if (
-      first.speakerKey &&
-      (await this.deps.isMediaVoice(userId, first.chainId, first.speakerKey))
-    ) {
-      this.report(userId, cfg, c, "ignored", "media_voice", score.self);
-      return no;
+    // Any part in a TV/radio voice.
+    const voices = new Set(
+      c.parts.flatMap((p) => (p.speakerKey ? [`${p.chainId}\n${p.speakerKey}`] : [])),
+    );
+    for (const v of voices) {
+      const [chainId, key] = v.split("\n") as [string, string];
+      if (await this.deps.isMediaVoice(userId, chainId, key)) {
+        this.report(userId, cfg, c, "ignored", "media_voice", score.self);
+        return no;
+      }
     }
     // Part of it may be missing (the recognizer or the audio broke off): never sent, and told.
     if (c.cutOff) {
@@ -880,7 +916,7 @@ export class VoiceDetector {
       nameScore: c.wake.score,
       transcript: c.transcript.slice(0, MAX_TRANSCRIPT_CHARS),
       command: c.command.slice(0, DEFAULT_LIMITS.maxChars),
-      lang: first.lang,
+      lang: c.lang ?? first.lang,
       speakerScore,
       status,
       reason,

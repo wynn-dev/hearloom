@@ -45,9 +45,21 @@ pendant ─▶ phone ─▶ server ─▶ live pipeline child                   
   backlog requests.
 - **Matcher:** `packages/shared/src/wake.ts`. It is pure and shared with the console's "Try a
   phrase" box.
-  - It needs a **greeting** (hey, hi, hello, ok/okay, yo, hé, hoi, hallo…) followed by the name.
-    The phrase must start the utterance or a sentence within it, after up to two fillers (um, uh,
-    so…). A bare name never counts.
+  - It needs a **greeting** (hey, hi, hai, hello, ok/okay, oké/okee, yo, ey, hé, heej, hoi,
+    hallo…) followed by the name. A bare name never counts.
+    - Up to four fillers (um, uh, so…), lead-ins (yeah, and, alright, ja, en…) or other greetings
+      may come first: "Um, so hey Hermes", "OK, hey Hermes", "Hey hey Hermes". Then the greeting
+      and the name can't be split by a comma ("And hey, Hermes said…", "Okay, so, hey, Hermes…").
+    - "Hey/hi/hello there Hermes", with nothing between them.
+    - The phrase must start the utterance, or a sentence within it: after `. ! ?` `…`. Also after
+      a dash (`—` `–`, which Soniox writes for cut-off speech), or a comma after a short closing
+      clause ("Thanks, hey Hermes", "I'm off, hey Hermes", "Dank je, hoi Hermes"). Not after a
+      word that reports speech ("You just say, hey Hermes, …", "He said, …", "Ik zei, hé Hermes,
+      …", "I told him — hey Hermes — …").
+    - A name followed by "said", "zei"… is narration, not address ("Hey Hermes said she'd come").
+  - **The command** is what follows the name, without leading hesitations ("uh, call mom" → "call
+    mom"; Dutch "er" stays). A repeated wake phrase with the exact name is dropped ("Hey Hermes,
+    hey Hermes, call mom" → "call mom").
   - **Name matching:**
     - an exact match on a configured name or a learned alias scores 1.0;
     - a close spelling (Damerau-Levenshtein distance ≤ max(1, ⌊len/5⌋), for names of 4 letters
@@ -58,26 +70,53 @@ pendant ─▶ phone ─▶ server ─▶ live pipeline child                   
       punctuation.
     - Across words, the consonant skeleton matches everyday speech: "her mom's", "Harry Moss",
       "hurry, miss" are all `HRMS`.
+    - **Only right after hey, hi, hello, hoi or hallo**, first at a sentence start and without a
+      comma before the name. After ok/oké/okee, hé, hai, ey, heej, yo, after a lead-in, a dash
+      or a comma, only an exact name or learned alias counts: Dutch "Oké, iedere keer…" and "Hé,
+      ieder geval…" sound like "Adri" (`ADR`).
     - The rule is to miss rather than misfire: a miss can be taught, a false trigger acts in the
       world.
   - Spellings marked as false triggers are **blocked** from loose matching.
   - **Renaming the agent clears the learned and blocked spellings.**
 - **Command assembly** (`assembler.ts`):
-  - **One utterance:** sent once 1.2 s of audio after it has been heard without speech (voice
+  - **One utterance:** sent once 2.2 s of audio after it has been heard without speech (voice
     activity; the end of speech comes from the finished VAD segment). A shorter pause ("call
-    mom … at five") is a continuation.
-  - **"Hey Hermes." alone:** the next utterance from the same speaker within 8 s becomes the
-    command. If nothing comes, the detection is stored as ignored with reason `no_command`.
+    mom … at five") is a continuation. (It was 1.2 s, which cut natural pauses mid-command; the
+    agent's answer takes 20–54 s anyway.)
+  - **"Hey Hermes." alone:** the next utterance from the same speaker that **starts** within 8 s
+    of the wake phrase's end becomes the command, however long it is and however late its
+    transcript arrives. Speech after the wake phrase keeps it waiting until its transcript has had
+    4 s of audio to arrive, but at most 18 s after the wake phrase arrived (voice activity can be
+    anyone's, or music). If nothing comes, the detection is stored as ignored with reason
+    `no_command`.
+    - "The same speaker": the same (stable, #48) speaker label, or the user's own voice. Others'
+      utterances are skipped meanwhile, not taken as the command.
+    - A line under another label with no voice of its own yet is only the command if its **own**
+      clip passes the own-voice check, alone (the gate scores all parts together, so the wake
+      phrase's audio could otherwise lift a guest's "What?").
   - **Still talking:** continuations from the same speaker are appended. Each must start within
     2.5 s of the previous one. Limits: at most 3 parts, 30 s in total and 500 characters. If no
-    continuation arrives, the command is sent 4 s after the last part.
+    continuation arrives, the command is sent 4 s after the last part; while there's speech, up
+    to 10 s later.
+    - Same-speaker speech right after a finished command, without a wake phrase, isn't sent: it is
+      logged (`voice: speech … after a finished command`).
+    - Audio that stopped mid-speech (a stall) is waited out by the stream (up to 10 s, then the
+      command is cut off); the assembler isn't ticked meanwhile. A tap still open after
+      `longestWaitMs` (46 s) + the stall + 10 s is told as failed.
+  - **Split greeting:** Soniox may split "Hey" | "Hermes, call mom" at a speaker change. A line
+    that is only a greeting (and fillers), not known to be someone else's, is joined with the next
+    line on the same stream if that starts within 0.5 s with the **exact** name. Its tap isn't
+    cancelled meanwhile. If the greeting's line was cut off, so is the command.
+  - **Language:** the command's `lang` is the language most of its own words are in (Soniox tags
+    each word), across its parts and without the greeting and name: "Hey Andrew," often comes out
+    Dutch before an English request.
 - **Gates** (`detector.ts`), in order:
 
   | Gate | Rule | Stored as |
   |---|---|---|
   | Mode | `off` skips detection; `shadow` stores but never sends | — / `shadow` |
   | Own voice | A CAM++ embedding of the command's utterances (wake phrase + command), each padded by 250 ms and taken from its own stream (a command can span a reconnect). Its best match must be one of your own voiceprints, scoring ≥ the threshold, and not beaten by anyone else's. Only the command's own audio decides: a near miss (≥ 0.45, closer to you than anyone else) is also scored after up to 3 s of your recent speech from the same stream, but that score is only logged (your speech would lift anyone's command) | `ignored: no_voiceprint` / `clip_missing` / `clip_too_short` (under 0.8 s padded) / `check_error` / `not_own_voice` (with its score) |
-  | TV / radio | The speaker is a media voice in this chain (`mediaVoices`) | `ignored: media_voice` |
+  | TV / radio | The speaker of any part is a media voice in this chain (`mediaVoices`) | `ignored: media_voice` |
   | Cut off | The recognizer's session broke mid-command, or the audio stalled mid-speech and didn't come back within 10 s: the pendant gets the failed cue | `ignored: cut_off` |
   | Duplicate (checked first) | Same speech heard by two streams, one copy already accepted: within 1.5 s, text ≥ 80% similar | dropped silently |
   | Rate | At least 2 s apart, at most 6 per minute and 30 per hour | `ignored: rate_limited` |
@@ -146,7 +185,7 @@ Short pulses (100 ms), told apart by count and length:
 | --- | --- | --- |
 | · one tap | heard "Hey Hermes" | while you're still talking, typically under a second after the name |
 | · · two taps | the agent answered (its reply goes out on its channel right after) | when its run ends: within 2 minutes of sending, or 10 minutes of its start |
-| — one longer buzz (300 ms) | no command: nothing followed (8 s), someone else spoke, or it wasn't the wake phrase after all | when that's clear |
+| — one longer buzz (300 ms) | no command: nothing started within 8 s, or it wasn't the wake phrase after all | when that's clear |
 | · · · three taps | not sent: rejected here (rate limit, TV voice, your voice not sure enough, the check broke, …), the agent couldn't be reached, **its run failed** (error, interrupted, no answer), or **no answer in time** | after the gate, after the retries, when the run ends, or when the wait runs out |
 
 - **A near miss of your own voice** (scoring 0.45 or more, under the threshold, closer to you than
@@ -464,11 +503,15 @@ write-only: the API returns `agent.webhookSecretSet` and a short hint instead (s
 
 ## Tests
 
-- `packages/shared/src/wake.test.ts`: the matcher (greetings, accents, split names, near misses,
+- `packages/shared/src/wake.test.ts`: the matcher (greetings in English and Dutch, lead-ins and
+  repeated greetings, dashes and commas inside an utterance, accents, split names, near misses,
   blocked spellings), teaching alignment, and alias learning. It includes everyday sentences that
-  must never fire ("Okay, her mom's coming over tonight").
-- `apps/server/src/live/voice/assembler.test.ts`: single utterances, wake word then command,
-  timeouts, continuations, speaker changes and caps.
+  must never fire ("Okay, her mom's coming over tonight", "Oké, iedere keer…", "He said, hey Adri,
+  …", "Then, hey, Adri said she'd come").
+- `apps/server/src/live/voice/assembler.test.ts`: single utterances, wake word then command (the
+  8 s window counted from when the command starts, other speakers skipped), timeouts and their
+  caps, pauses and continuations, speaker changes, a greeting split from the name (and when it
+  isn't joined), the command's language, and caps.
 - `apps/server/src/live/voice/detector.test.ts`: the gates, shadow and off modes, duplicates, rate
   limits, near misses, teaching and self-test. Also: refusing other voices while teaching, the
   voice check over each part's span only, the caps, and pruning. Pendant cues per outcome: heard
