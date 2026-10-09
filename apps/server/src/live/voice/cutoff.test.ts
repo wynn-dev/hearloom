@@ -69,6 +69,24 @@ describe("CommandAssembler: cut off", () => {
     expect(new CommandAssembler().cut().done).toEqual([]);
   });
 
+  test("a greeting line that was cut off cuts off the wake phrase joined to it", () => {
+    const a = new CommandAssembler();
+    a.push(utt("Hey", 0, 0.3, { isSelf: null, cutOff: true }), cfg, at(0.3), at(1.8));
+    const step = a.push(
+      utt("Hermes, call mom.", 0.5, 1.6, { speakerKey: "S2" }),
+      cfg,
+      at(1.6),
+      at(4),
+    );
+    expect(step.done[0]).toMatchObject({ command: "call mom.", cutOff: true });
+  });
+
+  test("cut() after a bare wake: the command starts after the wake phrase", () => {
+    const a = new CommandAssembler();
+    a.push(utt("Hey Hermes.", 0, 0.8), cfg, at(0.8), at(2));
+    expect(a.cut().done[0]).toMatchObject({ command: "", cutOff: true, lang: "en" });
+  });
+
   test("cut(before): only a command that started before it", () => {
     const a = new CommandAssembler();
     a.push(utt("Hey Hermes, set a timer", 5, 7), cfg, at(9), at(8.5), at(9));
@@ -187,7 +205,7 @@ describe("VoiceDetector: the recognizer broke off mid-command", () => {
   test("a command started after the break is unaffected", async () => {
     const t = setup();
     t.set({ cutBeforeS: 3 });
-    await t.say(utt("Hey Hermes, lights on", 5, 6.5), 8, 6.5, 8);
+    await t.say(utt("Hey Hermes, lights on", 5, 6.5), 9, 6.5, 9);
     expect(t.detections[0]).toMatchObject({ status: "pending", command: "lights on" });
   });
 

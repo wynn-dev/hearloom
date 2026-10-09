@@ -1,4 +1,4 @@
-import type { PartialUtterance, Utterance } from "./types";
+import type { LangSpan, PartialUtterance, Utterance } from "./types";
 
 /** One token from the Soniox real-time API. */
 export interface SonioxToken {
@@ -211,17 +211,26 @@ export class SonioxAssembler {
   private emit(cutOff = false): Utterance | null {
     const toks = this.current;
     this.current = [];
-    const text = toks
-      .map((t) => t.text)
-      .join("")
-      .trim();
+    const raw = toks.map((t) => t.text).join("");
+    const text = raw.trim();
     // No words at all (e.g. a lone symbol): not worth a line of its own.
     if (NO_WORDS.test(text)) return null;
     const first = toks[0]!;
     const last = toks[toks.length - 1]!;
     const langs = new Map<string, number>();
-    for (const t of toks)
-      if (t.language) langs.set(t.language, (langs.get(t.language) ?? 0) + t.text.length);
+    const langSpans: LangSpan[] = [];
+    const lead = raw.length - raw.trimStart().length;
+    let offset = -lead;
+    for (const t of toks) {
+      const start = Math.max(0, offset);
+      offset += t.text.length;
+      const end = Math.min(text.length, offset);
+      if (!t.language || end <= start) continue;
+      langs.set(t.language, (langs.get(t.language) ?? 0) + t.text.length);
+      const prev = langSpans.at(-1);
+      if (prev && prev.lang === t.language && prev.end === start) prev.end = end;
+      else langSpans.push({ start, end, lang: t.language });
+    }
     const lang = [...langs].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
     const confs = toks.map((t) => t.confidence).filter((c): c is number => typeof c === "number");
     return {
@@ -229,6 +238,7 @@ export class SonioxAssembler {
       endAt: this.clock.toAbs(last.end_ms ?? last.start_ms ?? 0),
       text,
       lang,
+      langSpans,
       speakerKey: first.speaker !== undefined ? `${this.speakerPrefix}${first.speaker}` : null,
       confidence: confs.length ? confs.reduce((a, b) => a + b, 0) / confs.length : null,
       provider: "soniox",

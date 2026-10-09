@@ -789,6 +789,7 @@ export class StreamProcessor {
             startAt: u.startAt,
             endAt: u.endAt,
             lang: u.lang,
+            langSpans: u.langSpans,
             speakerKey,
             isSelf: isWearer,
             chainId: placed.chainId,

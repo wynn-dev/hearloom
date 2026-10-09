@@ -67,6 +67,37 @@ describe("Soniox assembly", () => {
     expect(last.startAt).toBe(1_060_100);
   });
 
+  test("each word's language, by character offsets in the text", () => {
+    const clock = new SessionClock();
+    clock.sent(1_000_000, 5000);
+    const a = new SonioxAssembler(clock, "stt-rt-v5");
+    const tok = (text: string, s: number, language?: string) => ({
+      text,
+      start_ms: s,
+      end_ms: s + 200,
+      is_final: true,
+      speaker: "1",
+      ...(language ? { language } : {}),
+    });
+    a.push([
+      tok(" Hey", 100, "nl"),
+      tok(" An", 300, "nl"),
+      tok("drew", 400, "nl"),
+      tok(",", 500, "nl"),
+      tok(" call", 700, "en"),
+      tok(" mom", 900, "en"),
+      tok(".", 1000),
+    ]);
+    const u = a.flush()!;
+    expect(u.text).toBe("Hey Andrew, call mom.");
+    expect(u.lang).toBe("nl");
+    expect(u.langSpans).toEqual([
+      { start: 0, end: 11, lang: "nl" },
+      { start: 11, end: 20, lang: "en" },
+    ]);
+    expect(u.text.slice(11, 20)).toBe(" call mom");
+  });
+
   test("the utterance in progress: its final tokens plus the current guesses", () => {
     const clock = new SessionClock();
     clock.sent(1_000_000, 2000);

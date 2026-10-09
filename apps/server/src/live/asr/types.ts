@@ -1,9 +1,18 @@
+/** Characters `start`..`end` of an utterance's text are in this language ("en"). */
+export interface LangSpan {
+  start: number;
+  end: number;
+  lang: string;
+}
+
 /** A finalized piece of transcript with absolute (unix ms) times. */
 export interface Utterance {
   startAt: number;
   endAt: number;
   text: string;
   lang: string | null;
+  /** The language of each stretch of `text` (character offsets), when the engine tags words. */
+  langSpans?: LangSpan[];
   /** Engine-scoped speaker label (e.g. "soniox:2"), if the engine diarizes. */
   speakerKey: string | null;
   confidence: number | null;

@@ -6,6 +6,16 @@
  * an utterance or of a sentence in it. The name may be a configured name, an alias (a spelling the
  * speech recognizer actually produced, learned while teaching), or a near miss: one or two edits
  * away, or the same phonetic key ("her mess" → HRMS, like "Hermes").
+ *
+ * Near misses of the name only count right after hey/hi/hello/hoi/hallo at a sentence start:
+ * everywhere else the name must be heard exactly (or as a learned alias). Dutch "oké, ieder…"
+ * sounds like "oké, Adri" to the matcher, and a false trigger acts in the world.
+ *
+ * Fillers, lead-ins and repeated greetings may come first ("um, so hey", "yeah, hey", "hey hey",
+ * "OK, hey"), and "there" may follow hey/hi/hello ("hey there Hermes"). Within an utterance, a
+ * wake phrase may also follow a dash (the recognizer marks cut-off speech with one) or a short
+ * closing clause and a comma ("I'm off, hey Hermes"), but not reported speech ("he said, hey
+ * Hermes, …").
  */
 
 export interface WakeConfig {
@@ -30,6 +40,8 @@ export interface WakeMatch {
   start: number;
   /** Character offset just after the name. */
   end: number;
+  /** Character offset of the command in the text (the text's length if there is none). */
+  commandStart: number;
 }
 
 const GREETINGS = new Set([
@@ -37,17 +49,109 @@ const GREETINGS = new Set([
   "hay",
   "hi",
   "hiya",
+  "hai",
   "hello",
   "ok",
   "okay",
+  // Dutch "oké", "okee".
+  "oke",
+  "okee",
   "yo",
+  "ey",
   "he",
   "hee",
+  "heej",
   "hej",
   "hoi",
   "hallo",
 ]);
-const FILLERS = new Set(["um", "uh", "uhm", "erm", "er", "ah", "so", "oh", "eh", "nou", "hmm"]);
+/** Greetings after which a near miss of the name counts (at a sentence start, first in line). */
+const LOOSE_GREETINGS = new Set(["hey", "hi", "hello", "hoi", "hallo"]);
+/** Greetings that "there" may follow ("hey there Hermes"). */
+const THERE_GREETINGS = new Set(["hey", "hi", "hello"]);
+/** Sounds that carry no meaning: also dropped from the start of a command. */
+const HESITATIONS = new Set(["um", "uh", "uhm", "erm", "ah", "eh", "hmm"]);
+/** Before the greeting only ("er" is also a Dutch word: "er is…"). */
+const FILLERS = new Set([...HESITATIONS, "er", "so", "oh", "nou"]);
+/** Words that may lead into a greeting ("yeah, hey Hermes", "and hey Hermes"). */
+const LEAD_INS = new Set(["yeah", "yes", "ja", "and", "en", "alright", "right", "well"]);
+/** Words that report speech: a greeting after them is quoted ("he said, hey Hermes, …"). */
+const REPORTING = new Set([
+  "say",
+  "says",
+  "said",
+  "saying",
+  "tell",
+  "tells",
+  "told",
+  "telling",
+  "ask",
+  "asks",
+  "asked",
+  "asking",
+  "like",
+  "goes",
+  "went",
+  "shouted",
+  "yelled",
+  "wrote",
+  "zeg",
+  "zegt",
+  "zei",
+  "zeiden",
+  "zeggen",
+  "gezegd",
+  "vroeg",
+  "vroegen",
+  "vraag",
+  "vraagt",
+  "vragen",
+  "gevraagd",
+  "riep",
+  "roept",
+  "schreef",
+]);
+/** A name followed by one of these is narration, not address ("hey, Hermes said…"). */
+const NARRATING = new Set(["said", "says", "told", "asked", "zei", "zegt", "vroeg", "vertelde"]);
+/**
+ * Short clauses that close what came before: after one and a comma, a wake phrase may start
+ * ("Thanks, hey Hermes", "I'm off, hey Hermes", "Dank je, hoi Hermes").
+ */
+const CLOSERS = new Set([
+  "thanks",
+  "thank",
+  "ok",
+  "okay",
+  "oke",
+  "okee",
+  "bye",
+  "right",
+  "alright",
+  "fine",
+  "good",
+  "great",
+  "cool",
+  "sure",
+  "done",
+  "off",
+  "yes",
+  "yeah",
+  "no",
+  "dank",
+  "bedankt",
+  "doei",
+  "goed",
+  "prima",
+  "klaar",
+  "top",
+  "mooi",
+  "ja",
+  "nee",
+]);
+/** A closing clause before a comma is at most this many words. */
+const MAX_CLOSER_WORDS = 3;
+/** At most this many fillers, lead-ins and other greetings before the greeting itself. */
+const MAX_LEAD = 4;
 /** Name spans tried after the greeting, in words ("her mess" is two). */
 const MAX_NAME_WORDS = 3;
 
@@ -185,19 +289,92 @@ function joined(text: string, span: Token[]): boolean {
   return true;
 }
 
-/** Can a wake phrase start at token i: the start of the text, or after a sentence end? */
-function anchored(text: string, tokens: Token[], i: number): boolean {
-  if (i === 0) return true;
-  return /[.!?…]/.test(text.slice(tokens[i - 1]!.end, tokens[i]!.start));
+/** The words of the clause before token i (back to the previous punctuation or the start). */
+function clauseBefore(text: string, tokens: Token[], i: number): Token[] {
+  let k = i - 1;
+  while (k > 0 && !/[.!?…—–,;:]/.test(text.slice(tokens[k - 1]!.end, tokens[k]!.start))) k--;
+  return tokens.slice(Math.max(0, k), i);
 }
 
-/** Greeting position for an anchor at token i (after up to two fillers), or -1. */
-function greetingAt(tokens: Token[], i: number): number {
-  for (let g = i; g < Math.min(tokens.length, i + 3); g++) {
-    if (GREETINGS.has(tokens[g]!.norm)) return g;
-    if (!FILLERS.has(tokens[g]!.norm)) return -1;
+/**
+ * Can a wake phrase start at token i?
+ * - "sentence": at the start of the text, or after a sentence end;
+ * - "dash": after a dash ("—" also marks speech cut off), unless the clause before it reports
+ *   speech ("I told him — hey Hermes — …");
+ * - "comma": after a short closing clause and a comma ("Thanks, hey Hermes", "I'm off, hey
+ *   Hermes"), not reported speech ("You just say, hey Hermes, …");
+ * - null: inside a sentence.
+ * After a dash or a comma, only a name heard exactly counts, right after the greeting.
+ */
+function anchored(text: string, tokens: Token[], i: number): "sentence" | "dash" | "comma" | null {
+  if (i === 0) return "sentence";
+  const gap = text.slice(tokens[i - 1]!.end, tokens[i]!.start);
+  if (/[.!?…]/.test(gap)) return "sentence";
+  const dash = /[—–]/.test(gap);
+  if (!dash && !gap.includes(",")) return null;
+  const clause = clauseBefore(text, tokens, i);
+  if (clause.some((t) => REPORTING.has(t.norm))) return null;
+  if (dash) return "dash";
+  return clause.length <= MAX_CLOSER_WORDS && clause.some((t) => CLOSERS.has(t.norm))
+    ? "comma"
+    : null;
+}
+
+interface NameStart {
+  /** The token the name starts at. */
+  at: number;
+  /** The greeting's token. */
+  greeting: number;
+  /** A near miss of the name may count (else only an exact name or alias). */
+  loose: boolean;
+  /** Greeting and name only separated by spaces ("…, hey, Hermes said" is not a wake phrase). */
+  tight: boolean;
+}
+
+/**
+ * Where the name may start, for a wake phrase anchored at token i: right after a greeting, which
+ * may follow up to `MAX_LEAD` fillers, lead-ins or other greetings ("um, so hey", "hey hey", "OK,
+ * hey"), or after "hey there".
+ */
+function nameStarts(tokens: Token[], i: number): NameStart[] {
+  const out: NameStart[] = [];
+  for (let j = i; j < Math.min(tokens.length, i + MAX_LEAD + 1); j++) {
+    const w = tokens[j]!.norm;
+    if (GREETINGS.has(w)) {
+      // Only hey/hi/hello/hoi/hallo, first in line (after hesitations at most).
+      const first = tokens.slice(i, j).every((t) => HESITATIONS.has(t.norm) || t.norm === "er");
+      out.push({ at: j + 1, greeting: j, loose: first && LOOSE_GREETINGS.has(w), tight: j > i });
+      if (THERE_GREETINGS.has(w) && tokens[j + 1]?.norm === "there")
+        out.push({ at: j + 2, greeting: j, loose: false, tight: true });
+    } else if (!LEAD_INS.has(w) && !FILLERS.has(w)) break;
   }
-  return -1;
+  return out;
+}
+
+/** The greeting for an anchor at token i (the last one, "hey hey"), or -1. */
+function greetingAt(tokens: Token[], i: number): number {
+  const starts = nameStarts(tokens, i).filter((s) => s.at === s.greeting + 1);
+  return starts.at(-1)?.greeting ?? -1;
+}
+
+/** Best name heard from token `at` on, as matched by `scoreName` (null: none). */
+function nameAt(
+  text: string,
+  tokens: Token[],
+  at: number,
+  cfg: WakeConfig,
+): { name: string; score: number; end: number; nameStart: number; next: number } | null {
+  let best: { name: string; score: number; end: number; nameStart: number; next: number } | null =
+    null;
+  for (let k = 1; k <= MAX_NAME_WORDS && at + k <= tokens.length; k++) {
+    const span = tokens.slice(at, at + k);
+    if (!joined(text, span)) break;
+    const hit = scoreName(span.map((t) => t.norm).join(""), cfg, k);
+    // Ties go to the longer span ("her mess" over "her").
+    if (hit && (!best || hit.score >= best.score))
+      best = { ...hit, end: span.at(-1)!.end, nameStart: span[0]!.start, next: at + k };
+  }
+  return best;
 }
 
 /** Find a wake phrase in a transcript; null if there is none. */
@@ -205,30 +382,59 @@ export function matchWake(text: string, cfg: WakeConfig): WakeMatch | null {
   if (cfg.names.length === 0) return null;
   const tokens = tokenize(text);
   for (let i = 0; i < tokens.length; i++) {
-    if (!anchored(text, tokens, i)) continue;
-    const g = greetingAt(tokens, i);
-    if (g < 0) continue;
+    const anchor = anchored(text, tokens, i);
+    if (!anchor) continue;
     let best: { name: string; score: number; end: number; nameStart: number } | null = null;
-    for (let k = 1; k <= MAX_NAME_WORDS && g + k < tokens.length; k++) {
-      const span = tokens.slice(g + 1, g + 1 + k);
-      if (!joined(text, span)) break;
-      const hit = scoreName(span.map((t) => t.norm).join(""), cfg, k);
-      // Ties go to the longer span ("her mess" over "her").
-      if (hit && (!best || hit.score >= best.score))
-        best = { ...hit, end: span.at(-1)!.end, nameStart: span[0]!.start };
+    for (const { at, greeting, loose, tight } of nameStarts(tokens, i)) {
+      // "…, hey Hermes" but not "…, hey, Hermes said".
+      if (
+        (tight || anchor !== "sentence") &&
+        at < tokens.length &&
+        !joined(text, tokens.slice(greeting, at + 1))
+      )
+        continue;
+      const hit = nameAt(text, tokens, at, cfg);
+      // A close name: "Hey Hermis", but not "Hey, ieder…" (comma) or "Oké iedere…".
+      const close = loose && anchor === "sentence" && joined(text, tokens.slice(greeting, at + 1));
+      if (!hit || (hit.score < 1 && !close)) continue;
+      // "Hey, Hermes said…": talking about the agent, not to it.
+      const after = tokens[hit.next];
+      if (after && NARRATING.has(after.norm) && joined(text, [tokens[hit.next - 1]!, after]))
+        continue;
+      if (!best || hit.score > best.score) best = hit;
     }
-    if (best) {
-      return {
-        name: best.name,
-        heardAs: text.slice(best.nameStart, best.end),
-        command: cleanCommand(text.slice(best.end)),
-        score: best.score,
-        start: tokens[i]!.start,
-        end: best.end,
-      };
+    if (!best) continue;
+    let { command, start: commandStart } = commandFrom(text, best.end);
+    // Said twice ("Hey Hermes, hey Hermes, call mom"): the command is what follows the last one.
+    const again = command ? matchWake(command, cfg) : null;
+    if (again?.start === 0 && again.score === 1) {
+      command = again.command;
+      commandStart = command ? commandStart + again.commandStart : text.length;
     }
+    return {
+      name: best.name,
+      heardAs: text.slice(best.nameStart, best.end),
+      command,
+      score: best.score,
+      start: tokens[i]!.start,
+      end: best.end,
+      commandStart,
+    };
   }
   return null;
+}
+
+/**
+ * Is the text only a greeting (and fillers): "Hey", "Um, hey", "Oké."? A wake phrase may go on
+ * from it in the next utterance (the recognizer may split "Hey" | "Hermes, call mom" where it
+ * hears a speaker change).
+ */
+export function isGreetingOnly(text: string): boolean {
+  const tokens = tokenize(text);
+  return (
+    tokens.some((t) => GREETINGS.has(t.norm)) &&
+    tokens.every((t) => GREETINGS.has(t.norm) || FILLERS.has(t.norm))
+  );
 }
 
 /**
@@ -241,7 +447,8 @@ export function nearWake(text: string, cfg: WakeConfig): WakeMatch | null {
   const target = compactName(name);
   const tokens = tokenize(text);
   for (let i = 0; i < tokens.length; i++) {
-    if (!anchored(text, tokens, i)) continue;
+    // Not after a comma: only exact names count there, so nothing is "near".
+    if (anchored(text, tokens, i) !== "sentence") continue;
     const g = greetingAt(tokens, i);
     if (g < 0) continue;
     let best: { score: number; end: number; start: number } | null = null;
@@ -254,25 +461,45 @@ export function nearWake(text: string, cfg: WakeConfig): WakeMatch | null {
         best = { score, start: span[0]!.start, end: span.at(-1)!.end };
     }
     if (best) {
+      const { command, start: commandStart } = commandFrom(text, best.end);
       return {
         name,
         heardAs: text.slice(best.start, best.end),
-        command: cleanCommand(text.slice(best.end)),
+        command,
         score: Math.round(best.score * 100) / 100,
         start: tokens[i]!.start,
         end: best.end,
+        commandStart,
       };
     }
   }
   return null;
 }
 
-/** Text after the name: leading punctuation and fillers dropped. */
-export function cleanCommand(rest: string): string {
-  let s = rest.replace(/^[\s,.:;!?…\-–—'"’”]+/u, "").trim();
+const LEADING_PUNCTUATION = /^[\s,.:;!?…\-–—'"’”]+/u;
+
+/**
+ * The command in `text` from offset `from` (just after the name), and where it starts: leading
+ * punctuation and hesitations ("uh, call mom") dropped; "" if only fillers are left.
+ */
+function commandFrom(text: string, from: number): { command: string; start: number } {
+  let start = from;
+  for (;;) {
+    start += LEADING_PUNCTUATION.exec(text.slice(start))?.[0].length ?? 0;
+    const first = tokenize(text.slice(start))[0];
+    if (!first || first.start > 0 || !HESITATIONS.has(first.norm)) break;
+    start += first.end;
+  }
+  const command = text.slice(start).trim();
   // "Hey Hermes. Um." is a wake word on its own.
-  if (tokenize(s).every((t) => FILLERS.has(t.norm))) s = "";
-  return s;
+  if (tokenize(command).every((t) => FILLERS.has(t.norm)))
+    return { command: "", start: text.length };
+  return { command, start };
+}
+
+/** Text after the name: leading punctuation and hesitations dropped. */
+export function cleanCommand(rest: string): string {
+  return commandFrom(rest, 0).command;
 }
 
 /** Word-level similarity of two texts: 1 = same words, 0 = nothing in common. */
