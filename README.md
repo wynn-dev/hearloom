@@ -36,14 +36,15 @@ docs/            design.md (start here), protocol.md, models.md, ios.md, agent.m
 pnpm install
 cp .env.example .env            # then set BETTER_AUTH_SECRET (openssl rand -base64 48) and SONIOX_API_KEY
 pnpm db:up && pnpm db:migrate
-pnpm link-device --email you@example.com --name You --create   # first account is the admin
 pnpm --filter @hearloom/server download-models            # local VAD/sound/speaker models
 pnpm --filter @hearloom/server build:diarizer              # macOS: speaker diarization sidecar
 pnpm dev                        # development: server :3000 + worker + console :5173 (Vite)
 pnpm start                      # everyday use: builds the console, then server + worker on :3000
+pnpm link-device --email you@example.com --name You --create   # with the server up; first account is the admin
 ```
 
-`link-device` prints a QR code and a link that sign one device in (see below).
+`link-device` prints a QR code and a link that sign one device in within 5 minutes (see below); run it
+again for another.
 
 Simulate a phone streaming audio (no hardware needed):
 

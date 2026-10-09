@@ -167,6 +167,13 @@ function LinkPanel({ userId, onClose }: { userId?: string; onClose: () => void }
         <p className="text-xs text-ink-3">Or enter the code</p>
         <p className="font-mono text-2xl font-semibold tracking-wider select-all">{link.code}</p>
       </div>
+      {/^(?:localhost|127(?:\.\d+){3}|\[::1\])$/.test(new URL(link.server).hostname) ? (
+        <p className="rounded-md bg-warn-soft px-2.5 py-2 text-[13px] text-warn-ink">
+          This points at {link.server}, which only this computer can reach. Set{" "}
+          <code className="font-mono">PUBLIC_URL</code> in the server's .env to the address your
+          phone uses (e.g. https://&lt;mac&gt;.&lt;tailnet&gt;.ts.net) and restart it.
+        </p>
+      ) : null}
       <div className="flex flex-col gap-1.5">
         <p className="text-xs font-medium text-ink-2">For a browser: open this link</p>
         <CopyField value={link.webUrl} />

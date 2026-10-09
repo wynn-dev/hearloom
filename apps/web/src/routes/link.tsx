@@ -7,6 +7,7 @@ import { Button, buttonClass } from "../components/ui/button";
 import { Spinner } from "../components/ui/misc";
 import { authClient, redeemLinkCode } from "../lib/auth";
 import { codeFromHash } from "../lib/link";
+import { client } from "../lib/orpc";
 
 /**
  * Where a "Link device" web link lands (`/link#code=…`): signs this browser in with the code. Public,
@@ -47,22 +48,22 @@ function LinkPage() {
   const navigate = useNavigate();
   const [phase, setPhase] = useState<Phase>("idle");
 
-  const redeem = async (code: string, signOutFirst: boolean) => {
+  /** `replace`: this browser is signed in already; that sign-in ends once the code has worked. */
+  const redeem = async (code: string, replace: boolean) => {
     setPhase("redeeming");
+    const previous = replace ? session.data?.session.id : undefined;
     try {
-      if (signOutFirst) {
-        await authClient.signOut();
-        queryClient.clear();
-      }
+      // Redeem first: a wrong or used code leaves the current sign-in alone.
       await redeemLinkCode(code);
+      // The old session's cookie is gone; end it too (when it was the same account: another
+      // account's sessions are its own to manage, under Devices).
+      if (previous) await client.sessions.revoke({ id: previous }).catch(() => {});
       queryClient.clear();
       setPhase("done");
       await session.refetch();
       await navigate({ to: "/", replace: true });
     } catch (err) {
       setPhase({ error: err instanceof Error ? err.message : "Sign-in failed" });
-      // Signed out on the way, maybe: show that, not the account we left.
-      if (signOutFirst) void session.refetch();
     }
   };
 
