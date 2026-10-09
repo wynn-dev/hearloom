@@ -425,3 +425,141 @@ test("deleting a user removes their codes", async () => {
     await db.select().from(schema.linkCodes).where(eq(schema.linkCodes.userId, user.id)),
   ).toEqual([]);
 });
+
+/** An auth API call as a device holding `token`. */
+function authCall(path: string, token: string, body: unknown, userAgent = APP_UA) {
+  return app.fetch(
+    new Request(`${BASE}/api/auth${path}`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        "user-agent": userAgent,
+        origin: BASE,
+      },
+      body: JSON.stringify(body),
+    }),
+  );
+}
+
+test("an admin's phone token can't use admin endpoints or sign every device out", async () => {
+  const admin = await makeUser("admin");
+  const member = await makeUser();
+  const phoneToken = await link(admin.id, APP_UA);
+  const browserToken = await link(admin.id, SAFARI);
+  for (const [path, body] of [
+    ["/admin/set-user-password", { userId: admin.id, newPassword: "a-new-password-123" }],
+    ["/admin/impersonate-user", { userId: member.id }],
+    ["/admin/ban-user", { userId: member.id }],
+    ["/revoke-sessions", {}],
+  ] as const) {
+    // Even claiming to be a browser now: what counts is what signed in.
+    expect((await authCall(path, phoneToken, body, SAFARI)).status).toBe(403);
+  }
+  expect((await sessionFor({ authorization: `Bearer ${browserToken}` }))?.user.id).toBe(admin.id);
+  // The console can.
+  const res = await authCall(
+    "/admin/set-user-password",
+    browserToken,
+    { userId: member.id, newPassword: "a-new-password-123" },
+    SAFARI,
+  );
+  expect(res.status).toBe(200);
+});
+
+test("a phone's token can sign itself out, not other devices", async () => {
+  const user = await makeUser();
+  const browserToken = await link(user.id, SAFARI);
+  const phoneToken = await link(user.id, APP_UA);
+  const otherPhoneToken = await link(user.id, APP_UA);
+  const phone = rpcAs(phoneToken);
+  const { phoneId: otherPhoneId } = await rpcAs(otherPhoneToken).phones.register({ name: "B" });
+  const sessions = await rpcAs(browserToken).sessions.list();
+  const browserSession = sessions.find((s) => s.kind === "browser")!;
+  await expect(phone.sessions.revoke({ id: browserSession.id })).rejects.toMatchObject({
+    code: "FORBIDDEN",
+  });
+  await expect(phone.phones.remove({ id: otherPhoneId })).rejects.toMatchObject({
+    code: "FORBIDDEN",
+  });
+  expect((await sessionFor({ authorization: `Bearer ${browserToken}` }))?.user.id).toBe(user.id);
+  expect((await sessionFor({ authorization: `Bearer ${otherPhoneToken}` }))?.user.id).toBe(user.id);
+  const own = (await phone.sessions.list()).find((s) => s.current)!;
+  await phone.sessions.revoke({ id: own.id });
+  expect(await sessionFor({ authorization: `Bearer ${phoneToken}` })).toBeNull();
+});
+
+test("a register still in flight from the replaced sign-in leaves the phone with the new one", async () => {
+  const user = await makeUser();
+  const first = await link(user.id, APP_UA);
+  const { phoneId } = await rpcAs(first).phones.register({ name: "iPhone" });
+  await db
+    .update(schema.phones)
+    .set({ apnsToken: "cd".repeat(32) })
+    .where(eq(schema.phones.id, phoneId));
+  // Signed in again a moment later; the old sign-in's register lands after the new one's.
+  setSystemTime(new Date(Date.now() + 1000));
+  const second = await link(user.id, APP_UA);
+  setSystemTime();
+  const stale = rpcAs(first);
+  await rpcAs(second).phones.register({ id: phoneId, name: "iPhone" });
+  // The old session is gone, so a stale call can't even authenticate…
+  await expect(stale.phones.register({ id: phoneId, name: "iPhone" })).rejects.toMatchObject({
+    code: "UNAUTHORIZED",
+  });
+  expect((await sessionFor({ authorization: `Bearer ${second}` }))?.user.id).toBe(user.id);
+  const [phone] = await db.select().from(schema.phones).where(eq(schema.phones.id, phoneId));
+  // …and the phone kept its push token across the re-sign-in.
+  expect(phone?.apnsToken).toBe("cd".repeat(32));
+  expect(phone?.sessionId).toBe(
+    (await sessionFor({ authorization: `Bearer ${second}` }))!.session.id,
+  );
+});
+
+test("a register that passed auth before a newer sign-in registered is a no-op", async () => {
+  const user = await makeUser();
+  const first = await link(user.id, APP_UA);
+  const { phoneId } = await rpcAs(first).phones.register({ name: "iPhone" });
+  setSystemTime(new Date(Date.now() + 1000));
+  const second = await link(user.id, APP_UA);
+  setSystemTime();
+  const secondId = (await sessionFor({ authorization: `Bearer ${second}` }))!.session.id;
+  // The newer session has registered, but the older one still exists (its handler raced ahead of
+  // the revoke): simulate by pointing the phone at the newer session directly.
+  await db.update(schema.phones).set({ sessionId: secondId }).where(eq(schema.phones.id, phoneId));
+  expect(await rpcAs(first).phones.register({ id: phoneId, name: "iPhone" })).toEqual({ phoneId });
+  expect((await sessionFor({ authorization: `Bearer ${second}` }))?.user.id).toBe(user.id);
+  const [phone] = await db.select().from(schema.phones).where(eq(schema.phones.id, phoneId));
+  expect(phone?.sessionId).toBe(secondId);
+});
+
+test("however a session ends, its phone stops getting pushes", async () => {
+  const admin = await makeUser("admin");
+  const member = await makeUser();
+  const adminBrowser = await link(admin.id, SAFARI);
+  const memberPhone = await link(member.id, APP_UA);
+  const { phoneId } = await rpcAs(memberPhone).phones.register({ name: "iPhone" });
+  await db
+    .update(schema.phones)
+    .set({ apnsToken: "ef".repeat(32) })
+    .where(eq(schema.phones.id, phoneId));
+  expect(
+    (await authCall("/admin/ban-user", adminBrowser, { userId: member.id }, SAFARI)).status,
+  ).toBe(200);
+  expect(await sessionFor({ authorization: `Bearer ${memberPhone}` })).toBeNull();
+  const [phone] = await db.select().from(schema.phones).where(eq(schema.phones.id, phoneId));
+  expect(phone?.apnsToken).toBeNull();
+});
+
+test("an expired ban doesn't stop an admin linking that user", async () => {
+  const admin = await makeUser("admin");
+  const member = await makeUser();
+  await db
+    .update(schema.user)
+    .set({ banned: true, banExpires: new Date(Date.now() - 60_000) })
+    .where(eq(schema.user.id, member.id));
+  const minted = await rpcAs(await link(admin.id, SAFARI)).sessions.createLink({
+    userId: member.id,
+  });
+  expect((await redeem(minted.code)).status).toBe(200);
+});

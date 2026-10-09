@@ -1,4 +1,6 @@
 {
   "extends": "../../tsconfig.base.json",
+  // @hearloom/shared uses URL (link.ts), which every runtime that loads this has.
+  "compilerOptions": { "lib": ["ES2023", "DOM"] },
   "include": ["src"]
 }

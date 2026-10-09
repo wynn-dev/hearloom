@@ -11,6 +11,7 @@ import { auth } from "../auth";
 import { sql } from "../db";
 import { env } from "../env";
 import { CODE_TTL_MS, formatCode, linkUrls, mintLinkCode } from "../link/codes";
+import { isBanned } from "../sessions";
 
 const { values } = parseArgs({
   args: Bun.argv.slice(2),
@@ -71,7 +72,8 @@ if (!user) {
   );
   console.log(`created ${admin ? "admin " : ""}account ${email}`);
 }
-if ((user as { banned?: boolean | null }).banned) fail(`${email} is banned`);
+if (isBanned(user as { banned?: boolean | null; banExpires?: Date | null }))
+  fail(`${email} is banned`);
 
 const server = (values.server ?? env.PUBLIC_URL).replace(/\/+$/, "");
 if (!values.server && /\/\/(localhost|127\.|\[::1\])/.test(server)) {

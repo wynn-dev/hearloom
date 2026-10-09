@@ -64,7 +64,7 @@ export function untrackSocket(sessionId: string, ws: ServerWebSocket<unknown>): 
   if (set?.size === 0) sockets.delete(sessionId);
 }
 
-function closeSockets(sessionId: string): void {
+export function closeSockets(sessionId: string): void {
   // 1008 (policy violation): the app reconnects, gets a 401 and pauses until signed in again; audio
   // it hasn't uploaded stays buffered on the phone.
   for (const ws of sockets.get(sessionId) ?? []) ws.close(1008, "session revoked");
@@ -113,34 +113,51 @@ export async function listSessions(userId: string, currentSessionId: string) {
     .leftJoin(phones, eq(phones.sessionId, session.id))
     .where(and(eq(session.userId, userId), gt(session.expiresAt, new Date())))
     .orderBy(asc(session.createdAt));
-  return rows.map((r) => {
+  const seen = new Set<string>();
+  return rows.flatMap((r) => {
+    if (seen.has(r.id)) return [];
+    seen.add(r.id);
     const kind = clientKind(r.userAgent);
-    return {
-      id: r.id,
-      kind,
-      name:
-        kind === "browser"
-          ? describeBrowser(r.userAgent)
-          : (r.phoneName ?? "Hearloom app (not registered yet)"),
-      detail: kind === "app" ? r.phoneModel : null,
-      ipAddress: r.ipAddress || null,
-      phoneId: r.phoneId,
-      current: r.id === currentSessionId,
-      createdAt: r.createdAt,
-      lastActiveAt: r.updatedAt,
-      expiresAt: r.expiresAt,
-    };
+    return [
+      {
+        id: r.id,
+        kind,
+        name:
+          kind === "browser"
+            ? describeBrowser(r.userAgent)
+            : (r.phoneName ?? "Hearloom app (not registered yet)"),
+        detail: kind === "app" ? r.phoneModel : null,
+        ipAddress: r.ipAddress || null,
+        phoneId: r.phoneId,
+        current: r.id === currentSessionId,
+        createdAt: r.createdAt,
+        lastActiveAt: r.updatedAt,
+        expiresAt: r.expiresAt,
+      },
+    ];
   });
 }
 
-/** Sign a session out for good. False if the user has no such session. */
-export async function revokeSession(userId: string, sessionId: string): Promise<boolean> {
+/** Banned now (a ban past its expiry no longer counts, as in better-auth's admin plugin). */
+export function isBanned(user: { banned?: boolean | null; banExpires?: Date | null }): boolean {
+  return !!user.banned && (!user.banExpires || user.banExpires.getTime() > Date.now());
+}
+
+/**
+ * Sign a session out for good. False if the user has no such session. `keepPhone`: the phone on it is
+ * signing in again (its streams and push token carry over to the new session).
+ */
+export async function revokeSession(
+  userId: string,
+  sessionId: string,
+  { keepPhone = false } = {},
+): Promise<boolean> {
   const [own] = await db
     .select({ id: session.id })
     .from(session)
     .where(and(eq(session.id, sessionId), eq(session.userId, userId)));
   if (!own) return false;
-  await releasePhones(userId, eq(phones.sessionId, sessionId));
+  if (!keepPhone) await releasePhones(userId, eq(phones.sessionId, sessionId));
   await db.delete(session).where(eq(session.id, sessionId));
   closeSockets(sessionId);
   invalidate(userId, ["sessions", "phones", "status"]);

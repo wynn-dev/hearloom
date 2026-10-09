@@ -1,14 +1,16 @@
 import { schema } from "@hearloom/db";
 import { type BetterAuthPlugin, betterAuth, type DBAdapter, type Where } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
-import { APIError, createAuthEndpoint } from "better-auth/api";
+import { APIError, createAuthEndpoint, createAuthMiddleware } from "better-auth/api";
 import { setSessionCookie } from "better-auth/cookies";
 import { admin, bearer } from "better-auth/plugins";
+import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "./db";
 import { env } from "./env";
 import { attachLinkSession, consumeLinkCode, sha256Hex } from "./link/codes";
 import { invalidate } from "./realtime";
+import { clientKind, closeSockets, releasePhones } from "./sessions";
 
 const extraOrigins = env.TRUSTED_ORIGINS.split(",")
   .map((o) => o.trim())
@@ -188,7 +190,13 @@ export function hashSessionTokens(adapter: DBAdapter): DBAdapter {
       if (row || token === undefined || STORED_TOKEN.test(token)) return withToken(row, token);
       // A row from before hashing: find it by its plain token once, and hash it.
       const legacy = await adapter.findOne<{ id: string; token: string }>(args);
-      if (!legacy || legacy.token !== token) return null;
+      if (!legacy || legacy.token !== token) {
+        // A concurrent request may have just hashed it.
+        return withToken(
+          await adapter.findOne({ ...args, where: hashWhere(args.where) ?? [] }),
+          token,
+        );
+      }
       await adapter.update({
         model: "session",
         where: [{ field: "id", value: legacy.id }],
@@ -339,6 +347,35 @@ export const auth = betterAuth({
     // sessions don't sign in again), and the rest of the auth paths have plenty of room. The one-time
     // better-auth warning about "a single shared per-path bucket" is this, on purpose.
     ipAddress: { ipAddressHeaders: [] },
+  },
+  hooks: {
+    // Managing users and signing every device out are for the console: an admin's phone token (stolen
+    // with the phone) must not set a password, impersonate someone, or sign the owner's browsers out,
+    // which would also get it a browser session to mint link codes with.
+    before: createAuthMiddleware(async (ctx) => {
+      if (!ctx.path.startsWith("/admin/") && ctx.path !== "/revoke-sessions") return;
+      // From the request (this runs before the bearer plugin turns a token into a cookie).
+      const headers = ctx.request?.headers ?? ctx.headers;
+      const session = headers ? await auth.api.getSession({ headers }) : null;
+      if (session && clientKind(session.session.userAgent) !== "browser") {
+        throw new APIError("FORBIDDEN", { message: "Use the web console for this." });
+      }
+    }),
+  },
+  databaseHooks: {
+    session: {
+      delete: {
+        // However a session ends (sign-out, ban, user removed, all devices signed out): its phone stops
+        // getting pushes and its open sockets close. Before the delete, which unsets phones.session_id.
+        before: async (s) => {
+          await releasePhones(s.userId, eq(schema.phones.sessionId, s.id));
+        },
+        after: async (s) => {
+          closeSockets(s.id);
+          invalidate(s.userId, ["sessions", "phones", "status"]);
+        },
+      },
+    },
   },
   plugins: [admin(), bearer(), linkDevice()],
 });

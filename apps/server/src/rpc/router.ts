@@ -2,7 +2,7 @@ import { contract } from "@hearloom/api";
 import { schema } from "@hearloom/db";
 import { publicSettings, voiceRenameReset } from "@hearloom/shared";
 import { implement, ORPCError } from "@orpc/server";
-import { and, asc, count, desc, eq, gte, isNull, lt, lte, max, or } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, isNull, lt, lte, max, ne, or } from "drizzle-orm";
 import { createToken } from "../agent/tokens";
 import { generateWebhookSecret } from "../agent/webhooks";
 import { type AuthSession, getSession } from "../auth";
@@ -24,7 +24,7 @@ import { formatCode, linkCodeStatus, linkUrls, mintLinkCode } from "../link/code
 import { livePipeline } from "../live/host";
 import { markOpened, notify } from "../notify/gateway";
 import { invalidate } from "../realtime";
-import { clientKind, listSessions, releasePhones, revokeSession } from "../sessions";
+import { clientKind, isBanned, listSessions, releasePhones, revokeSession } from "../sessions";
 import { getSettings, updateSettings } from "../settings";
 import { FeedbackError, listCommands, sendTestCommand, setFeedback } from "../voice/commands";
 import { voiceProfile } from "../voice/profile";
@@ -68,6 +68,15 @@ const authed = os.use(async ({ context, next }) => {
 });
 
 type Ctx = RpcContext & { session: AuthSession; userId: string };
+
+/**
+ * Only the console signs other devices out: a phone's token (stolen with the phone) could otherwise
+ * keep signing its owner's browsers out. The app may end its own session.
+ */
+function assertMaySignOut(session: AuthSession, target: string | null): void {
+  if (clientKind(session.session.userAgent) === "browser" || target === session.session.id) return;
+  throw new ORPCError("FORBIDDEN", { message: "Sign devices out from the web console." });
+}
 
 const LOOPBACK = /^(?:localhost|127(?:\.\d+){3}|\[::1\])$/;
 
@@ -261,14 +270,18 @@ export const router = authed.router({
   phones: {
     register: authed.phones.register.handler(async ({ context, input }) => {
       const { userId, session } = context as Ctx;
-      // Signed in again on this phone: the sign-in it had before is no longer used by anyone.
       if (input.id) {
         const [prev] = await db
-          .select({ sessionId: phones.sessionId })
+          .select({ sessionId: phones.sessionId, createdAt: schema.session.createdAt })
           .from(phones)
+          .leftJoin(schema.session, eq(schema.session.id, phones.sessionId))
           .where(and(eq(phones.id, input.id), eq(phones.userId, userId)));
-        if (prev?.sessionId && prev.sessionId !== session.session.id) {
-          await revokeSession(userId, prev.sessionId);
+        if (prev?.sessionId && prev.sessionId !== session.session.id && prev.createdAt) {
+          // A newer sign-in already registered this phone: this call is from the one it replaced
+          // (still in flight). Leave the phone with the newer one.
+          if (prev.createdAt > session.session.createdAt) return { phoneId: input.id };
+          // Signed in again on this phone: the sign-in it had before is no longer used by anyone.
+          await revokeSession(userId, prev.sessionId, { keepPhone: true });
         }
       }
       const values = {
@@ -282,23 +295,37 @@ export const router = authed.router({
         lastSeenAt: new Date(),
       };
       let phoneId: string | undefined;
-      if (input.id) {
-        const [row] = await db
-          .update(phones)
-          .set(values)
-          .where(and(eq(phones.id, input.id), eq(phones.userId, userId)))
-          .returning({ id: phones.id });
-        phoneId = row?.id;
+      try {
+        if (input.id) {
+          const [row] = await db
+            .update(phones)
+            .set(values)
+            .where(and(eq(phones.id, input.id), eq(phones.userId, userId)))
+            .returning({ id: phones.id });
+          phoneId = row?.id;
+        }
+        if (!phoneId) {
+          const [row] = await db
+            .insert(phones)
+            .values({ ...(input.id ? { id: input.id } : {}), ...values })
+            .onConflictDoNothing()
+            .returning({ id: phones.id });
+          if (!row) throw new ORPCError("CONFLICT", { message: "phone id already in use" });
+          phoneId = row.id;
+        }
+      } catch (err) {
+        // The session was signed out meanwhile (phones.session_id references it).
+        const e = err as { code?: string; cause?: { code?: string } };
+        if ((e.cause?.code ?? e.code) === "23503") {
+          throw new ORPCError("UNAUTHORIZED");
+        }
+        throw err;
       }
-      if (!phoneId) {
-        const [row] = await db
-          .insert(phones)
-          .values({ ...(input.id ? { id: input.id } : {}), ...values })
-          .onConflictDoNothing()
-          .returning({ id: phones.id });
-        if (!row) throw new ORPCError("CONFLICT", { message: "phone id already in use" });
-        phoneId = row.id;
-      }
+      // One phone per sign-in (the app took a new phone id: its old record keeps no session).
+      await db
+        .update(phones)
+        .set({ sessionId: null })
+        .where(and(eq(phones.sessionId, session.session.id), ne(phones.id, phoneId)));
       // First phone login sets the timezone used for quiet hours.
       const settings = await getSettings(userId);
       if (input.timezone && settings.timezone === "UTC") {
@@ -334,11 +361,12 @@ export const router = authed.router({
     }),
     /** Also signs the phone's app out: removing a phone must not leave its token working. */
     remove: authed.phones.remove.handler(async ({ context, input }) => {
-      const { userId } = context as Ctx;
+      const { userId, session } = context as Ctx;
       const [phone] = await db
         .select({ sessionId: phones.sessionId })
         .from(phones)
         .where(and(eq(phones.id, input.id), eq(phones.userId, userId)));
+      assertMaySignOut(session, phone?.sessionId ?? null);
       if (phone?.sessionId) await revokeSession(userId, phone.sessionId);
       await db.delete(phones).where(and(eq(phones.id, input.id), eq(phones.userId, userId)));
       invalidate(userId, ["phones", "status"]);
@@ -352,7 +380,9 @@ export const router = authed.router({
       return listSessions(userId, session.session.id);
     }),
     revoke: authed.sessions.revoke.handler(async ({ context, input }) => {
-      if (!(await revokeSession((context as Ctx).userId, input.id))) {
+      const { userId, session } = context as Ctx;
+      assertMaySignOut(session, input.id);
+      if (!(await revokeSession(userId, input.id))) {
         throw new ORPCError("NOT_FOUND");
       }
       return { ok: true as const };
@@ -370,7 +400,7 @@ export const router = authed.router({
         }
         const [other] = await db.select().from(schema.user).where(eq(schema.user.id, input.userId));
         if (!other) throw new ORPCError("NOT_FOUND", { message: "No such user." });
-        if (other.banned) throw new ORPCError("FORBIDDEN", { message: "That user is banned." });
+        if (isBanned(other)) throw new ORPCError("FORBIDDEN", { message: "That user is banned." });
         target = other;
       }
       const minted = await mintLinkCode(target.id, userId);
