@@ -64,6 +64,28 @@ enum UploadPlanner {
   }
 }
 
+/// What to do about a non-fatal server error for one stream slot.
+enum SlotError {
+  enum Action: Equatable {
+    /// The server didn't keep frames after its ack: resend from there on the same socket.
+    case resendFromAck
+    /// The server won't take this stream (unsupported codec, another account's stream).
+    case refuseStream
+    /// The server lost track of the slot (e.g. a failed hello): start over.
+    case reconnect
+  }
+
+  static func action(for code: String) -> Action {
+    switch code {
+    // seq_gap: an earlier batch never arrived. store_failed: a batch arrived but its progress
+    // couldn't be persisted.
+    case "seq_gap", "store_failed": return .resendFromAck
+    case "codec", "stream": return .refuseStream
+    default: return .reconnect
+    }
+  }
+}
+
 /// Notices a half-dead socket (nothing arrives, sends still "succeed"): after a ping the server must say
 /// something (a pong or any message) within `timeout`. Times are seconds of uptime.
 struct ReplyDeadline {

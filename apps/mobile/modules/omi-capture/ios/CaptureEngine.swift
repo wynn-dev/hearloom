@@ -852,20 +852,18 @@ extension CaptureEngine: IngestClientDelegate {
       return
     }
     guard let slotId, let slot = slots[slotId] else { return }
-    switch code {
-    case "seq_gap":
-      // An earlier batch never arrived: resend from the server's ack.
+    switch SlotError.action(for: code) {
+    case .resendFromAck:
       var s = slot
       s.sent = s.acked
       slots[slotId] = s
       pump()
-    case "codec", "stream":
+    case .refuseStream:
       lastServerError = "\(code): \(message)"
       lastServerErrorCode = code
       rejectedStreams.insert(slot.streamId)
       slots[slotId] = nil
-    default:
-      // The server lost track of this slot (e.g. a failed hello): start over.
+    case .reconnect:
       uplink.reset("server error \(code)")
     }
   }

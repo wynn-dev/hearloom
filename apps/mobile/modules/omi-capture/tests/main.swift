@@ -315,6 +315,12 @@ do {
   check(plan.count == 4 && plan.allSatisfy { $0.slot == 1 }, "backlog without live")
 }
 
+// --- per-slot server errors ---
+check(SlotError.action(for: "seq_gap") == .resendFromAck, "seq_gap resends from the ack")
+check(SlotError.action(for: "store_failed") == .resendFromAck, "store_failed resends from the ack")
+check(SlotError.action(for: "codec") == .refuseStream && SlotError.action(for: "stream") == .refuseStream, "refused streams")
+check(SlotError.action(for: "no_stream") == .reconnect, "unknown slot errors reconnect")
+
 // --- ping deadline ---
 do {
   var d = ReplyDeadline(timeout: 10)
