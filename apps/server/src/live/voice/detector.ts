@@ -145,7 +145,8 @@ function partsAudio(source: AudioSource | null, parts: HeardUtterance[]): Float3
 export const NAME_SETTLE_MS = 400;
 /**
  * A wake phrase buzzed from the running transcript must be in a finished utterance this long after
- * the recognizer last showed its utterance.
+ * the recognizer last showed its utterance. (Wall clock: a live pipeline more than 10 s behind
+ * would say "no command" for a command it then sends. Accepted: it's far behind by then anyway.)
  */
 export const CUE_CONFIRM_MS = 10_000;
 /**
@@ -157,12 +158,14 @@ const CUE_MAX_MS = 60_000;
  * Wake phrases already told are remembered this long, so the same words heard by another stream
  * (or slot) don't buzz again.
  */
-const TOLD_MS = 15_000;
+const TOLD_MS = 45_000; // longer than a stream can lag (30 s of audio still counts as fresh)
 /** The own-voice check of a running transcript uses at most this much audio after the name. */
 const PARTIAL_AUDIO_AFTER_MS = 1_500;
 
 /** A wake phrase the user was told (by a buzz) was heard: its outcome is told too. */
 interface Cue {
+  /** The stream it was heard on: only that stream's own utterances can say it wasn't one. */
+  streamId: string;
   /** Audio time the greeting started, and the name ended. */
   startAt: number;
   nameEndAt: number;
@@ -176,9 +179,9 @@ interface Cue {
 
 type Span = { startAt: number; nameEndAt: number };
 
-/** Does an utterance contain the cued wake phrase? */
+/** Does an utterance contain the cued wake phrase? (Touching isn't overlapping.) */
 function covers(u: { startAt: number; endAt: number }, c: Span): boolean {
-  return u.startAt <= c.nameEndAt && u.endAt >= c.startAt;
+  return u.startAt < c.nameEndAt && u.endAt > c.startAt;
 }
 
 interface UserState {
@@ -250,6 +253,8 @@ export class VoiceDetector {
     const now = this.now();
     for (const [userId, s] of this.users) {
       if (s.source?.streamId === streamId) s.source = null;
+      s.partials.delete(streamId);
+      s.partialDecided.delete(streamId);
       s.recent = s.recent.filter((r) => now - r.acceptedAt < USER_IDLE_MS);
       if (
         !s.source &&
@@ -341,13 +346,16 @@ export class VoiceDetector {
     // Another stream heard (and buzzed) the same words.
     if (this.told(s, span)) return;
     if (!(await this.ownVoice(userId, cfg, audio))) return;
-    this.cueHeard(userId, s, { ...span, confirmed: false }, "partial");
+    this.cueHeard(userId, s, { ...span, streamId: key, confirmed: false }, "partial");
   }
 
   /** Was the user already buzzed about the wake phrase in this span (still open, or recently)? */
   private told(s: UserState, span: Span): boolean {
     const u = { startAt: span.startAt, endAt: span.nameEndAt };
-    return s.cues.some((c) => covers(u, c)) || s.told.some((c) => covers(u, c));
+    const now = this.now();
+    return (
+      s.cues.some((c) => covers(u, c)) || s.told.some((c) => now - c.at < TOLD_MS && covers(u, c))
+    );
   }
 
   private async ownVoice(userId: string, cfg: VoiceConfig, audio: Float32Array): Promise<boolean> {
@@ -462,12 +470,22 @@ export class VoiceDetector {
         null,
       );
     }
+    const woke = step.woke?.utterance;
+    // Earlier commands this utterance completed are told before its own wake phrase.
+    for (const c of step.done) if (c.parts[0] !== woke) await this.finish(userId, s, cfg, c);
     if (u && cfg.mode === "on" && cfg.haptics) await this.cueWake(userId, s, cfg, step, u);
-    for (const c of step.done) {
-      const sent = await this.gate(userId, s, cfg, c);
-      // Sent: the server tells how the delivery went.
-      this.cueOutcome(userId, s, c.parts[0]!, sent === false ? "failed" : null);
-    }
+    for (const c of step.done) if (c.parts[0] === woke) await this.finish(userId, s, cfg, c);
+  }
+
+  private async finish(
+    userId: string,
+    s: UserState,
+    cfg: VoiceConfig,
+    c: AssembledCommand,
+  ): Promise<void> {
+    const sent = await this.gate(userId, s, cfg, c);
+    // Sent: the server tells how the delivery went.
+    this.cueOutcome(userId, s, c.parts[0]!, sent === false ? "failed" : null);
   }
 
   /**
@@ -484,20 +502,22 @@ export class VoiceDetector {
     const woke = step.woke?.utterance;
     for (const c of s.cues.filter((c) => !c.confirmed && covers(u, c))) {
       if (woke === u) c.confirmed = true;
-      else this.cueOutcome(userId, s, { startAt: c.startAt, endAt: c.nameEndAt }, "no_command");
+      // Another stream may hear the same words differently: only the cue's own stream says it
+      // wasn't the wake phrase (otherwise the confirm timeout does).
+      else if (u.streamId === c.streamId)
+        this.cueOutcome(userId, s, { startAt: c.startAt, endAt: c.nameEndAt }, "no_command");
     }
     if (!woke || this.told(s, { startAt: woke.startAt, nameEndAt: woke.endAt })) return;
-    // A command complete already: the same audio its own-voice gate checks next. A bare wake
-    // phrase: its own (the gate checks it together with the command, later).
-    const done = step.done.find((c) => c.parts[0] === woke);
-    const audio = done
-      ? partsAudio(s.source, done.parts)
+    // With the command in it: the audio its own-voice gate checks. A bare wake phrase: padded
+    // (the gate checks it together with the command, later).
+    const audio = step.woke!.wake.command
+      ? partsAudio(s.source, [woke])
       : (s.source?.audio(woke.startAt - PAD_MS, woke.endAt + PAD_MS) ?? null);
     if (!audio || !(await this.ownVoice(userId, cfg, audio))) return;
     this.cueHeard(
       userId,
       s,
-      { startAt: woke.startAt, nameEndAt: woke.endAt, confirmed: true },
+      { startAt: woke.startAt, nameEndAt: woke.endAt, streamId: woke.streamId, confirmed: true },
       "final",
     );
   }
@@ -509,6 +529,8 @@ export class VoiceDetector {
     cfg: VoiceConfig,
     c: AssembledCommand,
   ): Promise<boolean | null> {
+    // Voice commands were turned off meanwhile: not sent.
+    if (cfg.mode === "off") return false;
     const now = this.now();
     // Own voice, over all parts together (a short "Hey Hermes" has no embedding of its own).
     const audio = partsAudio(s.source, c.parts);

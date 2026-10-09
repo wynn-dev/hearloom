@@ -164,7 +164,11 @@ export class StreamProcessor {
       streamId: stream.id,
       audio: (from, to) => this.history.slice(from, to),
       lastSpeechAt: () => this.lastSpeechAudioAt,
-      heardUntil: () => this.heardUntil,
+      // No more audio coming (mic asleep, connection gone): quiet from here on.
+      heardUntil: () =>
+        this.lastFrameAt === null || Date.now() - this.lastActivity > RUN_GAP_MS
+          ? Number.POSITIVE_INFINITY
+          : this.heardUntil,
     };
   }
 

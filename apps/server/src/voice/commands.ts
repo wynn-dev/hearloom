@@ -124,11 +124,16 @@ export async function onDetection(d: VoiceDetection): Promise<void> {
     .onConflictDoNothing()
     .returning()
     .catch(async (err) => {
-      await failed();
+      await failed()?.catch(() => {});
       throw err;
     });
   invalidate(d.userId, ["voice"]);
-  if (row?.status === "pending") await deliver(row);
+  if (row?.status === "pending")
+    await deliver(row).catch(async (err) => {
+      // Before it could say how it went (its buzz is its last step).
+      await failed()?.catch(() => {});
+      throw err;
+    });
   else if (row) await failed(); // stored as ignored (teaching)
 }
 

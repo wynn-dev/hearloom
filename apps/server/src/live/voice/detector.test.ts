@@ -635,6 +635,40 @@ describe("pendant cues: one tap, one outcome", () => {
     expect(t.detections.at(-1)!.status).toBe("pending");
   });
 
+  test("another stream's misheard copy doesn't reject the tap", async () => {
+    const t = setup();
+    await t.hear(
+      [
+        ["Hey", 0.3],
+        ["Hermes,", 0.8],
+        ["call", 1.1],
+      ],
+      0,
+      1.2,
+    );
+    await t.say("Hey, her mess call mom.", 0, 2, { streamId: "s2" });
+    await t.say("Hey Hermes, call mom.", 0, 2);
+    expect(t.cues()).toEqual(["heard:partial"]);
+    expect(t.detections.at(-1)!.status).toBe("pending");
+  });
+
+  test("an utterance that only touches the wake phrase isn't its outcome", async () => {
+    const t = setup();
+    const words: [string, number][] = [
+      ["I'm", 0.3],
+      ["off.", 0.6],
+      ["Hey", 1.0],
+      ["Hermes,", 1.4],
+      ["call", 1.7],
+    ];
+    await t.hear(words, 0, 1.8);
+    // Someone else's words, ending exactly where the greeting starts (0.65 s).
+    await t.say("I'm off.", 0, 0.65, { speakerKey: "S2", isSelf: false });
+    await t.say("Hey Hermes, call mom.", 0.65, 2.4);
+    expect(t.cues()).toEqual(["heard:partial"]);
+    expect(t.detections.at(-1)!.status).toBe("pending");
+  });
+
   test("too short to check the voice: no tap, as the command isn't sent either", async () => {
     const t = setup();
     await t.say("Hey Hermes, stop", 0, 0.7);
