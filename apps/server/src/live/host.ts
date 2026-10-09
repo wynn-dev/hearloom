@@ -12,16 +12,57 @@ type VoiceCommandHandler = (detection: VoiceDetection) => void;
 type TeachHeardHandler = (userId: string, result: TeachHeard) => void;
 type VoiceCueHandler = (cue: VoiceCueEvent) => void;
 
+/** The pipeline child process, as the host uses it. */
+export interface PipelineChild {
+  send(msg: HostMessage): void;
+  kill(signal: NodeJS.Signals): void;
+  readonly exited: Promise<unknown>;
+}
+
+/** Start the child; `onExit` gets its exit code (null: killed by a signal). */
+export type SpawnPipeline = (handlers: {
+  onMessage(msg: ChildMessage): void;
+  onExit(code: number | null): void;
+}) => PipelineChild;
+
+const spawnChild: SpawnPipeline = ({ onMessage, onExit }): Subprocess =>
+  Bun.spawn(["bun", new URL("./child.ts", import.meta.url).pathname], {
+    env: process.env,
+    stdout: "inherit",
+    stderr: "inherit",
+    serialization: "advanced",
+    ipc: (message) => onMessage(message as ChildMessage),
+    onExit: (_proc, code) => onExit(code),
+  });
+
+/**
+ * Frames held while the child is down (restarting), at most about 10 minutes of 20 ms frames
+ * (a few MB); the oldest go first.
+ */
+const MAX_HELD_FRAMES = 30_000;
+
+interface HeldBatch {
+  meta: StreamMeta;
+  frames: AudioFrame[];
+  receivedAt: number;
+}
+
 /**
  * Supervises the live pipeline child process: forwards stored frames, applies state updates,
  * restarts it with backoff if it dies. If the child is down, ingest keeps working (audio is
- * stored), but audio that arrives meanwhile is not transcribed.
+ * stored) and frames that arrive meanwhile are held (bounded) and sent once it is back.
  */
 export class LivePipelineHost {
-  private child: Subprocess | null = null;
+  private child: PipelineChild | null = null;
   private ready = false;
-  private backoffMs = 1000;
+  private backoffMs: number;
   private stopped = false;
+  /** The child should be running: it was started and hasn't given up (exit code 2) or been stopped. */
+  private wanted = false;
+  private restartTimer: ReturnType<typeof setTimeout> | null = null;
+  private held: HeldBatch[] = [];
+  private heldFrames = 0;
+  private droppedFrames = 0;
   private readonly onBlock = new Set<BlockClosedHandler>();
   private readonly onVoice = new Set<VoiceCommandHandler>();
   private readonly onTeach = new Set<TeachHeardHandler>();
@@ -32,11 +73,19 @@ export class LivePipelineHost {
     { resolve: (value: never) => void; reject: (e: Error) => void }
   >();
 
-  start(): void {
-    if (env.LIVE_PIPELINE === "off") {
+  constructor(
+    private readonly spawnPipeline: SpawnPipeline = spawnChild,
+    private readonly firstBackoffMs = 1000,
+  ) {
+    this.backoffMs = firstBackoffMs;
+  }
+
+  start(enabled = env.LIVE_PIPELINE !== "off"): void {
+    if (!enabled) {
       console.log("[live] pipeline disabled (LIVE_PIPELINE=off)");
       return;
     }
+    this.wanted = true;
     this.spawn();
   }
 
@@ -68,8 +117,25 @@ export class LivePipelineHost {
     this.onTeach.add(fn);
   }
 
-  push(meta: StreamMeta, frames: AudioFrame[]): void {
-    if (!this.child || !this.ready) return;
+  /** Newly stored frames; `receivedAt`: when the server received them (unix ms). */
+  push(meta: StreamMeta, frames: AudioFrame[], receivedAt = Date.now()): void {
+    if (!this.wanted) return;
+    if (this.running) {
+      this.sendFrames({ meta, frames, receivedAt });
+      return;
+    }
+    // Restarting: hold them, so they are still transcribed (the time they arrived decides whether
+    // they count as live).
+    this.held.push({ meta, frames, receivedAt });
+    this.heldFrames += frames.length;
+    while (this.heldFrames > MAX_HELD_FRAMES && this.held.length > 1) {
+      const n = this.held.shift()!.frames.length;
+      this.heldFrames -= n;
+      this.droppedFrames += n;
+    }
+  }
+
+  private sendFrames({ meta, frames, receivedAt }: HeldBatch): void {
     this.send({
       t: "frames",
       stream: {
@@ -80,7 +146,26 @@ export class LivePipelineHost {
         frameMs: meta.frameMs,
       },
       frames,
+      receivedAt,
     });
+  }
+
+  /** Send what arrived while the child was down. */
+  private sendHeld(): void {
+    const held = this.held;
+    const dropped = this.droppedFrames;
+    this.dropHeld();
+    if (dropped > 0)
+      console.error(
+        `[live] ${dropped} frames arrived while the pipeline was down and were dropped`,
+      );
+    for (const batch of held) this.sendFrames(batch);
+  }
+
+  private dropHeld(): void {
+    this.held = [];
+    this.heldFrames = 0;
+    this.droppedFrames = 0;
   }
 
   /** Ask the pipeline (which holds the speaker model) to learn a voiceprint from an utterance. */
@@ -169,11 +254,24 @@ export class LivePipelineHost {
     this.send({ t: "episodes_changed", userId });
   }
 
-  async stop(): Promise<void> {
+  /**
+   * The server is shutting down: don't restart the child when it exits. Call this first thing: the
+   * child is in the server's process group, so a Ctrl-C or turbo's signal reaches it too.
+   */
+  beginShutdown(): void {
     this.stopped = true;
-    if (this.child) {
-      this.child.kill("SIGTERM");
-      await Promise.race([this.child.exited, Bun.sleep(5000)]);
+    this.wanted = false;
+    this.dropHeld();
+    if (this.restartTimer) clearTimeout(this.restartTimer);
+    this.restartTimer = null;
+  }
+
+  async stop(): Promise<void> {
+    this.beginShutdown();
+    const child = this.child;
+    if (child) {
+      child.kill("SIGTERM");
+      await Promise.race([child.exited, Bun.sleep(5000)]);
     }
   }
 
@@ -186,15 +284,13 @@ export class LivePipelineHost {
   }
 
   private spawn(): void {
+    this.restartTimer = null;
+    if (this.stopped) return;
     const started = Date.now();
     this.ready = false;
-    this.child = Bun.spawn(["bun", new URL("./child.ts", import.meta.url).pathname], {
-      env: process.env,
-      stdout: "inherit",
-      stderr: "inherit",
-      serialization: "advanced",
-      ipc: (message) => this.onMessage(message as ChildMessage),
-      onExit: (_proc, code) => {
+    this.child = this.spawnPipeline({
+      onMessage: (msg) => this.onMessage(msg),
+      onExit: (code) => {
         this.child = null;
         this.ready = false;
         resetActivity();
@@ -203,11 +299,13 @@ export class LivePipelineHost {
         if (this.stopped) return;
         if (code === 2) {
           console.error("[live] pipeline not started (see above); audio is still recorded");
+          this.wanted = false;
+          this.dropHeld();
           return;
         }
-        if (Date.now() - started > 60_000) this.backoffMs = 1000;
+        if (Date.now() - started > 60_000) this.backoffMs = this.firstBackoffMs;
         console.error(`[live] pipeline exited (${code}); restarting in ${this.backoffMs} ms`);
-        setTimeout(() => this.spawn(), this.backoffMs);
+        this.restartTimer = setTimeout(() => this.spawn(), this.backoffMs);
         this.backoffMs = Math.min(this.backoffMs * 2, 60_000);
       },
     });
@@ -218,6 +316,7 @@ export class LivePipelineHost {
       case "ready":
         this.ready = true;
         for (const fn of this.onReadyFns) fn();
+        this.sendHeld();
         return;
       case "log":
         console.log(`[live] ${msg.message}`);

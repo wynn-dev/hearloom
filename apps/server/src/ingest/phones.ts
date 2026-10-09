@@ -9,8 +9,10 @@ export interface IngestSocketData {
   sessionId: string;
   phoneId: string | null;
   slots: Map<number, StreamWriter>;
-  /** Serializes message handling for this socket. */
+  /** Serializes control messages for this socket (see Lanes). */
   queue: Promise<void>;
+  /** Serializes each slot's audio, hello and bye (see Lanes). */
+  slotQueues: Map<number, Promise<void>>;
   /** Set when the socket closes; queued work after that must not register it again. */
   closed: boolean;
 }

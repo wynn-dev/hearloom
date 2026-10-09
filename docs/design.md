@@ -48,7 +48,8 @@ Web console (Vite/TanStack) ── same-origin to server        Hermes agent ─
 3. **Chunks.** Spooled frames become Ogg Opus files (no re-encoding; lost packets become TOC-only frames
    so timing holds) at ≤ 60 s or at silence gaps. Crash recovery replays the spool.
 4. **Live pipeline** turns frames into rows within seconds (see models below). Late audio (backlog)
-   joins the closed block it falls in; a crashed pipeline restarts and closes what it left open.
+   joins the closed block it falls in; a crashed pipeline restarts and closes what it left open
+   (frames that arrive while it is down are held, bounded, and sent once it's back).
 5. **Refine** runs when a block ends (2 min of silence, or a pause once the block is 10–20 min long,
    so long speech is refined as it goes) and replaces the live rows it re-derives
    (kept, superseded); rows without stored audio stay.

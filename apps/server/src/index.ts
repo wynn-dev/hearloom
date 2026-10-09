@@ -48,6 +48,7 @@ const server = Bun.serve<SocketData>({
               phoneId: null,
               slots: new Map(),
               queue: Promise.resolve(),
+              slotQueues: new Map(),
               closed: false,
             }
           : { kind: "realtime", userId: session.user.id, sessionId: session.session.id };
@@ -83,7 +84,7 @@ const server = Bun.serve<SocketData>({
 
 attachRealtimeServer(server as never);
 livePipeline.start();
-setFrameListener((meta, frames) => livePipeline.push(meta, frames));
+setFrameListener((meta, frames, receivedAt) => livePipeline.push(meta, frames, receivedAt));
 // "Hey <agent>, …": store what was heard, deliver commands to the agent; teaching samples.
 livePipeline.onVoiceCommand((d) => {
   void onDetection(d).catch((err) => console.error("[voice] command failed", err));
@@ -116,6 +117,8 @@ let stopping = false;
 async function shutdown(signal: string) {
   if (stopping) return;
   stopping = true;
+  // Before anything awaits: the pipeline child got the signal too and must not be restarted.
+  livePipeline.beginShutdown();
   console.log(`[hearloom] ${signal}: flushing audio and shutting down`);
   shutdownDeadline(30_000);
   await stopServer(server);

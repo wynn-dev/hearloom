@@ -19,6 +19,7 @@ import { onBattery, onPhoneSocket, onWearableConnection } from "../notify/alerts
 import { onSocketAck } from "../notify/gateway";
 import { invalidate } from "../realtime";
 import { getSettings, phoneConfig } from "../settings";
+import { afterAll, schedule } from "./lanes";
 import { type IngestSocketData, registerPhoneSocket, unregisterPhoneSocket } from "./phones";
 import { dbChunkSink } from "./sink";
 import { SeqGapError, type StreamMeta, StreamWriter } from "./stream-writer";
@@ -32,9 +33,16 @@ export const SPOOL_DIR = join(env.DATA_DIR, "spool");
 const writers = new Map<string, StreamWriter>();
 const attached = new Map<string, Set<Ws>>();
 
-/** Hook for the live pipeline: receives every newly stored batch of frames. */
+/**
+ * Hook for the live pipeline: receives every newly stored batch of frames, with when the server
+ * received it (unix ms).
+ */
 let frameListener:
-  | ((meta: StreamMeta, frames: import("@hearloom/shared").AudioFrame[]) => void)
+  | ((
+      meta: StreamMeta,
+      frames: import("@hearloom/shared").AudioFrame[],
+      receivedAt: number,
+    ) => void)
   | null = null;
 export function setFrameListener(fn: typeof frameListener): void {
   frameListener = fn;
@@ -59,7 +67,7 @@ function getWriter(meta: StreamMeta, ackedSeq: number): StreamWriter {
       idleMs: env.CHUNK_IDLE_MS,
     });
     const writer = w;
-    writer.onFrames = (m, frames) => frameListener?.(m, frames);
+    writer.onFrames = (m, frames, receivedAt) => frameListener?.(m, frames, receivedAt);
     writer.onIdle = () => {
       if ((attached.get(meta.id)?.size ?? 0) === 0 && writers.get(meta.id) === writer) {
         writers.delete(meta.id);
@@ -215,7 +223,7 @@ async function onHello(ws: Ws, msg: Extract<ClientMessage, { t: "hello" }>): Pro
   invalidate(userId, ["status"]);
 }
 
-async function onAudio(ws: Ws, data: Uint8Array): Promise<void> {
+async function onAudio(ws: Ws, data: Uint8Array, receivedAt: number): Promise<void> {
   const batch = decodeAudioBatch(data);
   const writer = ws.data.slots.get(batch.slot);
   if (!writer)
@@ -228,10 +236,13 @@ async function onAudio(ws: Ws, data: Uint8Array): Promise<void> {
     );
   let ack: number;
   try {
-    ack = await writer.append(batch.frames);
+    ack = await writer.append(batch.frames, receivedAt);
   } catch (err) {
     if (err instanceof SeqGapError) return fail(ws, "seq_gap", err.message, false, batch.slot);
-    throw err;
+    // With the slot, so the phone resends from its ack (older apps reconnect, which does the same).
+    console.error(`[ingest] storing audio of ${writer.meta.id} failed`, err);
+    const message = err instanceof Error ? err.message : String(err);
+    return fail(ws, "store_failed", message, false, batch.slot);
   }
   send(ws, { t: "ack", slot: batch.slot, seq: ack });
   updateLiveState(ws.data.userId, { lastAudioAt: Date.now() });
@@ -323,13 +334,17 @@ async function onControl(ws: Ws, msg: ClientMessage): Promise<void> {
   }
 }
 
-async function handleMessage(ws: Ws, message: string | Buffer): Promise<void> {
+async function handleMessage(ws: Ws, message: string | Buffer, receivedAt: number): Promise<void> {
   if (ws.data.closed) return;
   try {
     if (typeof message === "string") {
       await onControl(ws, parseClientMessage(message));
     } else if (message[0] === MSG_AUDIO) {
-      await onAudio(ws, new Uint8Array(message.buffer, message.byteOffset, message.byteLength));
+      await onAudio(
+        ws,
+        new Uint8Array(message.buffer, message.byteOffset, message.byteLength),
+        receivedAt,
+      );
     } else {
       fail(ws, "bad_message", "unknown binary message type");
     }
@@ -343,17 +358,20 @@ export const ingestHandlers = {
   open(ws: Ws): void {
     ws.data.slots = new Map();
     ws.data.queue = Promise.resolve();
+    ws.data.slotQueues = new Map();
     ws.data.closed = false;
   },
   message(ws: Ws, message: string | Buffer): void {
-    // Handle one message at a time per socket so audio never races ahead of its hello.
-    ws.data.queue = ws.data.queue.then(() => handleMessage(ws, message));
+    // Stamped on arrival, before any queueing here: whether audio is live is judged from it.
+    const receivedAt = Date.now();
+    // One message at a time per stream (audio never races ahead of its hello); see Lanes.
+    schedule(ws.data, message, () => handleMessage(ws, message, receivedAt));
   },
   close(ws: Ws): void {
     ws.data.closed = true;
     // Run after any in-flight message (e.g. a hello still awaiting the DB), so nothing registers
     // this socket again once it's gone.
-    ws.data.queue = ws.data.queue.then(() => {
+    afterAll(ws.data, () => {
       for (const writer of ws.data.slots.values()) attached.get(writer.meta.id)?.delete(ws);
       ws.data.slots.clear();
       const phoneId = ws.data.phoneId;
