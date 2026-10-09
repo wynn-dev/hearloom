@@ -110,7 +110,7 @@ export default function LinkScreen() {
               <Body>
                 This iPhone is already signed in{signedIn.email ? ` as ${signedIn.email}` : ""} on{" "}
                 {hostOf(signedIn.serverURL)}. Linking signs it out there and sends what the pendant
-                hears to {hostOf(link.server)} instead.
+                hears, including audio not uploaded yet, to {hostOf(link.server)} instead.
               </Body>
             ) : (
               <Body style={{ color: t.muted }}>
@@ -120,7 +120,7 @@ export default function LinkScreen() {
             )}
             {error ? <Text style={{ color: t.bad }}>{error}</Text> : null}
             <Button
-              title={signedIn ? "Sign out and link" : "Link this iPhone"}
+              title={signedIn ? "Switch and link" : "Link this iPhone"}
               kind={signedIn ? "danger" : "primary"}
               onPress={submit}
               loading={busy}

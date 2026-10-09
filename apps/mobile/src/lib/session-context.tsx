@@ -129,6 +129,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       try {
         await activate(session);
       } catch (err) {
+        // Signed out meanwhile (the server refused the token) or replaced: nothing to restore.
+        if (currentToken.current !== session.token) return;
         // Server unreachable: stay signed in locally; the native engine keeps buffering.
         console.warn("session restore failed", err);
         const { client, orpc } = createRpc(session.serverURL, session.token, () => {
@@ -186,9 +188,24 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       },
       async linkDevice(serverURL, code) {
         const { token, email } = await redeemLinkCode(serverURL, code);
-        // Redeem first: a wrong or expired code leaves the current session alone.
-        if (state.status === "signedIn") await signOut();
+        // Redeem first: a wrong or expired code leaves the current sign-in alone. So does a failure
+        // below: nothing of it is undone until the new sign-in is active.
+        const previous = state.status === "signedIn" ? state : null;
+        // No sign-out in between, which would also turn capture off: activate hands the native engine
+        // the new token. On the same server, registering the phone retires its previous sign-in.
         await activate({ serverURL, token, email, phoneId: await storedPhoneId() });
+        if (!previous) return;
+        if (previous.session.serverURL !== serverURL || previous.session.email !== email) {
+          queryClient.clear();
+        }
+        if (previous.session.serverURL !== serverURL) {
+          // The old server: end this phone's streams and its sign-in there, in the background (it may
+          // be unreachable, which mustn't hold up the new one).
+          void previous.rpc.phones
+            .signOut({ id: previous.session.phoneId })
+            .catch(() => {})
+            .then(() => signOutRemote(previous.session.serverURL, previous.session.token));
+        }
       },
       signOut,
       async refreshPush() {
