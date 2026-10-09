@@ -3,8 +3,8 @@
 Say **"Hey Hermes, remind me to call mom at six"** to the pendant. Hearloom spots the wake phrase in
 the live transcript, checks that it's **your own voice**, and sends a signed `voice.command` webhook
 to your agent. The agent does it and replies **on its own channel** (e.g. Hermes on Telegram), not
-through Hearloom. The pendant taps once as soon as it hears "Hey Hermes", and again to say how the
-command went (see [Pendant feedback](#pendant-feedback)).
+through Hearloom. The pendant taps once as soon as it hears "Hey Hermes", and buzzes again only if
+something went wrong (see [Pendant feedback](#pendant-feedback)).
 
 Voice commands are the only thing Hearloom pushes to the agent; everything else is read over MCP
 (see [agent.md](agent.md)).
@@ -138,7 +138,7 @@ Short pulses (100 ms), told apart by count and length:
 | You feel | Meaning | When |
 | --- | --- | --- |
 | · one tap | heard "Hey Hermes" | while you're still talking, typically under a second after the name |
-| · · two taps | the agent took the command | after delivery |
+| (nothing more) | the agent took the command | after delivery; a tap with no buzz after it means it went |
 | — one longer buzz (300 ms) | no command: nothing followed (8 s), someone else spoke, or it wasn't the wake phrase after all | when that's clear |
 | · · · three taps | not sent: rejected here (rate limit, TV voice, …) or the agent couldn't be reached | after the gate, or after the retries |
 
@@ -146,7 +146,8 @@ Short pulses (100 ms), told apart by count and length:
   voice commands"); on by default. It's separate from "Buzz pendant when urgent", which is for
   notifications. Only in mode **On**.
 - **Every tap gets an outcome:** a wake phrase that was tapped is always followed by one of the
-  other three.
+  other three. "Sent" is silent (the owner found a double tap for it unnecessary), so only a
+  problem buzzes again.
 - **The tap comes from the running transcript:** Soniox sends its current guesses with every
   response (non-final tokens). As soon as the utterance in progress starts with the wake phrase,
   the detector (`VoiceDetector.partial`) checks the audio so far is your voice (the same voiceprint
