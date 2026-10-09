@@ -371,7 +371,7 @@ Migration `0008_voice_commands`:
   name was heard, the name score, the speaker score, the seconds of audio, and the voiceprint if
   one was learned.
 
-**Settings:** `voice: { mode: off | shadow | on, names: string[1..3], aliases: string[≤20], blocked: string[≤20] }`.
+**Settings:** `voice: { mode: off | shadow | on, names: string[1..3], aliases: string[≤20], blocked: string[≤20], haptics: boolean }`.
 The webhook URL and secret are the agent's (`agent.webhookUrl`, `agent.webhookSecret`). The secret is
 write-only: the API returns `agent.webhookSecretSet` and a short hint instead (see
 [agent.md](agent.md#hermes-configuration)).

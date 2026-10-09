@@ -1,7 +1,8 @@
 import type { ButtonAction, SettingsPatch } from "@hearloom/shared";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useRouter } from "expo-router";
+import { useFocusEffect, useRouter } from "expo-router";
 import { OmiCapture } from "omi-capture";
+import { useCallback } from "react";
 import { Alert, Pressable, ScrollView, Switch, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Button, Card, Label, Row, styles } from "@/components/ui";
@@ -56,6 +57,12 @@ export default function Settings() {
   const qc = useQueryClient();
   const status = useCaptureStatus();
   const settings = useQuery(orpc.settings.get.queryOptions());
+  // Voice settings (the mode) change on the web: show them as they are now.
+  useFocusEffect(
+    useCallback(() => {
+      void settings.refetch();
+    }, [settings.refetch]),
+  );
   const update = useMutation({
     mutationFn: (patch: SettingsPatch) => rpc.settings.update(patch),
     onSuccess: (data) => qc.setQueryData(orpc.settings.get.queryKey(), data),
@@ -143,6 +150,11 @@ export default function Settings() {
                 />
               }
             />
+            {s.voice.mode !== "on" ? (
+              <Text style={{ color: t.muted, fontSize: 13 }}>
+                Voice commands only buzz in mode On (Voice page in the web console).
+              </Text>
+            ) : null}
             <Row label="Timezone" value={s.timezone} />
             <Text style={{ color: t.muted, fontSize: 13 }}>More options in the web console.</Text>
           </Card>
