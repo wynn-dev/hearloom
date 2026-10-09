@@ -3,8 +3,8 @@
 Say **"Hey Hermes, remind me to call mom at six"** to the pendant. Hearloom spots the wake phrase in
 the live transcript, checks that it's **your own voice**, and sends a signed `voice.command` webhook
 to your agent. The agent does it and replies **on its own channel** (e.g. Hermes on Telegram), not
-through Hearloom. The pendant taps once as soon as it hears "Hey Hermes", and buzzes again only if
-something went wrong (see [Pendant feedback](#pendant-feedback)).
+through Hearloom. The pendant taps once as soon as it hears "Hey Hermes", twice more when the agent
+has answered, and differently if something went wrong (see [Pendant feedback](#pendant-feedback)).
 
 Voice commands are the only thing Hearloom pushes to the agent; everything else is read over MCP
 (see [agent.md](agent.md)).
@@ -138,16 +138,30 @@ Short pulses (100 ms), told apart by count and length:
 | You feel | Meaning | When |
 | --- | --- | --- |
 | · one tap | heard "Hey Hermes" | while you're still talking, typically under a second after the name |
-| (nothing more) | the agent took the command | after delivery; a tap with no buzz after it means it went |
+| · · two taps | the agent answered (its reply goes out on its channel right after) | when its run ends, within 2 minutes of sending |
 | — one longer buzz (300 ms) | no command: nothing followed (8 s), someone else spoke, or it wasn't the wake phrase after all | when that's clear |
-| · · · three taps | not sent: rejected here (rate limit, TV voice, …) or the agent couldn't be reached | after the gate, or after the retries |
+| · · · three taps | not sent: rejected here (rate limit, TV voice, …), the agent couldn't be reached, or **no reply within 2 minutes** | after the gate, after the retries, or 2 minutes after sending |
 
 - **On/off:** Voice page → **Buzz the pendant** (also in the app's Settings → "Buzz pendant for
   voice commands"); on by default. It's separate from "Buzz pendant when urgent", which is for
   notifications. Only in mode **On**.
 - **Every tap gets an outcome:** a wake phrase that was tapped is always followed by one of the
-  other three. "Sent" is silent (the owner found a double tap for it unnecessary), so only a
-  problem buzzes again.
+  other three.
+- **Two taps mean the agent answered, not that the webhook was taken:** a buzz right after
+  delivery told nothing new.
+  - From sending, Hearloom waits up to 2 minutes (`REPLY_TIMEOUT_MS`; Hermes's answers took
+    20–54 s) for `POST /api/voice/commands/<id>/replied`. It needs an agent token, the command's
+    owner's, and returns at once (the buzz plays meanwhile).
+  - In time: two taps. Otherwise three taps, and a later reply doesn't buzz. Test commands never
+    buzz.
+  - **Only once the agent has reported an answer:** the first call sets `agent.voiceReplies` for
+    the user (server-set, not shown). Until then, a sent command gets no second buzz, so an agent
+    without the hook never gets three taps. **Send test command** after installing the hook turns
+    it on.
+  - An answer to an attempt whose response was lost counts as sent: no "couldn't reach" for it.
+  - The call comes from a Hermes gateway hook ([below](#reply-hook)), in code: the agent doesn't
+    have to remember a tool.
+  - A server restart while waiting forgets the wait: that command ends with no outcome buzz.
 - **The tap comes from the running transcript:** Soniox sends its current guesses with every
   response (non-final tokens). As soon as the utterance in progress starts with the wake phrase,
   the detector (`VoiceDetector.partial`) checks the audio so far is your voice (the same voiceprint
@@ -166,7 +180,8 @@ Short pulses (100 ms), told apart by count and length:
   - "Sent" comes after the agent answers, so with back-to-back commands it can land after the
     next command's tap.
   - With two streams hearing the same speech (rare), if the tapped stream mishears its own
-    finished utterance while the other gets it right, you feel heard, no command, sent. The server logs
+    finished utterance while the other gets it right, you feel heard, no command, sent.
+- **Latency log:** the server logs
   `[voice] wake phrase heard (partial): buzz N ms after the name ended`.
 
 ### Teaching your voice
@@ -296,12 +311,30 @@ Facts below were checked against the Hermes docs (messaging/webhooks) and its so
                         "connections", "delegation", "cronjob"]
    ```
 
-3. Install the skill and restart:
+3. Install the skill and the reply hook, then restart:
 
    ```bash
    hermes skills install https://raw.githubusercontent.com/wynn-dev/hearloom/main/hermes/skills/hearloom/SKILL.md
+   mkdir -p ~/.hermes/hooks/hearloom-voice-reply && for f in HOOK.yaml handler.py; do
+     curl -fsSL -o ~/.hermes/hooks/hearloom-voice-reply/$f \
+       https://raw.githubusercontent.com/wynn-dev/hearloom/main/hermes/hooks/hearloom-voice-reply/$f
+   done
    hermes gateway restart
    ```
+
+   <a id="reply-hook"></a>**The reply hook**
+   ([`hermes/hooks/hearloom-voice-reply/`](../hermes/hooks/hearloom-voice-reply/handler.py)):
+   - **What it is:** a gateway hook on `agent:end`. It is code that runs after every agent run.
+   - **Finding the command:** Hermes uses Hearloom's `webhook-id` header (the command id) as the
+     delivery id, and encodes it in the run's chat id (`webhook:v2:<base64url of [profile, route,
+     id]>`). For a run on the `hearloom-voice` route that ended with a response, the hook POSTs
+     `/api/voice/commands/<id>/replied`.
+   - **Auth:** `HEARLOOM_MCP_TOKEN`, the token Hermes already uses for MCP. No new secret.
+   - **Optional settings:** `HEARLOOM_URL` (default `http://127.0.0.1:3000`) and
+     `HEARLOOM_VOICE_ROUTE` (default `hearloom-voice`).
+   - **Gateway hooks** load at gateway start, and placing the directory is the opt-in (see Hermes's
+     "Event Hooks" docs).
+   - **Tests:** `python3 -m unittest discover -s hermes/hooks/hearloom-voice-reply` (stdlib only).
 
 4. Make sure the Hearloom server can reach port 8644: the same host (loopback) or your tailnet.
 5. In the Hearloom console, press **Send test command** (on the Agent card's checklist, or the Voice

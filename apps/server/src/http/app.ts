@@ -1,10 +1,12 @@
 import { join } from "node:path";
 import { RPCHandler } from "@orpc/server/fetch";
 import { Hono } from "hono";
+import { verifyToken } from "../agent/tokens";
 import { auth, hasSimpleBody, trustedOwnOrigin } from "../auth";
 import { env } from "../env";
 import { handleMcp } from "../mcp/server";
 import { router } from "../rpc/router";
+import { commandReplied } from "../voice/commands";
 import { serveChunk } from "./media";
 
 const rpc = new RPCHandler(router);
@@ -32,6 +34,15 @@ app.all("/rpc/*", async (c) => {
 
 // MCP endpoint for agents (Hermes etc.), authenticated with an agent token (console → Agent).
 app.on(["GET", "POST", "DELETE"], "/mcp", (c) => handleMcp(c.req.raw));
+
+// The agent finished answering a voice command (Hermes hook, hermes/hooks/): the pendant's "sent"
+// buzz. Authenticated with an agent token, like /mcp.
+app.post("/api/voice/commands/:id/replied", async (c) => {
+  const token = await verifyToken(c.req.header("authorization") ?? null);
+  if (!token) return c.json({ error: "unauthorized" }, 401);
+  const status = await commandReplied(token.userId, c.req.param("id"));
+  return c.json({ status }, status === "not_found" ? 404 : 200);
+});
 
 app.get("/media/chunks/:file", (c) => {
   const id = c.req.param("file").replace(/\.ogg$/, "");

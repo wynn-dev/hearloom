@@ -24,7 +24,8 @@ jobs:
     runs-on: ubuntu-24.04
     services:
       postgres:
-        image: pgvector/pgvector:pg18
+        # Through Google's Docker Hub mirror: Docker Hub rate-limits unauthenticated pulls from runners.
+        image: mirror.gcr.io/pgvector/pgvector:pg18
         env:
           POSTGRES_USER: hearloom
           POSTGRES_PASSWORD: hearloom

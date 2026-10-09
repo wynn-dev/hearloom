@@ -4,8 +4,10 @@ import { schema } from "@hearloom/db";
 import { SPEAKER_MODEL_ID } from "@hearloom/inference";
 import type { ServerWebSocket } from "bun";
 import { and, eq, sql } from "drizzle-orm";
+import { createToken } from "../agent/tokens";
 import { webhookSignature } from "../agent/webhooks";
 import { db } from "../db";
+import { app } from "../http/app";
 import {
   type IngestSocketData,
   registerPhoneSocket,
@@ -18,12 +20,15 @@ import { getSettings, updateSettings } from "../settings";
 import {
   CUE_GAP_MS,
   CUE_PULSES,
+  commandReplied,
   cue,
   onCue,
   onDetection,
+  REPLY_TIMEOUT_MS,
   recoverPending,
   sendTestCommand,
   setFeedback,
+  setReplyTimeout,
 } from "./commands";
 import { MAX_AGE_MS } from "./deliver";
 import { ensureSelfPerson, voiceProfile } from "./profile";
@@ -140,7 +145,24 @@ async function row(id: string) {
   return r!;
 }
 
-test("a command is delivered and signed; sent doesn't buzz (the heard tap was enough)", async () => {
+test("until the agent has reported an answer: sent is silent, nothing waits", async () => {
+  expect((await getSettings(userId)).agent.voiceReplies).toBe(false);
+  setReplyTimeout(100);
+  try {
+    const d = detection();
+    await onDetection(d);
+    await Bun.sleep(400);
+    expect(buzzes).toEqual([]);
+    // Its first reported answer (here: late) turns waiting on.
+    expect(await commandReplied(userId, d.id)).toBe("late");
+    expect(buzzes).toEqual([]);
+    expect((await getSettings(userId)).agent.voiceReplies).toBe(true);
+  } finally {
+    setReplyTimeout(REPLY_TIMEOUT_MS);
+  }
+});
+
+test("a command is delivered and signed; the sent buzz waits for the agent's reply", async () => {
   const d = detection();
   await onDetection(d);
   expect(received).toHaveLength(1);
@@ -163,6 +185,64 @@ test("a command is delivered and signed; sent doesn't buzz (the heard tap was en
   expect(r).toMatchObject({ status: "sent", attempts: 1, httpStatus: 202, reason: null });
   expect(r.sentAt).not.toBeNull();
   expect(buzzes).toEqual([]);
+  // The agent answered: two taps (played after the call returns). Once only.
+  expect(await commandReplied(userId, d.id)).toBe("buzzed");
+  for (let i = 0; i < 40 && buzzes.length < 2; i++) await Bun.sleep(50);
+  expect(buzzes).toEqual(["short", "short"]);
+  expect(await commandReplied(userId, d.id)).toBe("late");
+  expect(buzzes).toEqual(["short", "short"]);
+});
+
+test("no reply in time: the failed buzz; a late reply doesn't buzz", async () => {
+  setReplyTimeout(300);
+  try {
+    const d = detection();
+    await onDetection(d);
+    expect(buzzes).toEqual([]);
+    // 300 ms, then three pulses 350 ms apart (after any earlier cue's pause).
+    for (let i = 0; i < 60 && buzzes.length < 3; i++) await Bun.sleep(50);
+    expect(buzzes).toEqual(CUE_PULSES.failed);
+    expect(await commandReplied(userId, d.id)).toBe("late");
+    expect(buzzes).toEqual(CUE_PULSES.failed);
+  } finally {
+    setReplyTimeout(REPLY_TIMEOUT_MS);
+  }
+});
+
+test("the replied endpoint: agent token of the command's owner only", async () => {
+  const d = detection();
+  await onDetection(d);
+  const { token } = await createToken(userId, "test hermes");
+  const post = (id: string, auth?: string) =>
+    app.request(`/api/voice/commands/${id}/replied`, {
+      method: "POST",
+      headers: auth ? { authorization: auth } : {},
+    });
+  expect((await post(d.id)).status).toBe(401);
+  expect((await post(d.id, "Bearer hl_wrongwrongwrongwrongwrong")).status).toBe(401);
+  expect((await post(crypto.randomUUID(), `Bearer ${token}`)).status).toBe(404);
+  expect((await post("not-a-uuid", `Bearer ${token}`)).status).toBe(404);
+  const ok = await post(d.id, `Bearer ${token}`);
+  expect(ok.status).toBe(200);
+  expect(await ok.json()).toEqual({ status: "buzzed" });
+  for (let i = 0; i < 40 && buzzes.length < 2; i++) await Bun.sleep(50);
+  expect(buzzes).toEqual(["short", "short"]);
+  // A 36-character id that isn't a uuid.
+  expect((await post("0".repeat(36), `Bearer ${token}`)).status).toBe(404);
+  // Someone else's token can't confirm it.
+  const otherId = `test-${crypto.randomUUID()}`;
+  await db
+    .insert(schema.user)
+    .values({ id: otherId, name: "Other", email: `${otherId}@test.local` });
+  try {
+    const other = await createToken(otherId, "other");
+    const d2 = detection();
+    await onDetection(d2);
+    expect((await post(d2.id, `Bearer ${other.token}`)).status).toBe(404);
+    expect(await commandReplied(userId, d2.id)).toBe("buzzed");
+  } finally {
+    await db.delete(schema.user).where(eq(schema.user.id, otherId));
+  }
 });
 
 test("retries a 500 with the same event id", async () => {
@@ -213,13 +293,12 @@ test("pipeline cues buzz the pendant, distinctly; not with voice buzzes off", as
   }
   expect(CUE_PULSES).toEqual({
     heard: ["short"],
-    sent: [],
+    sent: ["short", "short"],
     no_command: ["medium"],
     failed: ["short", "short", "short"],
   });
-  // The three that buzz tell apart.
-  const buzzing = Object.values(CUE_PULSES).filter((p) => p.length > 0);
-  expect(new Set(buzzing.map((p) => p.join())).size).toBe(3);
+  // All four tell apart.
+  expect(new Set(Object.values(CUE_PULSES).map((p) => p.join())).size).toBe(4);
 
   buzzes.length = 0;
   await updateSettings(userId, { voice: { haptics: false } });
@@ -268,6 +347,9 @@ test("test command", async () => {
   expect(r.status).toBe("sent");
   expect(received[0]!.body).toMatchObject({ type: "voice.command", test: true });
   expect((await row(r.id)).status).toBe("test");
+  expect(buzzes).toHaveLength(0);
+  // Hermes answers the test too: no buzz for it.
+  expect(await commandReplied(userId, r.id)).toBe("late");
   expect(buzzes).toHaveLength(0);
 });
 

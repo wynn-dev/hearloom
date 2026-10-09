@@ -63,6 +63,7 @@ test("changing the webhook URL keeps the secret", () => {
   expect(next.agent).toEqual({
     webhookUrl: "https://hermes.example/other",
     webhookSecret: "whsec_c2VjcmV0",
+    voiceReplies: false,
   });
 });
 
@@ -80,7 +81,11 @@ test("settings stored with agent notifications upgrade instead of resetting", ()
   expect(s.timezone).toBe("Europe/Amsterdam");
   expect(s.notifications).toEqual({ enabled: false, pendantHaptic: false });
   expect(s.button).toEqual({ tap: "bookmark", doubleTap: "mute", hold: "none" });
-  expect(s.agent).toEqual({ webhookUrl: "https://hermes.example/hook", webhookSecret: "s3cret" });
+  expect(s.agent).toEqual({
+    webhookUrl: "https://hermes.example/hook",
+    webhookSecret: "s3cret",
+    voiceReplies: false,
+  });
   expect(resolveSettings({}).notifications.enabled).toBe(true);
 });
 

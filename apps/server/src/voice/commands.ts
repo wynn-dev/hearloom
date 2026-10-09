@@ -24,12 +24,12 @@ type CommandRow = typeof voiceCommands.$inferSelect;
 
 /**
  * The pendant's pulses for each cue (short 100 ms, medium 300 ms, long 500 ms), told apart by count
- * and length: heard · , nothing came of it — , not sent · · · . Sent is silent: the tap was enough,
- * so only a problem buzzes again (the owner found a "sent" double tap unnecessary).
+ * and length: heard · , the agent replied · · , nothing came of it — , not sent (or no reply) · · · .
+ * "Sent" is told when the agent has answered, not when the webhook was taken (see `commandReplied`).
  */
 export const CUE_PULSES: Record<VoiceCue, HapticPattern[]> = {
   heard: ["short"],
-  sent: [],
+  sent: ["short", "short"],
   no_command: ["medium"],
   failed: ["short", "short", "short"],
 };
@@ -140,12 +140,97 @@ export async function onDetection(d: VoiceDetection): Promise<void> {
 }
 
 /**
- * Send a command to the agent with retries, then tell the user how it went: the "sent" cue (silent) when
- * the agent took it; the "failed" buzz and a silent notification when it didn't.
+ * After a command was delivered, the agent's reply must come within this long (else: failed).
+ * Hermes's answers took 20–54 s on 2026-10-09 (web lookups): 60 s would cry wolf.
+ */
+export const REPLY_TIMEOUT_MS = 120_000;
+let replyTimeoutMs = REPLY_TIMEOUT_MS;
+/** Tests only. */
+export function setReplyTimeout(ms: number): void {
+  replyTimeoutMs = ms;
+}
+
+/** Commands sent to the agent whose reply is awaited (by id): the timer tells "failed" if none comes. */
+const awaitingReply = new Map<string, { userId: string; timer: Timer }>();
+
+function awaitReply(row: CommandRow): void {
+  clearTimeout(awaitingReply.get(row.id)?.timer);
+  const timer = setTimeout(() => {
+    if (!awaitingReply.delete(row.id)) return;
+    console.log(`[voice] no reply from the agent to ${row.id} within ${replyTimeoutMs / 1000} s`);
+    void cue(row.userId, "failed").catch((err) => console.error("[voice] buzz failed", err));
+  }, replyTimeoutMs);
+  timer.unref();
+  awaitingReply.set(row.id, { userId: row.userId, timer });
+}
+
+function stopAwaiting(id: string): boolean {
+  const entry = awaitingReply.get(id);
+  if (!entry) return false;
+  clearTimeout(entry.timer);
+  return awaitingReply.delete(id);
+}
+
+/** Commands the agent answered recently (id → when): answered means it got them, retries or not. */
+const answered = new Map<string, number>();
+const ANSWERED_MS = 10 * 60_000;
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export type ReplyResult = "buzzed" | "late" | "not_found";
+
+/**
+ * The agent finished answering a voice command (the Hermes hook in `hermes/hooks/`, after its run):
+ * the "sent" buzz, if the reply is still awaited. Late, repeated or test-command replies don't buzz.
+ * The first answer reported turns waiting for answers on for the user (`agent.voiceReplies`).
+ * Returns at once: the buzz plays meanwhile (the hook runs before Hermes delivers its reply).
+ */
+export async function commandReplied(userId: string, id: string): Promise<ReplyResult> {
+  if (!UUID.test(id)) return "not_found";
+  let result: ReplyResult;
+  if (awaitingReply.get(id)?.userId === userId) {
+    stopAwaiting(id);
+    result = "buzzed";
+    void cue(userId, "sent").catch((err) => console.error("[voice] buzz failed", err));
+  } else {
+    const [row] = await db
+      .select({ id: voiceCommands.id })
+      .from(voiceCommands)
+      .where(and(eq(voiceCommands.id, id), eq(voiceCommands.userId, userId)));
+    if (!row) return "not_found";
+    result = "late";
+  }
+  const now = Date.now();
+  for (const [k, at] of answered) if (now - at > ANSWERED_MS) answered.delete(k);
+  answered.set(id, now);
+  if (!(await getSettings(userId)).agent.voiceReplies)
+    await updateSettings(userId, { agent: { voiceReplies: true } });
+  return result;
+}
+
+/**
+ * Send a command to the agent with retries. Taken: wait for the agent's reply (the "sent" buzz then,
+ * the "failed" buzz if none comes in time), if the agent reports its answers; otherwise nothing
+ * more. Not taken: the "failed" buzz and a silent notification.
  */
 export async function deliver(row: CommandRow, test = false): Promise<DeliveryOutcome> {
   const { agent } = await getSettings(row.userId);
-  const outcome: DeliveryOutcome = agent.webhookUrl
+  // Before sending: a fast agent may answer before the webhook call even returns.
+  if (!test && agent.webhookUrl && agent.voiceReplies) awaitReply(row);
+  try {
+    return await deliverAndTell(row, test, agent.webhookUrl);
+  } catch (err) {
+    stopAwaiting(row.id); // its outcome is told by the caller
+    throw err;
+  }
+}
+
+async function deliverAndTell(
+  row: CommandRow,
+  test: boolean,
+  webhookUrl: string,
+): Promise<DeliveryOutcome> {
+  const outcome: DeliveryOutcome = webhookUrl
     ? await deliverWithRetries(async (attempt) => {
         const r = await sendWebhook(row.userId, commandEvent(row, attempt, test), {
           timeoutMs: ATTEMPT_TIMEOUT_MS,
@@ -168,9 +253,10 @@ export async function deliver(row: CommandRow, test = false): Promise<DeliveryOu
     .where(eq(voiceCommands.id, row.id));
   invalidate(row.userId, ["voice"]);
   if (test) return outcome;
-  if (outcome.status === "sent") {
-    await cue(row.userId, "sent");
-  } else {
+  if (outcome.status !== "sent") {
+    stopAwaiting(row.id);
+    // An attempt got through after all (its response was lost): the agent answered it.
+    if (answered.has(row.id)) return outcome;
     await cue(row.userId, "failed");
     await notify({
       userId: row.userId,
