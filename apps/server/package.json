@@ -7,7 +7,6 @@
   "scripts": {
     "dev": "bun --env-file=../../.env --watch src/index.ts",
     "start": "bun --env-file=../../.env src/index.ts",
-    "create-user": "bun --env-file=../../.env src/scripts/create-user.ts",
     "link-device": "bun --env-file=../../.env src/scripts/link-device.ts",
     "typecheck": "tsc -p tsconfig.json",
     "test": "bun --env-file=../../.env test",

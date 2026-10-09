@@ -299,11 +299,21 @@ export const auth = betterAuth({
   baseURL: env.PUBLIC_URL,
   secret: env.BETTER_AUTH_SECRET,
   database: (options) => hashSessionTokens(pgAdapter(options)),
-  // Invite-only: accounts are created by an admin (console) or `pnpm create-user`.
-  emailAndPassword: { enabled: true, disableSignUp: true, minPasswordLength: 10 },
-  // These take a session token from a list of sessions, which holds hashes (hashSessionTokens). Devices
-  // in the console lists and revokes sessions by id instead (rpc: sessions.*).
+  // No passwords: devices sign in with "Link device" codes (linkDevice below). Accounts are created by
+  // an admin (console → Users) or `pnpm link-device --create`; old password hashes stay unused.
+  emailAndPassword: { enabled: false },
   disabledPaths: [
+    // Passwords (better-auth keeps some of these routes with email/password off; a stale client asking
+    // for sign-in gets a clear 404 from http/app.ts first).
+    "/sign-in/email",
+    "/sign-up/email",
+    "/change-password",
+    "/verify-password",
+    "/request-password-reset",
+    "/reset-password",
+    "/admin/set-user-password",
+    // These take a session token from a list of sessions, which holds hashes (hashSessionTokens).
+    // Devices in the console lists and revokes sessions by id instead (rpc: sessions.*).
     "/list-sessions",
     "/revoke-session",
     "/revoke-other-sessions",
@@ -327,11 +337,11 @@ export const auth = betterAuth({
     return own ? [...staticOrigins, own] : staticOrigins;
   },
   // On whatever NODE_ENV says (`pnpm start` sets none; better-auth would only limit in production):
-  // 3 sign-ins (and password or email changes) per 10 s, 100 requests per 10 s on other auth paths.
-  // Only requests that need a CORS preflight count (needsPreflight); the auth route already refused
+  // 100 requests per 10 s per auth path, link-code sign-in included (60-bit codes can't be guessed at
+  // that rate). Only requests that need a CORS preflight count (needsPreflight); the auth route already refused
   // plain-text and form bodies (hasSimpleBody). The limiter runs before better-auth's content-type and
   // origin checks, and its buckets are shared (below), so otherwise any web page could keep them full
-  // for everyone: plain-text sign-in POSTs would hold sign-in at 429, and image loads of /get-session
+  // for everyone: plain-text POSTs would hold sign-in at 429, and image loads of /get-session
   // would make the console report the server unreachable. Every real auth call (console, app) is JSON
   // or a GET or bodiless POST without credentials.
   rateLimit: {
@@ -350,10 +360,16 @@ export const auth = betterAuth({
   },
   hooks: {
     // Managing users and signing every device out are for the console: an admin's phone token (stolen
-    // with the phone) must not set a password, impersonate someone, or sign the owner's browsers out,
-    // which would also get it a browser session to mint link codes with.
+    // with the phone) must not impersonate someone (which would get it a browser session to mint link
+    // codes with) or sign the owner's browsers out.
     before: createAuthMiddleware(async (ctx) => {
       if (!ctx.path.startsWith("/admin/") && ctx.path !== "/revoke-sessions") return;
+      // No passwords: an account made with one would only store a hash nobody can use.
+      if (ctx.path === "/admin/create-user" && (ctx.body as { password?: unknown })?.password) {
+        throw new APIError("BAD_REQUEST", {
+          message: "Passwords are off: create the account without one, then link a device.",
+        });
+      }
       // From the request (this runs before the bearer plugin turns a token into a cookie).
       const headers = ctx.request?.headers ?? ctx.headers;
       const session = headers ? await auth.api.getSession({ headers }) : null;

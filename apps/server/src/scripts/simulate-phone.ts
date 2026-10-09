@@ -2,7 +2,11 @@
  * Pretend to be the iOS app: sign in, register a phone, stream synthetic Omi audio over
  * the ingest socket (with a mic-sleep gap and a reconnect + resend), and print acks.
  *
- *   HEARLOOM_EMAIL=... HEARLOOM_PASSWORD=... pnpm --filter @hearloom/server simulate-phone [--seconds 20]
+ *   HEARLOOM_EMAIL=you@example.com pnpm --filter @hearloom/server simulate-phone [--seconds 20]
+ *
+ * Signs in like the app with a "Link device" code it mints for that account (so it needs the server's
+ * database, as `pnpm link-device` does). Each run retires the previous run's sign-in when the simulated
+ * phone registers again.
  */
 import { parseArgs } from "node:util";
 import type { Contract } from "@hearloom/api";
@@ -17,6 +21,9 @@ import {
 import { createORPCClient } from "@orpc/client";
 import { RPCLink } from "@orpc/client/fetch";
 import type { ContractRouterClient } from "@orpc/contract";
+import { auth as betterAuth } from "../auth";
+import { sql } from "../db";
+import { mintLinkCode } from "../link/codes";
 
 const { values } = parseArgs({
   args: Bun.argv.slice(2),
@@ -30,14 +37,17 @@ const { values } = parseArgs({
   },
 });
 const base = values.url!;
-const email = process.env.HEARLOOM_EMAIL;
-const password = process.env.HEARLOOM_PASSWORD;
-if (!email || !password) throw new Error("set HEARLOOM_EMAIL and HEARLOOM_PASSWORD");
+const email = process.env.HEARLOOM_EMAIL?.trim().toLowerCase();
+if (!email) throw new Error("set HEARLOOM_EMAIL");
 
-const signIn = await fetch(`${base}/api/auth/sign-in/email`, {
+const found = await (await betterAuth.$context).internalAdapter.findUserByEmail(email);
+if (!found) throw new Error(`no account for ${email} (pnpm link-device --email ${email} --create)`);
+const { code } = await mintLinkCode(found.user.id, null);
+await sql.end();
+const signIn = await fetch(`${base}/api/auth/link/redeem`, {
   method: "POST",
   headers: { "content-type": "application/json", origin: base },
-  body: JSON.stringify({ email, password }),
+  body: JSON.stringify({ code }),
 });
 const token = signIn.headers.get("set-auth-token");
 if (!signIn.ok || !token)

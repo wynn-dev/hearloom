@@ -49,7 +49,7 @@ const td = "px-3 py-2.5 first:pl-4 last:pr-4";
 
 function revokeCopy(s: DeviceSession): string {
   if (s.current) {
-    return "This browser is signed out now. To sign in again, link it from another signed-in device (or use a password, if you have one).";
+    return "This browser is signed out now. To sign in again, link it from another signed-in device, or with pnpm link-device on the server.";
   }
   if (s.kind === "app") {
     return "The app is signed out immediately and stops uploading until it's linked again. Audio already uploaded is kept; audio not yet sent waits on the phone.";

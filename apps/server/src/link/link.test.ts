@@ -448,7 +448,7 @@ test("an admin's phone token can't use admin endpoints or sign every device out"
   const phoneToken = await link(admin.id, APP_UA);
   const browserToken = await link(admin.id, SAFARI);
   for (const [path, body] of [
-    ["/admin/set-user-password", { userId: admin.id, newPassword: "a-new-password-123" }],
+    ["/admin/set-role", { userId: admin.id, role: "admin" }],
     ["/admin/impersonate-user", { userId: member.id }],
     ["/admin/ban-user", { userId: member.id }],
     ["/revoke-sessions", {}],
@@ -459,9 +459,9 @@ test("an admin's phone token can't use admin endpoints or sign every device out"
   expect((await sessionFor({ authorization: `Bearer ${browserToken}` }))?.user.id).toBe(admin.id);
   // The console can.
   const res = await authCall(
-    "/admin/set-user-password",
+    "/admin/set-role",
     browserToken,
-    { userId: member.id, newPassword: "a-new-password-123" },
+    { userId: member.id, role: "admin" },
     SAFARI,
   );
   expect(res.status).toBe(200);
@@ -562,4 +562,24 @@ test("an expired ban doesn't stop an admin linking that user", async () => {
     userId: member.id,
   });
   expect((await redeem(minted.code)).status).toBe(200);
+});
+
+test("an admin can't create an account with a password", async () => {
+  const admin = await makeUser("admin");
+  const browser = await link(admin.id, SAFARI);
+  const email = `pw-${crypto.randomUUID()}@test.local`;
+  const withPassword = await authCall(
+    "/admin/create-user",
+    browser,
+    { email, name: "pw", password: "a-password-123" },
+    SAFARI,
+  );
+  expect(withPassword.status).toBe(400);
+  const created = await authCall("/admin/create-user", browser, { email, name: "pw" }, SAFARI);
+  expect(created.status).toBe(200);
+  const { user } = (await created.json()) as { user: { id: string } };
+  users.push(user.id);
+  expect(await db.select().from(schema.account).where(eq(schema.account.userId, user.id))).toEqual(
+    [],
+  );
 });

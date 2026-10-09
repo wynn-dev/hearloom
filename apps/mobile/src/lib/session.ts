@@ -64,7 +64,7 @@ export async function storedServerURL(): Promise<string | null> {
   return SecureStore.getItemAsync(KEYS.server, STORE_OPTS);
 }
 
-/** POST JSON to one of the server's auth endpoints, as a sign-in does. */
+/** POST JSON to one of the server's auth endpoints. */
 async function postAuth(serverURL: string, path: string, body: unknown): Promise<Response> {
   try {
     return await fetch(`${serverURL}/api/auth${path}`, {
@@ -82,16 +82,6 @@ function sessionToken(res: Response): string {
   if (!token)
     throw new Error("Server did not return a session token (is the bearer plugin enabled?)");
   return token;
-}
-
-/** Email/password sign-in; returns the bearer session token. */
-export async function signIn(serverURL: string, email: string, password: string): Promise<string> {
-  const res = await postAuth(serverURL, "/sign-in/email", { email, password });
-  if (!res.ok) {
-    const body = (await res.json().catch(() => null)) as { message?: string } | null;
-    throw new Error(body?.message ?? `Sign-in failed (${res.status})`);
-  }
-  return sessionToken(res);
 }
 
 /**

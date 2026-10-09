@@ -12,6 +12,7 @@ import {
 } from "./auth";
 import { env } from "./env";
 import { app } from "./http/app";
+import { generateCode, mintLinkCode } from "./link/codes";
 
 const req = (url: string, headers: Record<string, string> = {}) => new Request(url, { headers });
 
@@ -151,29 +152,27 @@ afterAll(() => {
   setSystemTime();
 });
 
-const SIGN_IN = "/api/auth/sign-in/email";
+/** How devices sign in ("Link device"; there are no passwords). */
+const SIGN_IN = "/api/auth/link/redeem";
 
-/** A sign-in POST with an unknown email. */
+/** A sign-in POST with a code nobody minted. */
 function postSignIn(url: string, headers: Record<string, string>) {
   return app.fetch(
     new Request(url, {
       method: "POST",
       headers: { "content-type": "application/json", ...headers },
-      body: JSON.stringify({
-        email: `nobody-${crypto.randomUUID()}@test.local`,
-        password: "x".repeat(12),
-      }),
+      body: JSON.stringify({ code: generateCode() }),
     }),
   );
 }
 
-/** Moves the clock past the sign-in rate limit's 10 s window, so each check below starts fresh. */
+/** Moves the clock past the rate limit's 10 s window, so each check below starts fresh. */
 function nextRateLimitWindow() {
   setSystemTime(new Date(Date.now() + 11_000));
 }
 
 /**
- * A sign-in that better-auth origin-checks (it does so when cookies are sent), with an unknown email:
+ * A sign-in that better-auth origin-checks (it does so when cookies are sent), with an unknown code:
  * 401 when the origin is trusted, 403 INVALID_ORIGIN when it isn't.
  */
 async function signIn(url: string, headers: Record<string, string>) {
@@ -315,7 +314,7 @@ test("auth trusts other machines on PUBLIC_URL's tailnet, not other tailnets", a
 test("sign-in is rate limited in one bucket for everyone: client IP headers don't split it", async () => {
   nextRateLimitWindow();
   const statuses: number[] = [];
-  for (let i = 1; i <= 5; i++) {
+  for (let i = 1; i <= 102; i++) {
     // A guesser rotating addresses in every header a server might trust.
     const ip = `203.0.113.${i}`;
     const res = await postSignIn(`http://127.0.0.1:3000${SIGN_IN}`, {
@@ -326,7 +325,9 @@ test("sign-in is rate limited in one bucket for everyone: client IP headers don'
     });
     statuses.push(res.status);
   }
-  expect(statuses).toEqual([401, 401, 401, 429, 429]);
+  // 100 per 10 s: 60-bit codes can't be guessed at that rate, and nobody else is locked out for long.
+  expect(statuses.slice(0, 100).every((s) => s === 401)).toBe(true);
+  expect(statuses.slice(100)).toEqual([429, 429]);
   // Open again after the window.
   nextRateLimitWindow();
   expect((await postSignIn(`http://127.0.0.1:3000${SIGN_IN}`, {})).status).toBe(401);
@@ -362,35 +363,29 @@ test("hasSimpleBody / needsPreflight: bodies any page can send vs ones that need
 });
 
 test("requests any page can send don't count toward the shared limits", async () => {
-  const email = `limit-${crypto.randomUUID()}@test.local`;
-  const password = "right-password-123";
   const ctx = await auth.$context;
   const user = await ctx.internalAdapter.createUser(
-    { email, name: "limit", emailVerified: true },
+    { email: `limit-${crypto.randomUUID()}@test.local`, name: "limit", emailVerified: true },
     { method: "admin" },
   );
-  await ctx.internalAdapter.linkAccount({
-    userId: user.id,
-    providerId: "credential",
-    accountId: user.id,
-    password: await ctx.password.hash(password),
-  });
   try {
     nextRateLimitWindow();
     const url = `http://127.0.0.1:3000${SIGN_IN}`;
-    const body = JSON.stringify({ email, password: "wrong" });
-    // What a page elsewhere can send with no-cors: plain-text and form POSTs (refused, even the form
-    // sign-in better-auth would take), POSTs with no body or an untyped one.
-    for (const type of [
-      "text/plain;charset=UTF-8",
-      "application/x-www-form-urlencoded",
-      "multipart/form-data; boundary=x",
-      "text/plain",
-    ]) {
-      const res = await app.fetch(
-        new Request(url, { method: "POST", headers: { "content-type": type }, body }),
-      );
-      expect(res.status).toBe(415);
+    const body = JSON.stringify({ code: generateCode() });
+    // What a page elsewhere can send with no-cors, well past the limit: plain-text and form POSTs
+    // (refused), POSTs with no body or an untyped one.
+    for (let i = 0; i < 30; i++) {
+      for (const type of [
+        "text/plain;charset=UTF-8",
+        "application/x-www-form-urlencoded",
+        "multipart/form-data; boundary=x",
+        "text/plain",
+      ]) {
+        const res = await app.fetch(
+          new Request(url, { method: "POST", headers: { "content-type": type }, body }),
+        );
+        expect(res.status).toBe(415);
+      }
     }
     expect((await app.fetch(new Request(url, { method: "POST" }))).status).not.toBe(429);
     const untyped = new Request(url, { method: "POST", body: new Blob([body]) });
@@ -402,31 +397,68 @@ test("requests any page can send don't count toward the shared limits", async ()
     const session = await app.fetch(new Request("http://127.0.0.1:3000/api/auth/get-session"));
     expect(session.status).toBe(200);
     // The owner still signs in.
+    const { code } = await mintLinkCode(user.id, null);
     const res = await app.fetch(
       new Request(url, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ code }),
       }),
     );
     expect(res.status).toBe(200);
-    // JSON lookalikes better-auth also parses do count: 2 more tries fill the window, then 429.
-    const lookalike = () =>
-      app.fetch(
-        new Request(url, {
-          method: "POST",
-          headers: { "content-type": "application/jsonx" },
-          body: JSON.stringify({ email, password: "wrong-password" }),
-        }),
-      );
-    expect([
-      (await lookalike()).status,
-      (await lookalike()).status,
-      (await lookalike()).status,
-    ]).toEqual([401, 401, 429]);
   } finally {
     await ctx.internalAdapter.deleteUser(user.id);
   }
+});
+
+test("JSON lookalikes better-auth also parses count toward the limit", async () => {
+  nextRateLimitWindow();
+  const statuses: number[] = [];
+  for (let i = 0; i < 101; i++) {
+    const res = await app.fetch(
+      new Request(`http://127.0.0.1:3000${SIGN_IN}`, {
+        method: "POST",
+        headers: { "content-type": "application/jsonx" },
+        body: JSON.stringify({ code: generateCode() }),
+      }),
+    );
+    statuses.push(res.status);
+  }
+  expect(statuses.at(-1)).toBe(429);
+  // Open again after the window (and leave the bucket nearly empty for the tests after this one).
+  nextRateLimitWindow();
+  expect((await postSignIn(`http://127.0.0.1:3000${SIGN_IN}`, {})).status).toBe(401);
+});
+
+test("passwords are off: no password sign-in, sign-up or password changes", async () => {
+  for (const path of [
+    "/sign-in/email",
+    "/sign-up/email",
+    "/change-password",
+    "/verify-password",
+    "/request-password-reset",
+    "/reset-password",
+    "/admin/set-user-password",
+  ]) {
+    nextRateLimitWindow();
+    const res = await app.fetch(
+      new Request(`http://127.0.0.1:3000/api/auth${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email: "x@test.local", password: "x".repeat(12) }),
+      }),
+    );
+    expect(res.status).toBe(404);
+  }
+  // A client from before says why.
+  const old = await app.fetch(
+    new Request("http://127.0.0.1:3000/api/auth/sign-in/email", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "x@test.local", password: "x".repeat(12) }),
+    }),
+  );
+  expect(await old.json()).toMatchObject({ code: "PASSWORDS_OFF" });
 });
 
 test("no CORS preflight is granted, so a page elsewhere can't send X-Forwarded-* to auth", async () => {
